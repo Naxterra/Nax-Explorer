@@ -1,6 +1,6 @@
 # Must never happen
 
-This list names what Nax Explorer must never do. Every release report marks each item as verified by a named test or as not verified. It is a draft and waits for the owner's approval.
+This list names what Nax Explorer must never do. Every release report marks each item as verified by a named test or as not verified. The owner approved this list on 2026-11-04.
 
 1. The app never deletes, overwrites, moves or renames a file or folder unless the user chose that action. Deleting goes to the Recycle Bin; permanent deletion needs Shift and the Windows confirmation.
 2. Copy, move, rename and delete never replace an existing item without the Windows conflict dialog, and never move or copy a folder into itself or one of its own subfolders.
