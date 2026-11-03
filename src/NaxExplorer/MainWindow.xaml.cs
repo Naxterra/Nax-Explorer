@@ -80,6 +80,7 @@ public sealed partial class MainWindow : Window
         RightPane.Initialize(this, settings.Right, null, PathTools.ThisPc);
         _active = LeftPane;
         SetActivePane(LeftPane);
+        UpdateTitle();
         SidebarColumn.Width = new GridLength(Math.Clamp(settings.SidebarWidth, 160, 480));
         PreviewColumn.Width = new GridLength(Math.Clamp(settings.PreviewWidth, 220, 900));
         ApplyLayout();
@@ -331,7 +332,7 @@ public sealed partial class MainWindow : Window
                 Glyph = d.DriveType switch { DriveType.Network => "", DriveType.Removable => "", DriveType.CDRom => "", _ => "" },
                 Label = $"{label} ({d.Name})",
                 Location = d.FullPath,
-                Brush = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                Brush = new SolidColorBrush(Palette.Of(FileCategory.DiskImage, IsDark)),
                 Used = used,
                 UsageBrush = d.Size > 0 ? new SolidColorBrush(Palette.Usage(used)) : null,
                 Detail = d.Size > 0 ? Loc.F("DriveFree", SizeFormat.Format(d.FreeBytes), SizeFormat.Format(d.Size)) : "",
@@ -518,6 +519,7 @@ public sealed partial class MainWindow : Window
         var dialog = new SettingsDialog(Settings, aiSection) { XamlRoot = Root.XamlRoot, RequestedTheme = Root.RequestedTheme };
         await dialog.ShowAsync();
         bool languageChanged = dialog.LanguageChanged;
+        bool themeChanged = dialog.ThemeChanged;
         App.Instance!.SaveSettings();
         ApplyTheme();
         ApplyLayout();
@@ -528,7 +530,7 @@ public sealed partial class MainWindow : Window
             window.BuildSidebar();
             window.UpdateAiCard();
         }
-        if (languageChanged) ShowMessage(Loc.T("LanguageAfterRestart"), InfoBarSeverity.Informational);
+        if (languageChanged || themeChanged) ShowMessage(Loc.T(languageChanged ? "LanguageAfterRestart" : "ThemeAfterRestart"), InfoBarSeverity.Informational);
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e) => OpenSettings(aiSection: false);

@@ -114,6 +114,9 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
+        <!-- The lighter background of the active pane, as a theme resource so it follows a light or dark window. -->
+        <Border x:Name="ActiveBackground" Grid.RowSpan="6" CornerRadius="8" Background="{ThemeResource ActivePaneBackgroundBrush}" Opacity="0" IsHitTestVisible="False" />
+
         <Rectangle x:Name="ActiveBar" Height="3" VerticalAlignment="Top" Fill="{StaticResource NaxGradientBrush}" Opacity="0" RadiusX="2" RadiusY="2" Margin="10,0" />
 
         <TabView x:Name="Tabs" Grid.Row="0" Margin="4,4,4,0" TabWidthMode="SizeToContent" CanReorderTabs="True" CanDragTabs="False"

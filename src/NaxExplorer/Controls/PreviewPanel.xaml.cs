@@ -162,7 +162,7 @@ public sealed partial class PreviewPanel : UserControl
     {
         int row = Details.RowDefinitions.Count;
         Details.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var label = new TextBlock { Text = Loc.T(labelKey), Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorTertiaryBrush"], FontSize = 12 };
+        var label = new TextBlock { Text = Loc.T(labelKey), Style = (Style)Application.Current.Resources["TertiaryTextStyle"], FontSize = 12 };
         var text = new TextBlock { Text = value, TextWrapping = TextWrapping.Wrap, FontSize = 12, IsTextSelectionEnabled = true };
         Grid.SetRow(label, row);
         Grid.SetRow(text, row);

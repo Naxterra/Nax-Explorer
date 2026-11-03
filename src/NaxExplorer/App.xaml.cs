@@ -31,6 +31,10 @@ public partial class App : Application
             CrashLog.Write(exception);
             throw;
         }
+        // The theme is set for the whole app at start. Shared styles resolve their theme colours once, from the app's
+        // theme, so a window that only overrides its own theme would mix dark text colours into a light window.
+        if (Settings.Theme == "light") RequestedTheme = ApplicationTheme.Light;
+        else if (Settings.Theme == "dark") RequestedTheme = ApplicationTheme.Dark;
         UnhandledException += (_, args) =>
         {
             CrashLog.Write(args.Exception);

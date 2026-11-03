@@ -130,6 +130,15 @@ internal static class IndexTests
             Check.That(hits[0].Snippet!.Contains(IndexStore.MarkStart + "tablespace" + IndexStore.MarkEnd), $"snippet not marked: {hits[0].Snippet}");
         });
 
+        yield return ("busy_state_pauses_indexing_only_for_a_window_covering_the_monitor", "Exclusive full screen and presentation mode always pause indexing; the busy state pauses it only when the front window covers its monitor.", () =>
+        {
+            Check.That(SystemActivity.FullScreenPause(3, () => false), "exclusive full screen did not pause");
+            Check.That(SystemActivity.FullScreenPause(4, () => false), "presentation mode did not pause");
+            Check.That(SystemActivity.FullScreenPause(2, () => true), "a borderless full-screen game did not pause");
+            Check.That(!SystemActivity.FullScreenPause(2, () => false), "busy without a full-screen window paused");
+            Check.That(!SystemActivity.FullScreenPause(5, () => true), "the normal state paused");
+        });
+
         yield return ("quick_search_answers_without_loading_the_model", "The first, quick pass of a smart search finds names and words without ever loading the model.", () =>
         {
             using IndexStore store = NewStore(out _);

@@ -246,6 +246,7 @@ internal static class Loc
         ["LanguageGerman"] = ("Deutsch", "Deutsch"),
         ["LanguageAfterRestart"] = ("The new language applies after Nax Explorer is restarted.", "Die neue Sprache gilt nach einem Neustart von Nax Explorer."),
         ["Theme"] = ("Theme", "Design"),
+        ["ThemeAfterRestart"] = ("The new theme applies fully after Nax Explorer is restarted.", "Das neue Design gilt vollständig nach einem Neustart von Nax Explorer."),
         ["ThemeSystem"] = ("Same as Windows", "Wie Windows"),
         ["ThemeLight"] = ("Light", "Hell"),
         ["ThemeDark"] = ("Dark", "Dunkel"),

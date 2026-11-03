@@ -7,6 +7,7 @@ using NaxExplorer.Core;
 using NaxExplorer.Services;
 using NaxExplorer.Shell;
 using Windows.System;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace NaxExplorer.Controls;
 
@@ -119,7 +120,14 @@ public sealed partial class ImageViewer : UserControl
         long size = new FileInfo(path).Exists ? new FileInfo(path).Length : 0;
         InfoText.Text = $"{_index + 1} / {_pictures.Count}   ·   {image.OriginalWidth} × {image.OriginalHeight}   ·   {SizeFormat.Format(size)}";
         _fit = true;
+        // The new picture size takes effect in the next layout pass; fitting before it used the old size, which left a
+        // turned picture unfitted and off centre.
+        Stage.UpdateLayout();
         FitToWindow();
+        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            if (version == _version && _fit) FitToWindow();
+        });
         LoadAhead();
     }
 

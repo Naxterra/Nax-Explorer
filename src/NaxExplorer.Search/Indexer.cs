@@ -59,10 +59,64 @@ public static partial class SystemActivity
 
     public static Reason ShouldPause(bool inFullScreen, bool onBattery)
     {
-        if (inFullScreen && SHQueryUserNotificationState(out int state) == 0 && state is 2 or 3 or 4) return Reason.FullScreen;
+        if (inFullScreen && SHQueryUserNotificationState(out int state) == 0 && FullScreenPause(state, ForegroundCoversMonitor)) return Reason.FullScreen;
         if (onBattery && GetSystemPowerStatus(out PowerStatus power) && power.ACLineStatus == 0) return Reason.Battery;
         return Reason.None;
     }
+
+    /// <summary>
+    /// Whether a notification state means a game or presentation is running. Exclusive full-screen programs (3) and
+    /// presentation mode (4) always pause. "Busy" (2) is also reported for overlays and other states, so it pauses only
+    /// when the window in front really covers its whole monitor, as a borderless full-screen game does.
+    /// </summary>
+    internal static bool FullScreenPause(int state, Func<bool> foregroundCoversMonitor) => state switch
+    {
+        3 or 4 => true,
+        2 => foregroundCoversMonitor(),
+        _ => false,
+    };
+
+    private static bool ForegroundCoversMonitor()
+    {
+        IntPtr window = GetForegroundWindow();
+        if (window == IntPtr.Zero || !GetWindowRect(window, out Rect bounds)) return false;
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (!GetMonitorInfo(MonitorFromWindow(window, 2 /* MONITOR_DEFAULTTONEAREST */), ref info)) return false;
+        Rect monitor = info.Monitor;
+        return bounds.Left <= monitor.Left && bounds.Top <= monitor.Top && bounds.Right >= monitor.Right && bounds.Bottom >= monitor.Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public Rect Monitor;
+        public Rect Work;
+        public uint Flags;
+    }
+
+    [LibraryImport("user32.dll")]
+    private static partial IntPtr GetForegroundWindow();
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetWindowRect(IntPtr window, out Rect rect);
+
+    [LibraryImport("user32.dll")]
+    private static partial IntPtr MonitorFromWindow(IntPtr window, uint flags);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
 
     /// <summary>Lowers the processor, disk and memory priority of the calling thread.</summary>
     public static void EnterBackgroundMode() => SetThreadPriority(GetCurrentThread(), 0x00010000);

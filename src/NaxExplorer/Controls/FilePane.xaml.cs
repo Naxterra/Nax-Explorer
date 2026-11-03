@@ -139,7 +139,7 @@ public sealed partial class FilePane : UserControl
     internal void SetActive(bool active)
     {
         ActiveBar.Opacity = active ? 1 : 0;
-        Root.Background = (Brush)Application.Current.Resources[active ? "ActivePaneBackgroundBrush" : "PaneBackgroundBrush"];
+        ActiveBackground.Opacity = active ? 1 : 0;
     }
 
     internal void FocusList()
@@ -819,12 +819,9 @@ public sealed partial class FilePane : UserControl
         {
             if (part.Length > 0)
             {
+                // Matched words are bold in the snippet's own colour, which follows the theme.
                 var run = new Run { Text = part };
-                if (marked)
-                {
-                    run.FontWeight = FontWeights.SemiBold;
-                    run.Foreground = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-                }
+                if (marked) run.FontWeight = FontWeights.Bold;
                 block.Inlines.Add(run);
             }
             marked = !marked;
@@ -1303,7 +1300,8 @@ public sealed partial class FilePane : UserControl
         }
         menu.Items.Add(new MenuFlyoutSeparator());
         menu.Items.Add(Item("Properties", "", ShowProperties, "Alt+Enter"));
-        menu.Items.Add(Item("MoreOptions", "", ShowNativeMenu, "Shift+F10"));
+        // The Windows menu blocks the window while it is open, so it opens after this menu has closed and gone.
+        menu.Items.Add(Item("MoreOptions", "", () => DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, ShowNativeMenu), "Shift+F10"));
         return menu;
     }
 
@@ -1462,8 +1460,19 @@ public sealed partial class FilePane : UserControl
         BreadcrumbScroller.Visibility = Visibility.Collapsed;
         AddressBox.Visibility = Visibility.Visible;
         AddressBox.Text = PathTools.IsThisPc(_tab.Location) ? "" : _tab.Location;
-        AddressBox.Focus(FocusState.Programmatic);
-        if (AddressBox.FindDescendant<TextBox>() is { } box) box.SelectAll();
+        // The box was collapsed, so its inner text field exists only after a layout pass. The keyboard focus goes
+        // straight into that field; focusing the AutoSuggestBox itself left typing with nowhere to go.
+        AddressBox.UpdateLayout();
+        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            if (AddressBox.FindDescendant<TextBox>() is not { } box)
+            {
+                AddressBox.Focus(FocusState.Keyboard);
+                return;
+            }
+            box.Focus(FocusState.Keyboard);
+            box.SelectAll();
+        });
     }
 
     private void ExitAddressEdit()

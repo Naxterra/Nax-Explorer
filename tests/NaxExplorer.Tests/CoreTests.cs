@@ -156,6 +156,24 @@ internal static class CoreTests
             Check.Equal(TransferProblem.None, TransferCheck.Check([file], folder, move: false));
         });
 
+        yield return ("permanent_delete_never_allows_undo_so_windows_asks_first", "Shift+Delete hands Windows a delete without undo and without suppressed confirmation, so Windows deletes for good only after asking.", () =>
+        {
+            uint flags = OperationFlags.ForDelete(permanently: true);
+            Check.That((flags & OperationFlags.AllowUndo) == 0, "permanent delete allows undo, so it would go to the Recycle Bin");
+            Check.That((flags & OperationFlags.RecycleOnDelete) == 0, "permanent delete asks for the Recycle Bin");
+            Check.That((flags & 0x10 /* FOF_NOCONFIRMATION */) == 0, "the confirmation is suppressed");
+        });
+
+        yield return ("normal_delete_goes_to_the_recycle_bin", "Delete without Shift always goes to the Recycle Bin and can be undone, and copies and renames can be undone too.", () =>
+        {
+            uint flags = OperationFlags.ForDelete(permanently: false);
+            Check.That((flags & OperationFlags.AllowUndo) != 0 && (flags & OperationFlags.RecycleOnDelete) != 0, "delete does not use the Recycle Bin");
+            Check.That((OperationFlags.ForTransfer(false) & OperationFlags.AllowUndo) != 0, "copy cannot be undone");
+            Check.That((OperationFlags.ForTransfer(false) & OperationFlags.RenameOnCollision) == 0, "copies elsewhere rename silently instead of asking");
+            Check.That((OperationFlags.ForTransfer(true) & OperationFlags.RenameOnCollision) != 0, "copies into the same folder ask instead of naming them - Copy");
+            Check.That((OperationFlags.ForRename() & OperationFlags.AllowUndo) != 0, "rename cannot be undone");
+        });
+
         yield return ("damaged_settings_file_gives_default_settings", "A settings file that is not valid JSON never stops the app; the defaults are used.", () =>
         {
             string folder = Fixtures.TempFolder("settings");

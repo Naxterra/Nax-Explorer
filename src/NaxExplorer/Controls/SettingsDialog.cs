@@ -16,6 +16,7 @@ internal sealed partial class SettingsDialog : ContentDialog
 {
     private readonly AppSettings _settings;
     private readonly string _initialLanguage;
+    private readonly string _initialTheme;
     private readonly StackPanel _folders = new() { Spacing = 4 };
     private readonly TextBlock _aiState = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
     private readonly ProgressBar _download = new() { Visibility = Visibility.Collapsed, Maximum = 1 };
@@ -26,10 +27,13 @@ internal sealed partial class SettingsDialog : ContentDialog
 
     public bool LanguageChanged => _settings.Language != _initialLanguage;
 
+    public bool ThemeChanged => _settings.Theme != _initialTheme;
+
     public SettingsDialog(AppSettings settings, bool aiSection)
     {
         _settings = settings;
         _initialLanguage = settings.Language;
+        _initialTheme = settings.Theme;
         Title = Loc.T("Settings");
         CloseButtonText = Loc.T("Close");
         DefaultButton = ContentDialogButton.Close;
@@ -59,7 +63,7 @@ internal sealed partial class SettingsDialog : ContentDialog
         });
         aiHeader.Children.Add(Header("SectionAi"));
         ai.Children.Add(aiHeader);
-        ai.Children.Add(new TextBlock { Text = Loc.T("AiExplain"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"] });
+        ai.Children.Add(new TextBlock { Text = Loc.T("AiExplain"), TextWrapping = TextWrapping.Wrap, FontSize = 12, Style = (Style)Application.Current.Resources["SecondaryTextStyle"] });
         _aiSwitch.Header = Loc.T("AiSwitch");
         _aiSwitch.IsOn = settings.AiSearch;
         _aiSwitch.Toggled += AiSwitch_Toggled;
@@ -107,7 +111,7 @@ internal sealed partial class SettingsDialog : ContentDialog
             Text = Loc.F("AiDataLocation", DataFolders.Root),
             FontSize = 11,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            Style = (Style)Application.Current.Resources["TertiaryTextStyle"],
             IsTextSelectionEnabled = true,
         });
         ai.Children.Add(_aiDetails);
@@ -128,7 +132,7 @@ internal sealed partial class SettingsDialog : ContentDialog
             Text = $"Nax Explorer {typeof(SettingsDialog).Assembly.GetName().Version?.ToString(3)}  ·  © 2026 Naxterra  ·  {Loc.T("LicenseNote")}",
             FontSize = 11,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+            Style = (Style)Application.Current.Resources["TertiaryTextStyle"],
         });
         Content = new ScrollViewer { Content = content, MaxHeight = 640, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Closing += (_, _) => _downloadCts?.Cancel();

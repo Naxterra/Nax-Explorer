@@ -130,12 +130,6 @@ internal static partial class Native
     public const uint SIIGBF_THUMBNAILONLY = 0x8;
     public const uint SIIGBF_SCALEUP = 0x100;
 
-    public const uint FOF_RENAMEONCOLLISION = 0x8;
-    public const uint FOF_ALLOWUNDO = 0x40;
-    public const uint FOF_NOCONFIRMMKDIR = 0x200;
-    public const uint FOFX_SHOWELEVATIONPROMPT = 0x00040000;
-    public const uint FOFX_RECYCLEONDELETE = 0x00080000;
-    public const uint FOFX_ADDUNDORECORD = 0x20000000;
 
     public const uint CMF_NORMAL = 0x0;
     public const uint CMF_EXPLORE = 0x4;

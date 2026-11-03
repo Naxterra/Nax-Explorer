@@ -90,8 +90,8 @@ internal static class ShellActions
         var elsewhere = sources.Except(sameFolder).ToList();
         return RunOnSta(() =>
         {
-            if (elsewhere.Count > 0) Perform(owner, 0, op => Transfer(op, elsewhere, folder, move));
-            if (sameFolder.Count > 0 && !move) Perform(owner, Native.FOF_RENAMEONCOLLISION, op => Transfer(op, sameFolder, folder, move: false));
+            if (elsewhere.Count > 0) Perform(owner, Core.OperationFlags.ForTransfer(renameOnCollision: false), op => Transfer(op, elsewhere, folder, move));
+            if (sameFolder.Count > 0 && !move) Perform(owner, Core.OperationFlags.ForTransfer(renameOnCollision: true), op => Transfer(op, sameFolder, folder, move: false));
         });
     }
 
@@ -114,8 +114,7 @@ internal static class ShellActions
     /// <summary>Deletes to the Recycle Bin, or permanently with <paramref name="permanently"/>, which Windows confirms first.</summary>
     public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently) => RunOnSta(() =>
     {
-        uint flags = permanently ? 0 : Native.FOF_ALLOWUNDO | Native.FOFX_RECYCLEONDELETE;
-        Perform(owner, flags, operation =>
+        Perform(owner, Core.OperationFlags.ForDelete(permanently), operation =>
         {
             using var items = ShellItems.Create(paths);
             return items.Array is null ? -1 : operation.DeleteItems(items.Array);
@@ -124,7 +123,7 @@ internal static class ShellActions
 
     public static Task RenameAsync(string path, string newName, IntPtr owner) => RunOnSta(() =>
     {
-        Perform(owner, 0, operation =>
+        Perform(owner, Core.OperationFlags.ForRename(), operation =>
         {
             Guid riid = Native.IID_IShellItem;
             if (Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref riid, out IShellItem item) != 0) return -1;
@@ -139,13 +138,14 @@ internal static class ShellActions
         });
     });
 
-    private static void Perform(IntPtr owner, uint extraFlags, Func<IFileOperation, int> queue)
+    /// <summary>Runs one operation with exactly the given flags (see <see cref="Core.OperationFlags"/>).</summary>
+    private static void Perform(IntPtr owner, uint flags, Func<IFileOperation, int> queue)
     {
         var operation = (IFileOperation)Activator.CreateInstance(Type.GetTypeFromCLSID(Native.CLSID_FileOperation)!)!;
         try
         {
             operation.SetOwnerWindow(owner);
-            operation.SetOperationFlags(Native.FOF_ALLOWUNDO | Native.FOF_NOCONFIRMMKDIR | Native.FOFX_ADDUNDORECORD | Native.FOFX_SHOWELEVATIONPROMPT | extraFlags);
+            operation.SetOperationFlags(flags);
             if (queue(operation) != 0) return;
             operation.PerformOperations();
         }
