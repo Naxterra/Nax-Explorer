@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>NaxExplorer.Search</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NaxExplorer.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NaxExplorer.Core\NaxExplorer.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Runs the embedding model on the graphics card through DirectML, or on the processor when no suitable card exists. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <!-- Splits text into the SentencePiece tokens the model was trained on. -->
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.1" />
+    <!-- The index: file list, full-text search (FTS5) and the vectors, in one SQLite database. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0-rc.3.26522.148" />
+  </ItemGroup>
+</Project>

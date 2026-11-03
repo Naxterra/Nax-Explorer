@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="NaxExplorer.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:NaxExplorer"
+    xmlns:controls="using:NaxExplorer.Controls"
+    Title="Nax Explorer">
+
+    <Grid x:Name="Root" KeyDown="Root_KeyDown" PreviewKeyDown="Root_PreviewKeyDown">
+        <Grid.Resources>
+            <DataTemplate x:Key="SidebarTemplate" x:DataType="local:SidebarEntry">
+                <Grid ColumnSpacing="10" Padding="0,5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="20" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" Foreground="{x:Bind Brush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind Label}" FontSize="13" TextTrimming="CharacterEllipsis" />
+                        <ProgressBar Visibility="{x:Bind UsageVisibility}" Value="{x:Bind Used}" Maximum="1" Height="4" CornerRadius="2" Foreground="{x:Bind UsageBrush}" />
+                        <TextBlock Visibility="{x:Bind UsageVisibility}" Text="{x:Bind Detail}" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    </StackPanel>
+                </Grid>
+            </DataTemplate>
+        </Grid.Resources>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Title bar -->
+        <Grid x:Name="AppTitleBar" Padding="14,0,150,0" ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Image Source="ms-appx:///Assets/AppIcon-256.png" Width="20" Height="20" VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" VerticalAlignment="Center" FontSize="13" FontWeight="SemiBold">
+                <Run Text="Nax" /><Run Text=" Explorer" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontWeight="Normal" />
+            </TextBlock>
+            <TextBlock x:Name="TitleLocation" Grid.Column="2" VerticalAlignment="Center" FontSize="12" Margin="8,0,0,0"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" />
+        </Grid>
+
+        <!-- Commands -->
+        <Grid Grid.Row="1" Padding="8,0,8,6">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal" Spacing="2">
+                <DropDownButton Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE710;" FontSize="15" Foreground="#3B82F6" />
+                        <TextBlock Text="{local:T Key=New}" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                            <MenuFlyoutItem Text="{local:T Key=NewFolder}" Click="NewFolder_Click" KeyboardAcceleratorTextOverride="Ctrl+Shift+N">
+                                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8F4;" /></MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutItem Text="{local:T Key=NewTextFile}" Click="NewTextFile_Click">
+                                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8A5;" /></MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                            <MenuFlyoutSeparator />
+                            <MenuFlyoutItem Text="{local:T Key=NewWindow}" Click="NewWindow_Click" KeyboardAcceleratorTextOverride="Ctrl+N">
+                                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE78B;" /></MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+                <AppBarSeparator />
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Cut_Click" ToolTipService.ToolTip="{local:T Key=CutTip}">
+                    <FontIcon Glyph="&#xE8C6;" FontSize="15" />
+                </Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Copy_Click" ToolTipService.ToolTip="{local:T Key=CopyTip}">
+                    <FontIcon Glyph="&#xE8C8;" FontSize="15" />
+                </Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Paste_Click" ToolTipService.ToolTip="{local:T Key=PasteTip}">
+                    <FontIcon Glyph="&#xE77F;" FontSize="15" />
+                </Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Rename_Click" ToolTipService.ToolTip="{local:T Key=RenameTip}">
+                    <FontIcon Glyph="&#xE8AC;" FontSize="15" />
+                </Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Delete_Click" ToolTipService.ToolTip="{local:T Key=DeleteTip}">
+                    <FontIcon Glyph="&#xE74D;" FontSize="15" Foreground="#EF4444" />
+                </Button>
+                <AppBarSeparator />
+                <Button x:Name="CopyOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="CopyOther_Click" ToolTipService.ToolTip="{local:T Key=CopyToOtherTip}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xF413;" FontSize="15" Foreground="#10B981" />
+                        <TextBlock Text="{local:T Key=CopyToOtherShort}" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="MoveOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="MoveOther_Click" ToolTipService.ToolTip="{local:T Key=MoveToOtherTip}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8DE;" FontSize="15" Foreground="#F59E0B" />
+                        <TextBlock Text="{local:T Key=MoveToOtherShort}" />
+                    </StackPanel>
+                </Button>
+                <AppBarSeparator />
+                <DropDownButton Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE890;" FontSize="15" Foreground="#8B5CF6" />
+                        <TextBlock Text="{local:T Key=View}" />
+                    </StackPanel>
+                    <DropDownButton.Flyout>
+                        <MenuFlyout x:Name="ViewMenu" Placement="BottomEdgeAlignedLeft" Opening="ViewMenu_Opening">
+                            <RadioMenuFlyoutItem x:Name="ViewDetailsItem" Text="{local:T Key=ViewDetails}" GroupName="view" Click="ViewDetails_Click" KeyboardAcceleratorTextOverride="Ctrl+Shift+6" />
+                            <RadioMenuFlyoutItem x:Name="ViewThumbsItem" Text="{local:T Key=ViewThumbnails}" GroupName="view" Click="ViewThumbs_Click" KeyboardAcceleratorTextOverride="Ctrl+Shift+1" />
+                            <MenuFlyoutSeparator />
+                            <ToggleMenuFlyoutItem x:Name="HiddenItem" Text="{local:T Key=ShowHidden}" Click="Hidden_Click" KeyboardAcceleratorTextOverride="Ctrl+H" />
+                            <ToggleMenuFlyoutItem x:Name="ExtensionsItem" Text="{local:T Key=ShowExtensions}" Click="Extensions_Click" />
+                            <ToggleMenuFlyoutItem x:Name="ColorfulItem" Text="{local:T Key=ColorfulNames}" Click="Colorful_Click" />
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                <ToggleButton x:Name="DualToggle" Click="DualToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" ToolTipService.ToolTip="{local:T Key=DualPaneTip}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE89F;" FontSize="15" />
+                        <TextBlock Text="{local:T Key=DualPane}" />
+                    </StackPanel>
+                </ToggleButton>
+                <ToggleButton x:Name="PreviewToggle" Click="PreviewToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" ToolTipService.ToolTip="{local:T Key=PreviewTip}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8A1;" FontSize="15" />
+                        <TextBlock Text="{local:T Key=Preview}" />
+                    </StackPanel>
+                </ToggleButton>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Settings_Click" ToolTipService.ToolTip="{local:T Key=SettingsTip}">
+                    <FontIcon Glyph="&#xE713;" FontSize="15" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- Sidebar, panes and preview -->
+        <Grid x:Name="Body" Grid.Row="2" Padding="0,0,8,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="SidebarColumn" Width="240" />
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="PreviewGapColumn" Width="6" />
+                <ColumnDefinition x:Name="PreviewColumn" Width="340" />
+            </Grid.ColumnDefinitions>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Padding="0,0,0,8">
+                        <TextBlock Text="{local:T Key=QuickAccess}" Style="{StaticResource SectionHeaderStyle}" Margin="12,4,0,4" />
+                        <ListView x:Name="QuickList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
+                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed" />
+                        <TextBlock x:Name="PinnedHeader" Text="{local:T Key=Pinned}" Style="{StaticResource SectionHeaderStyle}" />
+                        <ListView x:Name="PinnedList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
+                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" RightTapped="PinnedList_RightTapped" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop"
+                                  PointerPressed="Sidebar_PointerPressed" />
+                        <TextBlock Text="{local:T Key=DrivesHeader}" Style="{StaticResource SectionHeaderStyle}" />
+                        <ListView x:Name="DriveList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
+                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- The AI index at a glance. -->
+                <Border x:Name="AiCard" Grid.Row="1" Margin="8,4,4,0" Padding="12,10" CornerRadius="10" BorderThickness="1"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Tapped="AiCard_Tapped">
+                    <Grid RowSpacing="6">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Border Width="24" Height="24" CornerRadius="12" Background="{StaticResource NaxGradientBrush}">
+                                <FontIcon Glyph="&#xE945;" FontSize="12" Foreground="White" />
+                            </Border>
+                            <TextBlock Grid.Column="1" Text="{local:T Key=AiSearch}" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="13" />
+                            <Button x:Name="AiPauseButton" Grid.Column="2" Style="{StaticResource ToolbarButtonStyle}" Padding="6,4" Click="AiPause_Click" Visibility="Collapsed">
+                                <FontIcon x:Name="AiPauseGlyph" Glyph="&#xE769;" FontSize="12" />
+                            </Button>
+                        </Grid>
+                        <TextBlock x:Name="AiStatusText" Grid.Row="1" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ProgressBar x:Name="AiProgress" Grid.Row="2" IsIndeterminate="True" Visibility="Collapsed" />
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <controls:Splitter x:Name="SidebarSplitter" Grid.Column="1" Dragged="SidebarSplitter_Dragged" />
+
+            <Grid x:Name="PaneGrid" Grid.Column="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="LeftColumn" Width="*" />
+                    <ColumnDefinition x:Name="PaneGapColumn" Width="6" />
+                    <ColumnDefinition x:Name="RightColumn" Width="*" />
+                </Grid.ColumnDefinitions>
+                <controls:FilePane x:Name="LeftPane" />
+                <controls:Splitter x:Name="PaneSplitter" Grid.Column="1" Dragged="PaneSplitter_Dragged" />
+                <controls:FilePane x:Name="RightPane" Grid.Column="2" />
+            </Grid>
+
+            <controls:Splitter x:Name="PreviewSplitter" Grid.Column="3" Dragged="PreviewSplitter_Dragged" />
+            <controls:PreviewPanel x:Name="Preview" Grid.Column="4" />
+        </Grid>
+
+        <InfoBar x:Name="Message" Grid.Row="2" VerticalAlignment="Bottom" HorizontalAlignment="Center" MaxWidth="720" Margin="0,0,0,24" IsOpen="False" IsClosable="True" />
+
+        <!-- Below the title bar, whose area belongs to window dragging. -->
+        <controls:ImageViewer x:Name="Viewer" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />
+    </Grid>
+</Window>
