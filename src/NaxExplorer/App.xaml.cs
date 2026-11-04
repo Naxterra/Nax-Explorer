@@ -56,6 +56,7 @@ public partial class App : Application
         {
             OpenWindow(Program.StartPath);
             Search.Start(Settings);
+            Shell.ExplorerIntegration.Repair(Settings);
         }
         catch (Exception exception)
         {
@@ -85,7 +86,7 @@ public partial class App : Application
         string? path = null;
         if (activation.Data is Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs launch)
         {
-            path = StartArguments.PathFrom(StartArguments.Split(launch.Arguments ?? ""));
+            path = StartArguments.LocationFrom(StartArguments.Split(launch.Arguments ?? ""));
         }
         _dispatcher?.SafeEnqueue(() =>
         {

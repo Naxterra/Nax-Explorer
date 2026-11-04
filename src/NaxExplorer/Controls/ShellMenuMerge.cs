@@ -23,12 +23,13 @@ internal static class ShellMenuMerge
 
     /// <summary>
     /// Commands the app's own menu already has, and commands that open Explorer windows. Windows' versions of them are
-    /// left out, so no command appears twice.
+    /// left out, so no command appears twice. The app's own "open in Nax Explorer" verb, which it adds to Explorer's
+    /// menu while it opens folders instead of Explorer, is the same as "open" here.
     /// </summary>
     private static readonly HashSet<string> OwnVerbs = new(StringComparer.OrdinalIgnoreCase)
     {
         "open", "opennew", "explore", "opennewwindow", "opennewprocess", "opennewtab", "cut", "copy", "paste", "delete",
-        "rename", "properties", "copyaspath", "pintohome", "find", "refresh", "undo", "redo",
+        "rename", "properties", "copyaspath", "pintohome", "find", "refresh", "undo", "redo", Core.ExplorerReplacement.Verb,
     };
 
     public static async void Show(
@@ -99,9 +100,12 @@ internal static class ShellMenuMerge
         var shownVerbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         List<MenuFlyoutItemBase> items = Convert(entries, session, owner, shownVerbs);
         if (items.Count == 0) return;
+        // Windows' entries go between the app's commands and Properties, with one line on each side: the line the
+        // app's menu already has above Properties is used, and a new one goes below Windows' entries.
         int at = IndexOf(menu, PropertiesTag);
-        menu.Items.Insert(at++, new MenuFlyoutSeparator());
+        if (at == 0 || menu.Items[at - 1] is not MenuFlyoutSeparator) menu.Items.Insert(at++, new MenuFlyoutSeparator());
         foreach (MenuFlyoutItemBase item in items) menu.Items.Insert(at++, item);
+        if (at < menu.Items.Count) menu.Items.Insert(at, new MenuFlyoutSeparator());
         // Windows' "Open with" (its submenu with the apps, or a single entry) ends in the verb "openas". Only when such
         // an entry is really shown and usable does the app's own "Open with" give way, so the menu never loses it.
         if (shownVerbs.Contains("openas") && menu.Items.FirstOrDefault(i => i.Tag as string == OpenWithTag) is { } ownOpenWith) menu.Items.Remove(ownOpenWith);

@@ -30,9 +30,8 @@ public static class IndexRules
 
     public static bool SkipFile(FileAttributes attributes) =>
         (attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.Temporary)) != 0
-        // Cloud placeholders that are not on the disk would be downloaded just to be read.
-        || (attributes & (FileAttributes)0x00400000 /* FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS */) != 0
-        || (attributes & FileAttributes.Offline) != 0;
+        // Cloud files that are not on the disk would be downloaded just to be read.
+        || CloudFiles.IsOnlineOnly(attributes);
 
     /// <summary>True when the text of the file is read; otherwise only its name is recorded.</summary>
     public static bool ReadsText(string path, long size)
@@ -345,11 +344,19 @@ public sealed class Indexer : IDisposable
                     var watcher = new FileSystemWatcher(root)
                     {
                         IncludeSubdirectories = true,
-                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+                        // Attributes too: a cloud file that the sync app downloads changes only its attributes, and
+                        // becomes readable for the index then.
+                        NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.Attributes,
                         InternalBufferSize = 64 * 1024,
                     };
                     watcher.Created += (_, e) => Changed(e.FullPath);
-                    watcher.Changed += (_, e) => Changed(e.FullPath);
+                    // A folder reports a change when its attributes or its list of files change; new, renamed and
+                    // deleted files report themselves, so walking the whole folder again would only cost time.
+                    // A file whose attributes change costs one look: unchanged size and date end it at once.
+                    watcher.Changed += (_, e) =>
+                    {
+                        if (!Directory.Exists(e.FullPath)) Changed(e.FullPath);
+                    };
                     watcher.Deleted += (_, e) => Changed(e.FullPath);
                     watcher.Renamed += (_, e) =>
                     {

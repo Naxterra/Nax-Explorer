@@ -73,7 +73,8 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchApp}"; Flags: nowait postin
 
 [Code]
 // The app keeps its settings, its crash log, the AI index and the AI model in this folder of the user's local
-// application data. Nothing else of the app lives outside the installation folder.
+// application data. Outside the installation folder there are only these files and, while "open folders in Nax
+// Explorer" is on, its entries under HKEY_CURRENT_USER\Software\Classes, which the uninstall step below removes.
 function DataFolder: String;
 begin
   Result := ExpandConstant('{localappdata}\Nax-Explorer');
@@ -101,15 +102,117 @@ begin
   end;
 end;
 
+const
+  ExplorerVerb = 'openinnaxexplorer';
+  WinEKey = 'Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow';
+
+// Deletes a registry key of the current user when it has neither values nor subkeys left.
+procedure DeleteKeyIfEmpty(const Key: String);
+var
+  Names: TArrayOfString;
+begin
+  if not RegKeyExists(HKCU, Key) then Exit;
+  if RegGetSubkeyNames(HKCU, Key, Names) and (GetArrayLength(Names) > 0) then Exit;
+  if RegGetValueNames(HKCU, Key, Names) and (GetArrayLength(Names) > 0) then Exit;
+  RegDeleteKeyIfEmpty(HKCU, Key);
+end;
+
+// Gives a folder type back to Explorer, the same way the app does when the setting is turned off: the default verb
+// that was there before is put back, and the app's verb is removed.
+procedure ReleaseFolderType(const FolderType: String);
+var
+  Shell, Current, Previous: String;
+begin
+  Shell := 'Software\Classes\' + FolderType + '\shell';
+  if RegQueryStringValue(HKCU, Shell, '', Current) and (Current = ExplorerVerb) then
+  begin
+    if RegQueryStringValue(HKCU, Shell + '\' + ExplorerVerb, 'NaxExplorerPreviousDefault', Previous) then
+      RegWriteStringValue(HKCU, Shell, '', Previous)
+    else
+      RegDeleteValue(HKCU, Shell, '');
+  end;
+  RegDeleteKeyIncludingSubkeys(HKCU, Shell + '\' + ExplorerVerb);
+  DeleteKeyIfEmpty(Shell);
+  DeleteKeyIfEmpty('Software\Classes\' + FolderType);
+end;
+
+// Removes the notes the app keeps on a verb key it took over.
+procedure DeleteNotes(const VerbKey: String);
+begin
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorerPreviousCommand');
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorerPreviousDelegateExecute');
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorerCommand');
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorerCreatedCommand');
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorerFinished');
+  RegDeleteValue(HKCU, VerbKey, 'NaxExplorer');
+end;
+
+// Gives one command the app took over back, the same way the app does when the setting is turned off: a key the app
+// made is removed, a command the app replaced is put back, and a command another program wrote after the app is left
+// alone, so only the app's notes go. Returns True when it removed a key the app made, so empty parent keys can go too.
+function ReleaseCommand(const VerbKey: String): Boolean;
+var
+  Marker, Value, Own, Current: String;
+  StillOwn: Boolean;
+begin
+  Result := False;
+  if not RegQueryStringValue(HKCU, VerbKey, 'NaxExplorer', Marker) then Exit;
+  if not RegQueryStringValue(HKCU, VerbKey, 'NaxExplorerCommand', Own) then Own := '';
+  if not RegQueryStringValue(HKCU, VerbKey + '\command', '', Current) then Current := '';
+  // A build from before the app noted its command wrote only the Win+E command; then a command that runs the app counts.
+  if Own <> '' then
+    StillOwn := Current = Own
+  else
+    StillOwn := Pos('nax-explorer.exe', Lowercase(Current)) > 0;
+  if not StillOwn then
+  begin
+    DeleteNotes(VerbKey);
+    Exit;
+  end;
+  if Marker = 'created' then
+  begin
+    RegDeleteKeyIncludingSubkeys(HKCU, VerbKey);
+    Result := True;
+    Exit;
+  end;
+  if RegQueryStringValue(HKCU, VerbKey, 'NaxExplorerPreviousCommand', Value) then
+    RegWriteStringValue(HKCU, VerbKey + '\command', '', Value)
+  else
+    RegDeleteValue(HKCU, VerbKey + '\command', '');
+  if RegQueryStringValue(HKCU, VerbKey, 'NaxExplorerPreviousDelegateExecute', Value) then
+    RegWriteStringValue(HKCU, VerbKey + '\command', 'DelegateExecute', Value)
+  else
+    RegDeleteValue(HKCU, VerbKey + '\command', 'DelegateExecute');
+  if RegValueExists(HKCU, VerbKey, 'NaxExplorerCreatedCommand') then DeleteKeyIfEmpty(VerbKey + '\command');
+  DeleteNotes(VerbKey);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Size: Int64;
 begin
+  // If the app opened folders instead of Explorer, Explorer gets them back before the app's files are gone.
+  if CurUninstallStep = usUninstall then
+  begin
+    ReleaseFolderType('Directory');
+    ReleaseFolderType('Drive');
+    if ReleaseCommand(WinEKey) then
+    begin
+      DeleteKeyIfEmpty('Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell');
+      DeleteKeyIfEmpty('Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}');
+    end;
+    ReleaseCommand('Software\Classes\Folder\shell\open');
+    ReleaseCommand('Software\Classes\Folder\shell\explore');
+    DeleteKeyIfEmpty('Software\Classes\Folder\shell');
+    DeleteKeyIfEmpty('Software\Classes\Folder');
+    Exit;
+  end;
   if (CurUninstallStep <> usPostUninstall) or not DirExists(DataFolder) then Exit;
   // Settings and the crash log always go.
   DeleteFile(DataFolder + '\settings.json');
   DeleteFile(DataFolder + '\settings.json.tmp');
   DeleteFile(DataFolder + '\crash.log');
+  DeleteFile(DataFolder + '\handoff.txt');
   // The index and the model are large and can be kept for a later installation. A silent uninstall removes them, so
   // nothing is left behind.
   if DirExists(DataFolder + '\index') or DirExists(DataFolder + '\models') then

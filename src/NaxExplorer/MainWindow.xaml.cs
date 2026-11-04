@@ -39,6 +39,9 @@ public sealed class SidebarEntry
 
     /// <summary>Entries that Windows shows in its own Explorer, such as the Recycle Bin.</summary>
     public bool OpensInExplorer { get; init; }
+
+    /// <summary>For quick access entries: the entry as the settings store it, a key such as "::Downloads" or a path.</summary>
+    public string? QuickKey { get; init; }
 }
 
 public sealed partial class MainWindow : Window
@@ -197,7 +200,8 @@ public sealed partial class MainWindow : Window
         if (!dual) LeftColumn.Width = new GridLength(1, GridUnitType.Star);
         if (!dual && _active == RightPane) SetActivePane(LeftPane);
         DualToggle.IsChecked = dual;
-        CopyOtherButton.IsEnabled = MoveOtherButton.IsEnabled = dual;
+        // With one pane, copy and move ask for the folder instead of using the other pane, so they stay available.
+        CopyOtherButton.IsEnabled = MoveOtherButton.IsEnabled = true;
         bool preview = Settings.ShowPreview;
         Preview.Visibility = preview ? Visibility.Visible : Visibility.Collapsed;
         PreviewSplitter.Visibility = preview ? Visibility.Visible : Visibility.Collapsed;
@@ -269,8 +273,15 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneLocationChanged(FilePane pane)
     {
-        if (pane == _active) UpdateTitle();
+        if (pane != _active) return;
+        UpdateTitle();
+        // Another tab or folder in the active pane: the details panel shows that folder now. The address bar reports
+        // the same folder again when its names arrive, which leaves the panel as it is.
+        if (!string.Equals(pane.Folder ?? pane.FolderOrSearchRoot, _previewFolder, StringComparison.OrdinalIgnoreCase)) _previewTimer.Restart();
     }
+
+    /// <summary>The folder the details panel was last filled for.</summary>
+    private string? _previewFolder;
 
     internal void OnPaneSelectionChanged(FilePane pane)
     {
@@ -308,8 +319,8 @@ public sealed partial class MainWindow : Window
     private void UpdatePreview()
     {
         if (!Settings.ShowPreview) return;
-        IReadOnlyList<Models.FileItem> selected = _active.SelectedItems;
-        Preview.Show(selected.Count == 1 ? selected[0] : null, selected.Count, _active.Folder ?? _active.FolderOrSearchRoot);
+        _previewFolder = _active.Folder ?? _active.FolderOrSearchRoot;
+        Preview.Show(_active.SelectedItems, _previewFolder);
     }
 
     internal void ShowViewer(IReadOnlyList<string> pictures, int index, FilePane source)
@@ -334,33 +345,83 @@ public sealed partial class MainWindow : Window
         bool dark = IsDark;
         Brush Color(byte r, byte g, byte b) => new SolidColorBrush(Windows.UI.Color.FromArgb(255, r, g, b));
         string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var quick = new List<SidebarEntry>
+        var specials = new Dictionary<string, SidebarEntry>
         {
-            new() { Glyph = "", Label = Loc.T("Home"), Location = profile, Brush = Color(0x3B, 0x82, 0xF6) },
-            new() { Glyph = "", Label = Loc.T("Desktop"), Location = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Brush = Color(0x06, 0xB6, 0xD4) },
-            new() { Glyph = "", Label = Loc.T("Downloads"), Location = Path.Combine(profile, "Downloads"), Brush = Color(0x10, 0xB9, 0x81) },
-            new() { Glyph = "", Label = Loc.T("Documents"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), Brush = Color(0x63, 0x66, 0xF1) },
-            new() { Glyph = "", Label = Loc.T("Pictures"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), Brush = Color(0xEC, 0x48, 0x99) },
-            new() { Glyph = "", Label = Loc.T("Music"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), Brush = Color(0xF5, 0x9E, 0x0B) },
-            new() { Glyph = "", Label = Loc.T("Videos"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), Brush = Color(0x8B, 0x5C, 0xF6) },
-            new() { Glyph = "", Label = Loc.T("RecycleBin"), Location = "shell:RecycleBinFolder", Brush = Color(0x94, 0xA3, 0xB8), OpensInExplorer = true },
+            [QuickAccessList.Home] = new() { QuickKey = QuickAccessList.Home, Glyph = "", Label = Loc.T("Home"), Location = profile, Brush = Color(0x3B, 0x82, 0xF6) },
+            [QuickAccessList.Desktop] = new() { QuickKey = QuickAccessList.Desktop, Glyph = "", Label = Loc.T("Desktop"), Location = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Brush = Color(0x06, 0xB6, 0xD4) },
+            [QuickAccessList.Downloads] = new() { QuickKey = QuickAccessList.Downloads, Glyph = "", Label = Loc.T("Downloads"), Location = Path.Combine(profile, "Downloads"), Brush = Color(0x10, 0xB9, 0x81) },
+            [QuickAccessList.Documents] = new() { QuickKey = QuickAccessList.Documents, Glyph = "", Label = Loc.T("Documents"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), Brush = Color(0x63, 0x66, 0xF1) },
+            [QuickAccessList.Pictures] = new() { QuickKey = QuickAccessList.Pictures, Glyph = "", Label = Loc.T("Pictures"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), Brush = Color(0xEC, 0x48, 0x99) },
+            [QuickAccessList.Music] = new() { QuickKey = QuickAccessList.Music, Glyph = "", Label = Loc.T("Music"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), Brush = Color(0xF5, 0x9E, 0x0B) },
+            [QuickAccessList.Videos] = new() { QuickKey = QuickAccessList.Videos, Glyph = "", Label = Loc.T("Videos"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), Brush = Color(0x8B, 0x5C, 0xF6) },
+            [QuickAccessList.RecycleBin] = new() { QuickKey = QuickAccessList.RecycleBin, Glyph = "", Label = Loc.T("RecycleBin"), Location = "shell:RecycleBinFolder", Brush = Color(0x94, 0xA3, 0xB8), OpensInExplorer = true },
         };
-        QuickList.ItemsSource = quick.Where(e => e.OpensInExplorer || Directory.Exists(e.Location)).ToList();
         Brush folderBrush = new SolidColorBrush(Palette.Of(FileCategory.Folder, dark));
-        // The stored names show at once; Windows is asked in the background, because a pinned share that does not
-        // answer can take seconds and must not freeze the window.
-        List<SidebarEntry> pinned = Settings.Pinned.Select(p => new SidebarEntry { Glyph ="", Label = ShellNames.Known(p), Location = p, Brush = folderBrush }).ToList();
-        PinnedList.ItemsSource = pinned;
-        PinnedHeader.Visibility = PinnedList.Visibility = Settings.Pinned.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (pinned.Count > 0) _ = NamePinnedAsync(pinned);
+        var quick = new List<SidebarEntry>();
+        foreach (string key in QuickAccessList.Current(Settings))
+        {
+            if (specials.TryGetValue(key, out SidebarEntry? special))
+            {
+                if (special.OpensInExplorer || Directory.Exists(special.Location)) quick.Add(special);
+                continue;
+            }
+            // The stored name shows at once; Windows is asked in the background, because a folder on a share that does
+            // not answer can take seconds and must not freeze the window.
+            quick.Add(new SidebarEntry { Glyph = "", Label = ShellNames.Known(key), Location = key, Brush = folderBrush, QuickKey = key });
+        }
+        QuickList.ItemsSource = quick;
+        if (quick.Any(e => !QuickAccessList.IsKey(e.QuickKey!))) _ = NameQuickFoldersAsync(quick);
+        _ = LoadCloudAsync();
         _ = LoadDrivesAsync();
     }
 
-    private async Task NamePinnedAsync(List<SidebarEntry> pinned)
+    private async Task NameQuickFoldersAsync(List<SidebarEntry> quick)
     {
-        string[] names = await Task.Run(() => pinned.Select(e => ShellNames.OfFolder(e.Location)).ToArray());
-        if (!ReferenceEquals(PinnedList.ItemsSource, pinned) || pinned.Select(e => e.Label).SequenceEqual(names)) return;
-        PinnedList.ItemsSource = pinned.Select((e, i) => new SidebarEntry { Glyph = e.Glyph, Label = names[i], Location = e.Location, Brush = e.Brush }).ToList();
+        string[] names = await Task.Run(() => quick.Select(e => QuickAccessList.IsKey(e.QuickKey!) ? e.Label : ShellNames.OfFolder(e.Location)).ToArray());
+        if (!ReferenceEquals(QuickList.ItemsSource, quick) || quick.Select(e => e.Label).SequenceEqual(names)) return;
+        QuickList.ItemsSource = quick.Select((e, i) => e.QuickKey is { } key && QuickAccessList.IsKey(key) ? e
+            : new SidebarEntry { Glyph = e.Glyph, Label = names[i], Location = e.Location, Brush = e.Brush, QuickKey = e.QuickKey }).ToList();
+    }
+
+    /// <summary>
+    /// Shows the folders of cloud sync apps, such as Nextcloud, OneDrive or Proton Drive, in their own section. Drives
+    /// are asked in the background to find Google Drive; the result is shared with the lists for the status marks.
+    /// </summary>
+    private async Task LoadCloudAsync()
+    {
+        ShowCloud(CloudRoots.Folders);
+        List<CloudFolder> found = await Task.Run(() => CloudFolders.Find(withDrives: true));
+        CloudRoots.Set(found);
+        ShowCloud(found);
+    }
+
+    private void ShowCloud(IReadOnlyList<CloudFolder> folders)
+    {
+        CloudList.ItemsSource = folders.Select(f => new SidebarEntry
+        {
+            Glyph = "",
+            Label = f.Name,
+            Location = f.Path,
+            Brush = new SolidColorBrush(ProviderColor(f.Provider)),
+        }).ToList();
+        CloudHeader.Visibility = CloudList.Visibility = folders.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The colour each cloud app is known by, so its entry is found at a glance.</summary>
+    private static Windows.UI.Color ProviderColor(string provider)
+    {
+        string id = provider.ToLowerInvariant();
+        (byte r, byte g, byte b) = id switch
+        {
+            _ when id.StartsWith("nextcloud") => ((byte)0x00, (byte)0x82, (byte)0xC9),
+            _ when id.StartsWith("onedrive") => ((byte)0x00, (byte)0x78, (byte)0xD4),
+            _ when id.StartsWith("dropbox") => ((byte)0x00, (byte)0x61, (byte)0xFF),
+            _ when id.StartsWith("proton") => ((byte)0x6D, (byte)0x4A, (byte)0xFF),
+            _ when id.StartsWith("google") || id.StartsWith("drivefs") => ((byte)0x34, (byte)0xA8, (byte)0x53),
+            _ when id.StartsWith("icloud") => ((byte)0x36, (byte)0x93, (byte)0xF3),
+            _ => ((byte)0x38, (byte)0xBD, (byte)0xF8),
+        };
+        return Windows.UI.Color.FromArgb(255, r, g, b);
     }
 
     private async Task LoadDrivesAsync()
@@ -405,30 +466,35 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void PinnedList_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    /// <summary>The quick access menu: open in a new tab, move up or down, remove, or bring back the list as it came.</summary>
+    private void QuickList_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
-        if ((e.OriginalSource as FrameworkElement)?.DataContext is not SidebarEntry entry) return;
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is not SidebarEntry { QuickKey: { } key } entry) return;
         var menu = new MenuFlyout();
-        var unpin = new MenuFlyoutItem { Text = Loc.T("Unpin"), Icon = new FontIcon { Glyph = "" } };
-        unpin.Click += (_, _) =>
+        MenuFlyoutItem Command(string text, string glyph, Action action)
         {
-            Settings.Pinned.RemoveAll(p => PathTools.SameLocation(p, entry.Location));
-            App.Instance!.SaveSettings();
-            foreach (MainWindow window in App.Instance.Windows) window.BuildSidebar();
-        };
-        var newTab = new MenuFlyoutItem { Text = Loc.T("OpenInNewTab"), Icon = new FontIcon { Glyph = "" } };
-        newTab.Click += (_, _) => _active.OpenTab(entry.Location);
-        menu.Items.Add(newTab);
-        menu.Items.Add(unpin);
+            var item = new MenuFlyoutItem { Text = Loc.T(text), Icon = new FontIcon { Glyph = glyph } };
+            item.Click += (_, _) => action();
+            return item;
+        }
+        if (!entry.OpensInExplorer) menu.Items.Add(Command("OpenInNewTab", "", () => _active.OpenTab(entry.Location)));
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(Command("MoveUp", "", () => ChangeQuickAccess(settings => QuickAccessList.Move(settings, key, -1))));
+        menu.Items.Add(Command("MoveDown", "", () => ChangeQuickAccess(settings => QuickAccessList.Move(settings, key, 1))));
+        menu.Items.Add(Command("Unpin", "", () => ChangeQuickAccess(settings => QuickAccessList.Remove(settings, key))));
+        menu.Items.Add(new MenuFlyoutSeparator());
+        menu.Items.Add(Command("QuickAccessReset", "", () => ChangeQuickAccess(QuickAccessList.Reset)));
         menu.ShowAt((FrameworkElement)e.OriginalSource);
         e.Handled = true;
     }
 
-    internal void Pin(string folder)
+    internal void Pin(string folder) => ChangeQuickAccess(settings => QuickAccessList.Add(settings, folder));
+
+    /// <summary>Changes the quick access list, saves it and shows it in every window.</summary>
+    private static void ChangeQuickAccess(Action<AppSettings> change)
     {
-        if (Settings.Pinned.Any(p => PathTools.SameLocation(p, folder))) return;
-        Settings.Pinned.Add(folder);
-        App.Instance!.SaveSettings();
+        change(App.Instance!.Settings);
+        App.Instance.SaveSettings();
         foreach (MainWindow window in App.Instance.Windows) window.BuildSidebar();
     }
 
@@ -553,6 +619,32 @@ public sealed partial class MainWindow : Window
         App.Instance!.SaveSettings();
         App.Instance.Search.Apply(Settings, restart: false);
         ShowMessage(Loc.F("AddedToIndex", folder), InfoBarSeverity.Success);
+    }
+
+    /// <summary>
+    /// Asks in the app's own window where "Copy to" or "Move to" should go when only one pane is open. Returns the
+    /// chosen folder, or null when the user cancelled or the window could not open.
+    /// </summary>
+    internal async Task<string?> ChooseFolderAsync(bool move, IReadOnlyList<string> paths, string? paneFolder)
+    {
+        IEnumerable<SidebarEntry> places = new[] { QuickList, CloudList, DriveList }
+            .SelectMany(list => list.ItemsSource as IEnumerable<SidebarEntry> ?? []);
+        try
+        {
+            var dialog = new FolderChooser(move, paths, paneFolder, places.ToList(), new ListingOptions(Settings.ShowHidden, Settings.ShowProtectedFiles), IsDark)
+            {
+                XamlRoot = Root.XamlRoot,
+                RequestedTheme = Root.RequestedTheme,
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary ? dialog.Chosen : null;
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or ArgumentException)
+        {
+            // Another dialog is already open, or the window is closing.
+            CrashLog.Write(ex);
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+            return null;
+        }
     }
 
     // ---------------------------------------------------------------- settings

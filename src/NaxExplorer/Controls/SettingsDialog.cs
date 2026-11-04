@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Media;
 using NaxExplorer.Core;
 using NaxExplorer.Search;
 using NaxExplorer.Services;
+using NaxExplorer.Shell;
 using Microsoft.Windows.Storage.Pickers;
 
 namespace NaxExplorer.Controls;
@@ -53,6 +54,30 @@ internal sealed partial class SettingsDialog : ContentDialog
         general.Children.Add(Switch("ShowExtensions", settings.ShowExtensions, on => settings.ShowExtensions = on));
         general.Children.Add(Switch("ColorfulNames", settings.ColorfulNames, on => settings.ColorfulNames = on));
         general.Children.Add(Switch("OpenPicturesInViewer", settings.OpenImagesInViewer, on => settings.OpenImagesInViewer = on));
+        ToggleSwitch replace = null!;
+        bool reverting = false;
+        replace = Switch("ReplaceExplorer", settings.ReplaceExplorer, on =>
+        {
+            if (reverting) return;
+            if (ExplorerIntegration.Apply(on))
+            {
+                settings.ReplaceExplorer = on;
+                return;
+            }
+            // Windows refused the change, so the switch goes back and never shows a state that is not true.
+            reverting = true;
+            replace.IsOn = !on;
+            reverting = false;
+        });
+        general.Children.Add(replace);
+        general.Children.Add(new TextBlock
+        {
+            Text = Loc.T("ReplaceExplorerNote"),
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 12,
+            Style = (Style)Application.Current.Resources["TertiaryTextStyle"],
+            Margin = new Thickness(0, -6, 0, 0),
+        });
 
         var ai = new StackPanel { Spacing = 12 };
         var aiHeader = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };

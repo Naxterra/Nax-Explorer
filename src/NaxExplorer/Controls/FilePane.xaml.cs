@@ -397,20 +397,29 @@ public sealed partial class FilePane : UserControl
         string location = _tab.Location;
         List<Core.PathSegment> segments = PathTools.Segments(location, Loc.T("ThisPC"));
         Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
+        Microsoft.UI.Dispatching.DispatcherQueue queue = DispatcherQueue;
         Task.Run(() =>
         {
-            // The folder names come first, so a slow network drive never holds them back. Then the drive's own name:
-            // a drive in this PC is asked every time, a network drive only until its name is known.
-            foreach (Core.PathSegment segment in segments.Skip(2)) ShellNames.OfFolder(segment.Location);
+            // The folder names are shown as soon as they are known, so a drive that answers slowly never holds them
+            // back. Then comes the drive's own name: a drive in this PC is asked every time, a network drive only until
+            // its name is known, and the bar is drawn once more when it arrives.
+            if (segments.Count > 2)
+            {
+                foreach (Core.PathSegment segment in segments.Skip(2)) ShellNames.OfFolder(segment.Location);
+                queue.SafeEnqueue(() => RedrawCrumbs(location, segments));
+            }
             if (segments.Count > 1) ShellNames.OfDrive(segments[1].Location);
-        }).ContinueWith(_ => DispatcherQueue.SafeEnqueue(() =>
-        {
-            if (!PathTools.SameLocation(location, _tab.Location)) return;
-            Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
-            UpdateTabHeader();
-            _owner.OnPaneLocationChanged(this);
-            DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => BreadcrumbScroller.ChangeView(BreadcrumbScroller.ScrollableWidth, null, null, true));
-        }), TaskScheduler.Default);
+        }).ContinueWith(_ => queue.SafeEnqueue(() => RedrawCrumbs(location, segments)), TaskScheduler.Default);
+    }
+
+    /// <summary>Draws the address bar, tab header and title again with the names known now, if the pane is still there.</summary>
+    private void RedrawCrumbs(string location, List<Core.PathSegment> segments)
+    {
+        if (!PathTools.SameLocation(location, _tab.Location)) return;
+        Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
+        UpdateTabHeader();
+        _owner.OnPaneLocationChanged(this);
+        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => BreadcrumbScroller.ChangeView(BreadcrumbScroller.ScrollableWidth, null, null, true));
     }
 
     private void UpdateChrome()
@@ -499,7 +508,7 @@ public sealed partial class FilePane : UserControl
     private void ApplyFilter(IReadOnlyList<string>? select)
     {
         IEnumerable<FileItem> visible = _filter.Length == 0 ? _all : _all.Where(i => Matches(i.Entry));
-        _items = new ObservableCollection<FileItem>(visible);
+        _items = new ObservableCollection<FileItem>(SearchOrder(visible));
         BindList();
         if (select is { Count: > 0 }) Select(select);
         UpdateEmpty();
@@ -518,7 +527,7 @@ public sealed partial class FilePane : UserControl
         CurrentList.ItemsSource = _items;
     }
 
-    private void Select(IReadOnlyList<string> paths)
+    private void Select(IReadOnlyList<string> paths, bool scroll = true)
     {
         ListViewBase list = CurrentList;
         var wanted = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
@@ -529,7 +538,7 @@ public sealed partial class FilePane : UserControl
             first ??= item;
             list.SelectedItems.Add(item);
         }
-        if (first is not null) list.ScrollIntoView(first, ScrollIntoViewAlignment.Default);
+        if (scroll && first is not null) list.ScrollIntoView(first, ScrollIntoViewAlignment.Default);
     }
 
     private void ShowEmpty(string glyph, string text)
@@ -746,28 +755,81 @@ public sealed partial class FilePane : UserControl
     private void Header_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: string tag } || !Enum.TryParse(tag, out SortColumn column)) return;
-        SetSort(column, column == _tab.Sort ? !_tab.Descending : column is SortColumn.Modified or SortColumn.Size);
+        (SortColumn? current, bool descending) = CurrentSort;
+        SetSort(column, column == current ? !descending : column is SortColumn.Modified or SortColumn.Size);
     }
+
+    /// <summary>The order the list shows: the folder's own, or the search's, where null means the order found.</summary>
+    private (SortColumn? Column, bool Descending) CurrentSort =>
+        _tab.Search is { } search ? (search.Sort, search.Descending) : (_tab.Sort, _tab.Descending);
 
     internal void SetSort(SortColumn column, bool descending)
     {
+        if (_tab.Search is { } search)
+        {
+            // Search results have their own order, so the folder keeps its sort when the search is closed.
+            search.Sort = column;
+            search.Descending = descending;
+            UpdateHeaders();
+            ShowSearchOrder();
+            return;
+        }
         _tab.Sort = column;
         _tab.Descending = descending;
         UpdateHeaders();
-        if (_tab.Search is not null) return;
         IReadOnlyList<string> selection = SelectedPaths.ToList();
         ShowEntries(selection);
     }
 
+    /// <summary>Puts search results back in the order they were found: by relevance for the smart search.</summary>
+    private void SetFoundOrder()
+    {
+        if (_tab.Search is not { } search) return;
+        search.Sort = null;
+        UpdateHeaders();
+        ShowSearchOrder();
+    }
+
+    /// <summary>
+    /// Shows the search results again in the current order. With <paramref name="keepPlace"/>, used when the last hits
+    /// of a search come in all at once, the list stays where the user had scrolled and keeps the keyboard focus.
+    /// </summary>
+    private void ShowSearchOrder(bool keepPlace = false)
+    {
+        IReadOnlyList<string> selection = SelectedPaths.ToList();
+        ListViewBase list = CurrentList;
+        ScrollViewer? viewer = keepPlace ? list.FindDescendant<ScrollViewer>() : null;
+        double offset = viewer?.VerticalOffset ?? 0;
+        bool focused = keepPlace && IsInside(FocusManager.GetFocusedElement(XamlRoot) as DependencyObject, list);
+        _items = new ObservableCollection<FileItem>(SearchOrder(_all));
+        BindList();
+        if (selection.Count > 0) Select(selection, scroll: !keepPlace);
+        if (viewer is not null) DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => viewer.ChangeView(null, offset, null, true));
+        if (focused) FocusListSoon();
+        UpdateStatus();
+    }
+
+    private static bool IsInside(DependencyObject? element, DependencyObject container)
+    {
+        for (DependencyObject? current = element; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (ReferenceEquals(current, container)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Search results in the chosen column's order, or as found while no column is chosen.</summary>
+    private IEnumerable<FileItem> SearchOrder(IEnumerable<FileItem> items) =>
+        _tab.Search is { } search ? EntrySorter.Order(items, i => i.Entry, search.Sort, search.Descending) : items;
+
     private void UpdateHeaders()
     {
-        string Mark(SortColumn column) => column == _tab.Sort ? (_tab.Descending ? "  ↓" : "  ↑") : "";
+        (SortColumn? sorted, bool descending) = CurrentSort;
+        string Mark(SortColumn column) => column == sorted ? (descending ? "  ↓" : "  ↑") : "";
         NameHeader.Content = Loc.T("ColumnName") + Mark(SortColumn.Name);
         DateHeader.Content = Loc.T("ColumnModified") + Mark(SortColumn.Modified);
         TypeHeader.Content = Loc.T("ColumnType") + Mark(SortColumn.Type);
         SizeHeader.Content = Loc.T("ColumnSize") + Mark(SortColumn.Size);
-        bool search = _tab.Search is not null;
-        NameHeader.IsEnabled = DateHeader.IsEnabled = SizeHeader.IsEnabled = !search;
         ApplyHeaderColumns();
     }
 
@@ -1058,7 +1120,13 @@ public sealed partial class FilePane : UserControl
         FilePane? other = _owner.OtherPane(this);
         IReadOnlyList<string> paths = SelectedPaths;
         if (paths.Count == 0) return;
-        if (other?.Folder is not { } target)
+        if (other is null)
+        {
+            // With one pane there is no other pane to go to, so the user picks the folder in the app's own chooser.
+            if (await _owner.ChooseFolderAsync(move, paths, Folder) is { } chosen) await CheckedTransfer(paths, chosen, move);
+            return;
+        }
+        if (other.Folder is not { } target)
         {
             _owner.ShowMessage(Loc.T("OtherPaneNoFolder"), InfoBarSeverity.Warning);
             return;
@@ -1370,9 +1438,11 @@ public sealed partial class FilePane : UserControl
         if (!drive)
         {
             menu.Items.Add(new MenuFlyoutSeparator());
-            bool otherFolder = _owner.OtherPane(this)?.Folder is not null;
-            menu.Items.Add(Item("CopyToOther", "", () => TransferToOtherPane(move: false), "F7", otherFolder));
-            menu.Items.Add(Item("MoveToOther", "", () => TransferToOtherPane(move: true), "F8", otherFolder));
+            // With one pane the commands ask for the folder, so they are always there; with two they need a folder in the other.
+            bool otherFolder = _owner.OtherPane(this) is not { } otherPane || otherPane.Folder is not null;
+            bool onePane = _owner.OtherPane(this) is null;
+            menu.Items.Add(Item(onePane ? "CopyToFolder" : "CopyToOther","", () => TransferToOtherPane(move: false), "F7", otherFolder));
+            menu.Items.Add(Item(onePane ? "MoveToFolder" : "MoveToOther","", () => TransferToOtherPane(move: true), "F8", otherFolder));
             menu.Items.Add(new MenuFlyoutSeparator());
             menu.Items.Add(Item("Rename", "", BeginRename, "F2", !several));
             menu.Items.Add(Item("Delete", "", () => Delete(permanently: false), "Del"));
@@ -1402,20 +1472,30 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item("Paste", "", () => Paste(), "Ctrl+V", FileClipboard.HasFiles));
             menu.Items.Add(new MenuFlyoutSeparator());
         }
+        (SortColumn? sortedBy, bool sortedDown) = CurrentSort;
+        var sortMenu = new MenuFlyoutSubItem { Text = Loc.T("SortBy"), Icon = new FontIcon { Glyph = "" } };
+        if (_tab.Search is { } search)
+        {
+            // Search results start in the order found, which is the relevance for the smart search, and can return to it.
+            var found = new RadioMenuFlyoutItem { Text = Loc.T(search.Smart ? "SortRelevance" : "SortFoundOrder"), GroupName = "sort", IsChecked = sortedBy is null };
+            found.Click += (_, _) => SetFoundOrder();
+            sortMenu.Items.Add(found);
+        }
+        foreach (SortColumn column in Enum.GetValues<SortColumn>())
+        {
+            // Search results have no type column, so sorting by type would give an order nobody can see.
+            if (_tab.Search is not null && column == SortColumn.Type) continue;
+            var option = new RadioMenuFlyoutItem { Text = Loc.T("Column" + column), GroupName = "sort", IsChecked = sortedBy == column };
+            option.Click += (_, _) => SetSort(column, sortedDown);
+            sortMenu.Items.Add(option);
+        }
+        sortMenu.Items.Add(new MenuFlyoutSeparator());
+        var down = new ToggleMenuFlyoutItem { Text = Loc.T("Descending"), IsChecked = sortedDown, IsEnabled = sortedBy is not null };
+        down.Click += (_, _) => SetSort(sortedBy ?? SortColumn.Name, !sortedDown);
+        sortMenu.Items.Add(down);
+        menu.Items.Add(sortMenu);
         if (_tab.Search is null)
         {
-            var sort = new MenuFlyoutSubItem { Text = Loc.T("SortBy"), Icon = new FontIcon { Glyph = "" } };
-            foreach (SortColumn column in Enum.GetValues<SortColumn>())
-            {
-                var option = new RadioMenuFlyoutItem { Text = Loc.T("Column" + column), GroupName = "sort", IsChecked = _tab.Sort == column };
-                option.Click += (_, _) => SetSort(column, _tab.Descending);
-                sort.Items.Add(option);
-            }
-            sort.Items.Add(new MenuFlyoutSeparator());
-            var descending = new ToggleMenuFlyoutItem { Text = Loc.T("Descending"), IsChecked = _tab.Descending };
-            descending.Click += (_, _) => SetSort(_tab.Sort, !_tab.Descending);
-            sort.Items.Add(descending);
-            menu.Items.Add(sort);
             var view = new MenuFlyoutSubItem { Text = Loc.T("View"), Icon = new FontIcon { Glyph = "" } };
             var details = new RadioMenuFlyoutItem { Text = Loc.T("ViewDetails"), GroupName = "view", IsChecked = _tab.View != "thumbnails" };
             details.Click += (_, _) => SetView("details");
@@ -1729,7 +1809,13 @@ public sealed partial class FilePane : UserControl
 
     private void CloseSearch_Click(object sender, RoutedEventArgs e) => CloseSearch();
 
-    private void StopSearch_Click(object sender, RoutedEventArgs e) => CancelSearch();
+    private void StopSearch_Click(object sender, RoutedEventArgs e)
+    {
+        // A stopped exact search ends its walk at once; then every hit it found is shown and it ends with "stopped".
+        // The smart search just ends.
+        if (_tab.Search is { Smart: false } && _searchCts is { } running) running.Cancel();
+        else CancelSearch();
+    }
 
     private async void SmartToggle_Click(object sender, RoutedEventArgs e)
     {
@@ -1853,7 +1939,7 @@ public sealed partial class FilePane : UserControl
             Match = f.Hit.Kinds,
             FolderText = f.Folder,
         }).ToList();
-        _items = new ObservableCollection<FileItem>(_all);
+        _items = new ObservableCollection<FileItem>(SearchOrder(_all));
         BindList();
         if (_items.Count > 0) EmptyPanel.Visibility = Visibility.Collapsed;
         UpdateStatus();
@@ -1885,27 +1971,25 @@ public sealed partial class FilePane : UserControl
         {
         }
         if (tab != _tab || _searchCts != cts) return;
-        FlushHits();
-        FinishSearch(cts, null);
+        // The walk is over, because it was done, stopped or reached the hit limit. Whether it was stopped is read now,
+        // so a search that completed is never reported as stopped.
+        ShowRestAndFinish(cts, stopped: cts.IsCancellationRequested);
     }
 
-    /// <summary>Moves found items from the search threads into the list, a batch at a time.</summary>
+    /// <summary>How many hits go into the list per tick while a search runs: fewer when each one is inserted at its sorted place.</summary>
+    private int FlushLimit => _tab.Search is { Sort: not null } ? 250 : 3000;
+
+    /// <summary>
+    /// Moves found items from the search threads into the list while the search runs, a batch at a time, keeping the
+    /// same list so the scroll position, selection and keyboard focus stay. In the order found, hits are added at the
+    /// end; with a column chosen, each is inserted at its place, which moves the rows after it, so fewer go in a tick.
+    /// </summary>
     private void FlushHits()
     {
         ItemStyle style = RowStyle;
-        int added = 0;
-        while (added < 3000 && _pendingHits.TryDequeue(out SearchHit? hit))
-        {
-            var item = new FileItem(hit.Entry, style)
-            {
-                Snippet = hit.Snippet,
-                Match = (hit.NameMatched ? MatchKind.Name : MatchKind.None) | (hit.ContentMatched ? MatchKind.Words : MatchKind.None),
-                FolderText = ShownFolder(hit.Entry.FullPath, ask: false),
-            };
-            _all.Add(item);
-            _items.Add(item);
-            added++;
-        }
+        var batch = new List<FileItem>();
+        while (batch.Count < FlushLimit && _pendingHits.TryDequeue(out SearchHit? hit)) batch.Add(HitItem(hit, style));
+        AddHits(batch);
         if (_counters is { } counters && _searchCts is not null)
         {
             SearchStatus.Text = Loc.F("SearchProgress", counters.Files.ToString("N0"), counters.Hits.ToString("N0"));
@@ -1914,15 +1998,58 @@ public sealed partial class FilePane : UserControl
         UpdateStatus();
     }
 
-    private void FinishSearch(CancellationTokenSource cts, string? note)
+    /// <summary>
+    /// Ends a live search whose walk is over: every hit still waiting goes into the list at once, so nothing trickles in
+    /// after the search. A few go to their places; many are shown with one rebuild of the list that keeps its scroll
+    /// position, selection and keyboard focus.
+    /// </summary>
+    private void ShowRestAndFinish(CancellationTokenSource cts, bool stopped)
     {
-        bool stopped = cts.IsCancellationRequested;
+        ItemStyle style = RowStyle;
+        var rest = new List<FileItem>();
+        while (_pendingHits.TryDequeue(out SearchHit? hit)) rest.Add(HitItem(hit, style));
+        if (rest.Count <= FlushLimit)
+        {
+            AddHits(rest);
+        }
+        else
+        {
+            _all.AddRange(rest);
+            ShowSearchOrder(keepPlace: true);
+        }
+        if (_items.Count > 0) EmptyPanel.Visibility = Visibility.Collapsed;
+        FinishSearch(cts, null, stopped);
+    }
+
+    private FileItem HitItem(SearchHit hit, ItemStyle style) => new(hit.Entry, style)
+    {
+        Snippet = hit.Snippet,
+        Match = (hit.NameMatched ? MatchKind.Name : MatchKind.None) | (hit.ContentMatched ? MatchKind.Words : MatchKind.None),
+        FolderText = ShownFolder(hit.Entry.FullPath, ask: false),
+    };
+
+    /// <summary>Adds hits to the shown list: at the end in the order found, or each at its place in the chosen column's order.</summary>
+    private void AddHits(List<FileItem> hits)
+    {
+        _all.AddRange(hits);
+        Comparison<FileEntry>? order = _tab.Search is { Sort: { } column } search ? EntrySorter.Comparison(column, search.Descending) : null;
+        foreach (FileItem item in hits)
+        {
+            if (order is null) _items.Add(item);
+            else _items.Insert(SortedIndex(_items, item.Entry, order), item);
+        }
+    }
+
+    /// <summary>Ends a search in the status line. <paramref name="stopped"/> overrides reading it from the token.</summary>
+    private void FinishSearch(CancellationTokenSource cts, string? note, bool? stopped = null)
+    {
+        bool wasStopped = stopped ?? cts.IsCancellationRequested;
         if (_searchCts == cts) _searchCts = null;
         _flushTimer.Stop();
         SearchRing.IsActive = false;
         StopSearchButton.Visibility = Visibility.Collapsed;
         string time = (_searchWatch.Elapsed.TotalSeconds < 10 ? _searchWatch.Elapsed.TotalSeconds.ToString("0.00") : _searchWatch.Elapsed.TotalSeconds.ToString("0")) + " s";
-        string text = Loc.F(stopped ? "SearchStopped" : "SearchDone", _items.Count.ToString("N0"), time);
+        string text = Loc.F(wasStopped ? "SearchStopped" : "SearchDone", _items.Count.ToString("N0"), time);
         if (_items.Count >= LiveSearch.MaxHits) text += " " + Loc.T("SearchLimit");
         if (note is not null) text += "   ·   " + note;
         SearchStatus.Text = text;

@@ -13,3 +13,4 @@ This list names what Nax Explorer must never do. Every release report marks each
 9. Reading large folders, searching and indexing never freeze the window.
 10. A broken thumbnail handler, a damaged document or a folder that vanishes while it is shown never ends the app.
 11. Uninstalling never leaves program files, settings, file associations or other system changes behind, except the index and model if the user chooses to keep them.
+12. The app never downloads a cloud file that lives only online on its own: not to search its contents, index it, preview it, show it in the viewer, make its thumbnail or count a folder. Only the user downloads it, with "Immer auf diesem Gerät beibehalten" in the right-click menu, or by opening it in its own program, which has to read it. The owner approved this item on 2026-11-04.

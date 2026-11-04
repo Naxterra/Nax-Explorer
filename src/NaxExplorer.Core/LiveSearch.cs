@@ -283,7 +283,8 @@ public static class LiveSearch
                         Report(new SearchHit(entry, null, NameMatched: true, ContentMatched: false));
                         continue;
                     }
-                    if (searchContents && !entry.IsContainer) await queue.Writer.WriteAsync(entry, stop.Token);
+                    // A cloud file that lives only online would be downloaded just to be searched, so only its name counts.
+                    if (searchContents && !entry.IsContainer && !entry.IsOnlineOnly) await queue.Writer.WriteAsync(entry, stop.Token);
                 }
             }
             catch (OperationCanceledException)

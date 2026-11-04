@@ -49,6 +49,9 @@ public sealed class FileEntry
 
     public bool IsHidden => (Attributes & FileAttributes.Hidden) != 0;
 
+    /// <summary>A cloud file whose content is not on this device (see <see cref="CloudFiles"/>).</summary>
+    public bool IsOnlineOnly => CloudFiles.IsOnlineOnly(Attributes);
+
     /// <summary>True when the entry describes the same item in the same state, so the list can keep its row.</summary>
     public bool SameState(FileEntry other) =>
         Kind == other.Kind && Size == other.Size && ModifiedUtc == other.ModifiedUtc && Attributes == other.Attributes

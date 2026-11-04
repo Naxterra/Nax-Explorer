@@ -62,6 +62,8 @@ internal static class ShellImages
     /// <summary>Gets one image on the calling thread, which must be an STA thread.</summary>
     public static ImagePixels? Get(string path, int size, bool thumbnail)
     {
+        // Making a thumbnail of a cloud file that lives only online could download it, so such a file shows its icon.
+        if (thumbnail && Core.CloudFiles.IsOnlineOnly(path)) thumbnail = false;
         Guid riid = Native.IID_IShellItem;
         if (Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref riid, out IShellItem item) != 0) return null;
         try

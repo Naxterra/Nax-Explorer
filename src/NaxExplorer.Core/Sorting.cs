@@ -84,4 +84,10 @@ public static class EntrySorter
     }
 
     public static void Sort(List<FileEntry> entries, SortColumn column, bool descending) => entries.Sort(Comparison(column, descending));
-}
+
+    /// <summary>
+    /// Items in the order of a column, or in their own order when no column is chosen, as search results show the
+    /// order the search found them in (by relevance for the smart search) while no column is chosen.
+    /// </summary>
+    public static IEnumerable<T> Order<T>(IEnumerable<T> items, Func<T, FileEntry> entry, SortColumn? column, bool descending) =>
+        column is { } chosen ? items.OrderBy(entry, Comparer<FileEntry>.Create(Comparison(chosen, descending))) : items;}

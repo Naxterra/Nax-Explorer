@@ -157,11 +157,12 @@
                     <StackPanel Padding="0,0,0,8">
                         <TextBlock Text="{local:T Key=QuickAccess}" Style="{StaticResource SectionHeaderStyle}" Margin="12,4,0,4" />
                         <ListView x:Name="QuickList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
-                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed" />
-                        <TextBlock x:Name="PinnedHeader" Text="{local:T Key=Pinned}" Style="{StaticResource SectionHeaderStyle}" />
-                        <ListView x:Name="PinnedList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
-                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" RightTapped="PinnedList_RightTapped" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop"
-                                  PointerPressed="Sidebar_PointerPressed" />
+                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed"
+                                  RightTapped="QuickList_RightTapped" />
+                        <TextBlock x:Name="CloudHeader" Text="{local:T Key=CloudHeader}" Style="{StaticResource SectionHeaderStyle}" Visibility="Collapsed" />
+                        <ListView x:Name="CloudList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
+                                  ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed"
+                                  Visibility="Collapsed" />
                         <TextBlock Text="{local:T Key=DrivesHeader}" Style="{StaticResource SectionHeaderStyle}" />
                         <ListView x:Name="DriveList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
                                   ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed" />

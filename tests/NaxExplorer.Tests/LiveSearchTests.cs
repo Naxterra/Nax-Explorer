@@ -52,6 +52,30 @@ internal static class LiveSearchTests
             Check.That(!new ContentMatcher("needle").Matches(path, out _), "binary file matched");
         });
 
+        yield return ("content_search_never_reads_files_that_live_only_in_the_cloud", "A cloud file that is not on this device is never opened to search its contents, so the sync app does not download it, while its name still counts.", () =>
+        {
+            string folder = Fixtures.TempFolder("cloud");
+            string local = Fixtures.Write(folder, "local.txt", "the budget is final");
+            string online = Fixtures.Write(folder, "online.txt", "the budget is final");
+            string named = Fixtures.Write(folder, "budget.txt", "nothing here");
+            // The offline attribute is what Windows reports for content kept elsewhere; it can be set without a sync app.
+            File.SetAttributes(online, FileAttributes.Offline);
+            File.SetAttributes(named, FileAttributes.Offline);
+            try
+            {
+                Check.That(CloudFiles.IsOnlineOnly(File.GetAttributes(online)), "the offline file was not seen as online-only");
+                Check.That(CloudFiles.IsOnlineOnly(CloudFiles.RecallOnDataAccess) && !CloudFiles.IsOnlineOnly(FileAttributes.Directory | CloudFiles.RecallOnOpen), "cloud attributes misread");
+                List<SearchHit> hits = Run(new SearchRequest(folder, "budget", InNames: true, InContents: true, Recursive: false, IncludeHidden: false));
+                Check.Sequence(["budget.txt", "local.txt"], hits.Select(h => h.Entry.Name).Order(StringComparer.OrdinalIgnoreCase));
+                Check.That(hits.Single(h => h.Entry.Name == "budget.txt").NameMatched, "the online-only file should match by its name");
+            }
+            finally
+            {
+                File.SetAttributes(online, FileAttributes.Normal);
+                File.SetAttributes(named, FileAttributes.Normal);
+            }
+        });
+
         yield return ("live_search_finds_names_and_contents_in_subfolders", "A recursive search reports name matches and content matches from subfolders, including inside a Word file.", () =>
         {
             string folder = Fixtures.TempFolder("live");

@@ -15,6 +15,9 @@ public static class DataFolders
     public static string Index => Path.Combine(Root, "index");
 
     public static string CrashLog => Path.Combine(Root, "crash.log");
+
+    /// <summary>The last place handed to Explorer, so a loop between the app and Explorer stops after one round.</summary>
+    public static string HandOff => Path.Combine(Root, "handoff.txt");
 }
 
 public sealed class PaneSettings
@@ -70,6 +73,12 @@ public sealed class AppSettings
     /// <summary>What the right pane opens at start, like <see cref="LeftStart"/>.</summary>
     public string RightStart { get; set; } = "";
 
+    /// <summary>
+    /// Folders, drives and Win+E open Nax Explorer instead of Explorer. Off until the user turns it on, because it
+    /// changes entries for this user in the registry (see <see cref="ExplorerReplacement"/>).
+    /// </summary>
+    public bool ReplaceExplorer { get; set; }
+
     public bool ColorfulNames { get; set; } = true;
 
     public bool OpenImagesInViewer { get; set; } = true;
@@ -82,7 +91,11 @@ public sealed class AppSettings
 
     public PaneSettings Right { get; set; } = new();
 
+    /// <summary>Folders pinned with an earlier version; they now belong to <see cref="QuickAccess"/>.</summary>
     public List<string> Pinned { get; set; } = [];
+
+    /// <summary>The quick access entries in their order, or null for the defaults (see <see cref="QuickAccessList"/>).</summary>
+    public List<string>? QuickAccess { get; set; }
 
     public WindowPlacement? Window { get; set; }
 

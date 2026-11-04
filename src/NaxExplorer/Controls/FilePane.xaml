@@ -18,6 +18,9 @@
                     <ColumnDefinition Width="90" />
                 </Grid.ColumnDefinitions>
                 <Image Width="20" Height="20" Source="{x:Bind Icon, Mode=OneWay}" VerticalAlignment="Center" HorizontalAlignment="Center" />
+                <!-- The cloud status of a file in a sync folder, on the corner of its icon as in Explorer. -->
+                <FontIcon Glyph="{x:Bind CloudGlyph, Mode=OneWay}" FontSize="10" Foreground="{x:Bind CloudBrush, Mode=OneWay}" Visibility="{x:Bind CloudVisibility, Mode=OneWay}"
+                          HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,0,4" ToolTipService.ToolTip="{x:Bind CloudText, Mode=OneWay}" />
                 <TextBlock Grid.Column="1" Margin="6,0,8,0" Text="{x:Bind DisplayName, Mode=OneWay}" Foreground="{x:Bind NameBrush, Mode=OneWay}"
                            Visibility="{x:Bind NameVisibility, Mode=OneWay}" Style="{StaticResource CellTextStyle}" />
                 <TextBox x:Name="RenameBox" Grid.Column="1" Margin="0,1,8,1" Padding="6,3" MinHeight="26" FontSize="13"
@@ -59,6 +62,8 @@
                     <ColumnDefinition Width="90" />
                 </Grid.ColumnDefinitions>
                 <Image Width="20" Height="20" Source="{x:Bind Icon, Mode=OneWay}" VerticalAlignment="Top" Margin="0,2,0,0" />
+                <FontIcon Glyph="{x:Bind CloudGlyph}" FontSize="10" Foreground="{x:Bind CloudBrush}" Visibility="{x:Bind CloudVisibility}"
+                          HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,15,0,0" ToolTipService.ToolTip="{x:Bind CloudText}" />
                 <StackPanel Grid.Column="1" Margin="6,0,8,0" Spacing="1">
                     <!-- The name gives way before the badges that say why the file was found. -->
                     <Grid ColumnSpacing="6">
@@ -95,6 +100,8 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <Image Source="{x:Bind Picture, Mode=OneWay}" Stretch="Uniform" MaxWidth="138" MaxHeight="118" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <FontIcon Glyph="{x:Bind CloudGlyph, Mode=OneWay}" FontSize="14" Foreground="{x:Bind CloudBrush, Mode=OneWay}" Visibility="{x:Bind CloudVisibility, Mode=OneWay}"
+                          HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,4,4" ToolTipService.ToolTip="{x:Bind CloudText, Mode=OneWay}" />
                 <TextBlock Grid.Row="1" Text="{x:Bind DisplayName, Mode=OneWay}" Foreground="{x:Bind NameBrush, Mode=OneWay}" Visibility="{x:Bind NameVisibility, Mode=OneWay}"
                            TextAlignment="Center" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" FontSize="12" HorizontalAlignment="Center" />
                 <TextBox x:Name="RenameBox" Grid.Row="1" x:Load="{x:Bind IsRenaming, Mode=OneWay}" Text="{x:Bind Entry.Name}" FontSize="12" Padding="4,2" MinHeight="24"

@@ -130,6 +130,37 @@ public sealed partial class FileItem : INotifyPropertyChanged
 
     public Brush UsageBrush => new SolidColorBrush(Palette.Usage(UsedFraction));
 
+    // ---------------------------------------------------------------- cloud
+
+    /// <summary>Where a cloud file's content is: only online, on this device, or always kept there.</summary>
+    public CloudState Cloud => Entry.Kind == EntryKind.Drive ? CloudState.None : CloudFiles.StateOf(Entry.Attributes, CloudRoots.Contains(Entry.FullPath));
+
+    /// <summary>The status mark on the icon, as in Explorer: a cloud, a check mark, or a filled check mark.</summary>
+    public string CloudGlyph => Cloud switch
+    {
+        CloudState.OnlineOnly => "",
+        CloudState.OnDevice => "",
+        CloudState.AlwaysOnDevice => "",
+        _ => "",
+    };
+
+    public Brush? CloudBrush => Cloud switch
+    {
+        CloudState.OnlineOnly => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x3B, 0x82, 0xF6)),
+        CloudState.None => null,
+        _ => new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x22, 0xC5, 0x5E)),
+    };
+
+    public Visibility CloudVisibility => Cloud == CloudState.None ? Visibility.Collapsed : Visibility.Visible;
+
+    public string CloudText => Cloud switch
+    {
+        CloudState.OnlineOnly => Loc.T("CloudOnlineOnly"),
+        CloudState.OnDevice => Loc.T("CloudOnDevice"),
+        CloudState.AlwaysOnDevice => Loc.T("CloudAlwaysOnDevice"),
+        _ => "",
+    };
+
     // ---------------------------------------------------------------- search results
 
     public string FolderText { get; init; } = "";
@@ -182,6 +213,14 @@ internal sealed class SearchState
     public bool InContents { get; set; } = true;
 
     public bool Subfolders { get; set; } = true;
+
+    /// <summary>
+    /// The column the results are sorted by, or null for the order the search found them in. A chosen column stays for
+    /// further searches in the same tab, as in Explorer, until the search is closed or "Relevance" is chosen again.
+    /// </summary>
+    public SortColumn? Sort { get; set; }
+
+    public bool Descending { get; set; }
 }
 
 /// <summary>One tab of a pane: its place, history, view and search.</summary>

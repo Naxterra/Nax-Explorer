@@ -87,6 +87,16 @@ public sealed partial class ImageViewer : UserControl
         PreviousButton.Visibility = _index > 0 ? Visibility.Visible : Visibility.Collapsed;
         NextButton.Visibility = _index < _pictures.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
         ErrorText.Visibility = Visibility.Collapsed;
+        if (Core.CloudFiles.IsOnlineOnly(path))
+        {
+            // The viewer never downloads a picture that lives only in the cloud; the user does that with "keep on this device".
+            Picture.Source = null;
+            ErrorText.Text = Loc.T("OnlineOnlyNote");
+            ErrorText.Visibility = Visibility.Visible;
+            Busy.IsActive = false;
+            LoadAhead();
+            return;
+        }
         Busy.IsActive = true;
         LoadedImage image;
         try
@@ -136,6 +146,8 @@ public sealed partial class ImageViewer : UserControl
     {
         if (_index + 1 >= _pictures.Count) return;
         string next = _pictures[_index + 1];
+        // A picture that lives only in the cloud is never read by the viewer, ahead or when shown.
+        if (Core.CloudFiles.IsOnlineOnly(next)) return;
         try
         {
             _ahead = (next, _turns, ImageLoader.LoadAsync(next, DecodeLimit, CancellationToken.None, _turns));

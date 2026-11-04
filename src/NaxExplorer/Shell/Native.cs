@@ -335,6 +335,12 @@ internal static partial class Native
     [DllImport("shell32.dll")]
     public static extern int SHCreateShellItemArrayFromIDLists(uint count, [MarshalAs(UnmanagedType.LPArray)] IntPtr[] pidls, out IShellItemArray array);
 
+    /// <summary>File associations changed; Windows reads the open verbs again.</summary>
+    public const int SHCNE_ASSOCCHANGED = 0x08000000;
+
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);
+
     [DllImport("shell32.dll")]
     public static extern IntPtr ILFindLastID(IntPtr pidl);
 

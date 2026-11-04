@@ -1,6 +1,7 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
+using NaxExplorer.Services;
 using NaxExplorer.Shell;
 
 namespace NaxExplorer;
@@ -20,7 +21,20 @@ public static class Program
     private static int Main(string[] args)
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
-        StartPath = StartArguments.PathFrom(args);
+        // While the app opens folders instead of Explorer, Windows also hands it places only Explorer can show, such
+        // as the Recycle Bin, Control Panel or a computer under Network; they go straight to Explorer, before any
+        // window opens. Should Explorer ever hand the same place straight back, the second round stops here.
+        // The marker of an earlier hand-off is read once and then removed, so nothing this process starts inherits it.
+        string? marker = Environment.GetEnvironmentVariable(Core.ShellPlaces.HandOffMarker);
+        if (marker is not null) Environment.SetEnvironmentVariable(Core.ShellPlaces.HandOffMarker, null);
+        if (StartArguments.ExplorerPlace(args) is { } place)
+        {
+            bool startedByOwnHandOff = Core.ShellPlaces.IsOwnHandOff(marker, place, DateTime.UtcNow);
+            if (!startedByOwnHandOff && Core.ShellPlaces.MayHandOff(place, Core.DataFolders.HandOff, DateTime.UtcNow)) StartArguments.OpenInExplorer(place);
+            else Native.MessageBox(IntPtr.Zero, Loc.F("HandOffLoop", place), "Nax Explorer", 0x30);
+            return 0;
+        }
+        StartPath = StartArguments.LocationFrom(args);
         // One process serves every window: a second start hands its folder to the running app and ends.
         AppInstance key = AppInstance.FindOrRegisterForKey("Naxterra.NaxExplorer.Main");
         if (!key.IsCurrent)
@@ -79,6 +93,38 @@ public static class Program
 /// <summary>Reads the folder to open from the command line.</summary>
 internal static class StartArguments
 {
+    /// <summary>The place to show: a folder or file, This PC, or null for the start folders, as for Home and Win+E.</summary>
+    public static string? LocationFrom(IEnumerable<string> args)
+    {
+        List<string> list = args.ToList();
+        if (list.Any(a => Core.ShellPlaces.Classify(a) == Core.ShellPlace.ThisPc)) return Core.PathTools.ThisPc;
+        return PathFrom(list);
+    }
+
+    /// <summary>The first argument that names a place only Explorer can show, or null.</summary>
+    public static string? ExplorerPlace(IEnumerable<string> args) =>
+        args.FirstOrDefault(a => Core.ShellPlaces.Route(a, Path.Exists, File.Exists) == Core.ShellPlace.Explorer);
+
+    /// <summary>
+    /// Opens a place in Explorer. Started with the place itself, Explorer shows it directly and does not ask the
+    /// folder commands the app has taken over, so this never comes back to the app.
+    /// </summary>
+    public static void OpenInExplorer(string place)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe")) { UseShellExecute = false };
+        start.ArgumentList.Add(place.Trim().Trim('"'));
+        // Inherited by anything this Explorer starts, so a start of the app for the same place is known as a loop.
+        start.Environment[Core.ShellPlaces.HandOffMarker] = Core.ShellPlaces.MarkerValue(place, DateTime.UtcNow);
+        try
+        {
+            System.Diagnostics.Process.Start(start)?.Dispose();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            CrashLog.Write(ex);
+        }
+    }
+
     /// <summary>The first argument that names an existing folder or file, or null.</summary>
     public static string? PathFrom(IEnumerable<string> args)
     {
@@ -88,7 +134,7 @@ internal static class StartArguments
             if (arg.Length == 0 || arg.StartsWith('-') || arg.StartsWith('/')) continue;
             if (arg.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(arg) && string.Equals(Path.GetFileName(arg), "Nax-Explorer.exe", StringComparison.OrdinalIgnoreCase)) continue;
             string? full = Core.PathTools.Normalize(arg, Environment.CurrentDirectory);
-            if (full is not null && (Directory.Exists(full) || File.Exists(full))) return full;
+            if (full is not null && Path.Exists(full)) return full;
         }
         return null;
     }

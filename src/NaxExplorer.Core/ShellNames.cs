@@ -27,12 +27,13 @@ public static partial class ShellNames
     /// <summary>
     /// The name Windows shows for a folder or drive root, or the last part of the path when Windows gives none. A drive
     /// root is asked every time, because its letter can get another medium and a drive can be renamed; the stored
-    /// name then follows the current one.
+    /// name then follows the current one. Only names Windows gave are stored, so a lookup that failed, for example
+    /// on a share that did not answer, is tried again next time.
     /// </summary>
     public static string Of(string path)
     {
         if (!IsRoot(path) && Cache.TryGetValue(path, out string? cached)) return cached;
-        string name = Ask(path) ?? Fallback(path);
+        if (Ask(path) is not { } name) return Fallback(path);
         Store(path, name);
         return name;
     }
@@ -79,28 +80,33 @@ public static partial class ShellNames
         }
     }
 
-    /// <summary>Drive roots whose name is being asked right now, so a slow network drive is never asked twice at once.</summary>
-    private static readonly ConcurrentDictionary<string, byte> Asking = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Lookups of drive roots that are running right now, so a slow network drive is never asked twice at once.</summary>
+    private static readonly ConcurrentDictionary<string, Lazy<string>> Asking = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// The name of a drive root for the address bar, called off the UI thread. A drive in this PC is asked every time
     /// (see <see cref="IsLocalDrive"/>). A network drive or share is asked only while no name is stored for it, and
-    /// only by one thread at a time; afterwards it keeps its stored name, which This PC refreshes when it lists it.
+    /// only once at a time: a second caller, such as the other pane, waits for the running lookup and gets its answer.
+    /// A mapped drive's stored name is refreshed when This PC lists it.
     /// </summary>
     public static string OfDrive(string root)
     {
         if (IsLocalDrive(root)) return Of(root);
         if (Cache.TryGetValue(root, out string? stored)) return stored;
-        if (!Asking.TryAdd(root, 0)) return Fallback(root);
+        Lazy<string> lookup = Asking.GetOrAdd(root, r => new Lazy<string>(() => Of(r), LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
-            return Of(root);
+            return lookup.Value;
         }
         finally
         {
-            Asking.TryRemove(root, out _);
+            // Only this lookup is removed; a later one for the same root may already have started.
+            Asking.TryRemove(new KeyValuePair<string, Lazy<string>>(root, lookup));
         }
     }
+
+    /// <summary>True when a name is stored for the path, for tests.</summary>
+    internal static bool IsStored(string path) => Cache.ContainsKey(path);
 
     /// <summary>The name for the address bar and tabs, without asking Windows: the stored name, or the plain one.</summary>
     public static string Known(string path) => Cache.TryGetValue(path, out string? cached) ? cached : Fallback(path);
