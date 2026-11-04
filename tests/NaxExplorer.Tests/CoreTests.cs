@@ -211,11 +211,17 @@ internal static class CoreTests
             Check.Equal(name, ShellNames.Known(root), "stored name");
         });
 
-        yield return ("system_drive_is_asked_for_its_name_but_a_network_share_is_not", "The address bar asks the system drive for its current name on every step, but never a network share, which can take seconds to answer.", () =>
+        yield return ("address_bar_asks_the_system_drive_every_time_and_a_known_share_never_again", "The address bar gets the current name of the system drive even when an old one is stored, while a network share whose name is already known is not asked again, because it can take seconds to answer.", () =>
         {
             string root = Path.GetPathRoot(Environment.SystemDirectory)!;
-            Check.That(ShellNames.IsLocalDrive(root), $"{root} should count as a local drive");
-            Check.That(!ShellNames.IsLocalDrive(@"\\server\share\"), "a network share counted as a local drive");
+            Check.That(ShellNames.IsLocalDrive(root), $"{root} should count as a drive in this PC");
+            Check.That(!ShellNames.IsLocalDrive(@"\\server\share\"), "a network share counted as a drive in this PC");
+            ShellNames.Store(root, "OLD DISC (X:)");
+            string name = ShellNames.OfDrive(root);
+            Check.That(name != "OLD DISC (X:)" && name.Contains($"({root.TrimEnd('\\')})"), $"stale drive name: {name}");
+            const string share = @"\\server\share\";
+            ShellNames.Store(share, @"share (\\server)");
+            Check.Equal(@"share (\\server)", ShellNames.OfDrive(share), "a known share name was asked again");
         });
 
         yield return ("plain_folder_keeps_its_name_and_the_name_store_stays_bounded", "A folder without the read-only or system attribute keeps its own name, and the store of names never grows past its limit during big searches.", () =>

@@ -62,19 +62,43 @@ public static partial class ShellNames
     }
 
     /// <summary>
-    /// True for the root of a fixed or removable drive on this PC, whose name Windows gives at once. Network drives,
-    /// shares and optical drives can take seconds, so they are not asked on every step through their folders.
+    /// True for the root of a drive in this PC: a fixed, removable or optical drive, a mounted disc image or a RAM disk.
+    /// Its name comes at once while its folders are open, and it may hold another stick or disc than before. Network
+    /// drives and shares can take seconds to answer.
     /// </summary>
     public static bool IsLocalDrive(string root)
     {
         if (root.StartsWith(@"\\", StringComparison.Ordinal)) return false;
         try
         {
-            return new DriveInfo(root).DriveType is DriveType.Fixed or DriveType.Removable or DriveType.Ram;
+            return new DriveInfo(root).DriveType is DriveType.Fixed or DriveType.Removable or DriveType.CDRom or DriveType.Ram;
         }
         catch (ArgumentException)
         {
             return false;
+        }
+    }
+
+    /// <summary>Drive roots whose name is being asked right now, so a slow network drive is never asked twice at once.</summary>
+    private static readonly ConcurrentDictionary<string, byte> Asking = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The name of a drive root for the address bar, called off the UI thread. A drive in this PC is asked every time
+    /// (see <see cref="IsLocalDrive"/>). A network drive or share is asked only while no name is stored for it, and
+    /// only by one thread at a time; afterwards it keeps its stored name, which This PC refreshes when it lists it.
+    /// </summary>
+    public static string OfDrive(string root)
+    {
+        if (IsLocalDrive(root)) return Of(root);
+        if (Cache.TryGetValue(root, out string? stored)) return stored;
+        if (!Asking.TryAdd(root, 0)) return Fallback(root);
+        try
+        {
+            return Of(root);
+        }
+        finally
+        {
+            Asking.TryRemove(root, out _);
         }
     }
 

@@ -399,11 +399,10 @@ public sealed partial class FilePane : UserControl
         Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
         Task.Run(() =>
         {
-            // The folder names come first. The drive's own name is asked again only for a local drive, which answers at
-            // once and may hold another stick than before; a network drive that answers slowly would otherwise hold back
-            // the bar on every step, so it keeps the name This PC last read for it.
+            // The folder names come first, so a slow network drive never holds them back. Then the drive's own name:
+            // a drive in this PC is asked every time, a network drive only until its name is known.
             foreach (Core.PathSegment segment in segments.Skip(2)) ShellNames.OfFolder(segment.Location);
-            if (segments.Count > 1 && ShellNames.IsLocalDrive(segments[1].Location)) ShellNames.Of(segments[1].Location);
+            if (segments.Count > 1) ShellNames.OfDrive(segments[1].Location);
         }).ContinueWith(_ => DispatcherQueue.SafeEnqueue(() =>
         {
             if (!PathTools.SameLocation(location, _tab.Location)) return;
