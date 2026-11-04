@@ -61,6 +61,23 @@ public static partial class ShellNames
         return name;
     }
 
+    /// <summary>
+    /// True for the root of a fixed or removable drive on this PC, whose name Windows gives at once. Network drives,
+    /// shares and optical drives can take seconds, so they are not asked on every step through their folders.
+    /// </summary>
+    public static bool IsLocalDrive(string root)
+    {
+        if (root.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+        try
+        {
+            return new DriveInfo(root).DriveType is DriveType.Fixed or DriveType.Removable or DriveType.Ram;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The name for the address bar and tabs, without asking Windows: the stored name, or the plain one.</summary>
     public static string Known(string path) => Cache.TryGetValue(path, out string? cached) ? cached : Fallback(path);
 

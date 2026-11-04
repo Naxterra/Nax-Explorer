@@ -211,6 +211,13 @@ internal static class CoreTests
             Check.Equal(name, ShellNames.Known(root), "stored name");
         });
 
+        yield return ("system_drive_is_asked_for_its_name_but_a_network_share_is_not", "The address bar asks the system drive for its current name on every step, but never a network share, which can take seconds to answer.", () =>
+        {
+            string root = Path.GetPathRoot(Environment.SystemDirectory)!;
+            Check.That(ShellNames.IsLocalDrive(root), $"{root} should count as a local drive");
+            Check.That(!ShellNames.IsLocalDrive(@"\\server\share\"), "a network share counted as a local drive");
+        });
+
         yield return ("plain_folder_keeps_its_name_and_the_name_store_stays_bounded", "A folder without the read-only or system attribute keeps its own name, and the store of names never grows past its limit during big searches.", () =>
         {
             string folder = Directory.CreateDirectory(Path.Combine(Fixtures.TempFolder("names"), "Plain Folder")).FullName;

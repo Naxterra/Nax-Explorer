@@ -96,21 +96,22 @@ internal static class ShellMenuMerge
             foreach (MenuFlyoutItemBase template in templates) own.Items.Add(template);
             return;
         }
-        List<MenuFlyoutItemBase> items = Convert(entries, session, owner);
+        var shownVerbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<MenuFlyoutItemBase> items = Convert(entries, session, owner, shownVerbs);
         if (items.Count == 0) return;
         int at = IndexOf(menu, PropertiesTag);
         menu.Items.Insert(at++, new MenuFlyoutSeparator());
         foreach (MenuFlyoutItemBase item in items) menu.Items.Insert(at++, item);
-        // Windows' "Open with" (its submenu with the apps, or a single entry) ends in the verb "openas". When it is
-        // there, the app's own "Open with" would only repeat it.
-        if (HasVerb(entries, "openas") && menu.Items.FirstOrDefault(i => i.Tag as string == OpenWithTag) is { } ownOpenWith) menu.Items.Remove(ownOpenWith);
+        // Windows' "Open with" (its submenu with the apps, or a single entry) ends in the verb "openas". Only when such
+        // an entry is really shown and usable does the app's own "Open with" give way, so the menu never loses it.
+        if (shownVerbs.Contains("openas") && menu.Items.FirstOrDefault(i => i.Tag as string == OpenWithTag) is { } ownOpenWith) menu.Items.Remove(ownOpenWith);
     }
 
-    private static bool HasVerb(IEnumerable<ShellMenuEntry> entries, string verb) =>
-        entries.Any(e => string.Equals(e.Verb, verb, StringComparison.OrdinalIgnoreCase) || HasVerb(e.Children, verb));
-
-    /// <summary>Turns Windows' entries into menu items, without duplicates of the app's commands and without stray separators.</summary>
-    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner)
+    /// <summary>
+    /// Turns Windows' entries into menu items, without duplicates of the app's commands and without stray separators.
+    /// The verbs of the enabled items that are shown are added to <paramref name="shownVerbs"/>.
+    /// </summary>
+    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner, ISet<string>? shownVerbs = null)
     {
         var result = new List<MenuFlyoutItemBase>();
         foreach (ShellMenuEntry entry in entries)
@@ -125,7 +126,7 @@ internal static class ShellMenuMerge
             IconElement? icon = entry.Icon is { } pixels ? new ImageIcon { Source = ImageCache.ToBitmap(pixels) } : null;
             if (entry.Children.Count > 0)
             {
-                List<MenuFlyoutItemBase> children = Convert(entry.Children, session, owner);
+                List<MenuFlyoutItemBase> children = Convert(entry.Children, session, owner, shownVerbs);
                 if (children.Count == 0) continue;
                 var sub = new MenuFlyoutSubItem { Text = entry.Text, Icon = icon };
                 foreach (MenuFlyoutItemBase child in children) sub.Items.Add(child);
@@ -133,6 +134,7 @@ internal static class ShellMenuMerge
                 continue;
             }
             var item = new MenuFlyoutItem { Text = entry.Text, IsEnabled = entry.Enabled, Icon = icon };
+            if (entry.Enabled && entry.Verb is { } shownVerb) shownVerbs?.Add(shownVerb);
             uint id = entry.Id;
             item.Click += (_, _) =>
             {

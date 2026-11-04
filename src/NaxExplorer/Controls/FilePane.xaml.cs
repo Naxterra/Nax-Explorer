@@ -399,7 +399,11 @@ public sealed partial class FilePane : UserControl
         Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
         Task.Run(() =>
         {
-            foreach (Core.PathSegment segment in segments.Skip(1)) ShellNames.OfFolder(segment.Location);
+            // The folder names come first. The drive's own name is asked again only for a local drive, which answers at
+            // once and may hold another stick than before; a network drive that answers slowly would otherwise hold back
+            // the bar on every step, so it keeps the name This PC last read for it.
+            foreach (Core.PathSegment segment in segments.Skip(2)) ShellNames.OfFolder(segment.Location);
+            if (segments.Count > 1 && ShellNames.IsLocalDrive(segments[1].Location)) ShellNames.Of(segments[1].Location);
         }).ContinueWith(_ => DispatcherQueue.SafeEnqueue(() =>
         {
             if (!PathTools.SameLocation(location, _tab.Location)) return;
@@ -1353,8 +1357,8 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item("OpenInOtherPane", "", () => _owner.OpenInOtherPane(this, item.Entry.FullPath)));
         }
         // Windows' menu brings its own "Open with" and replaces this one when it arrives; this one serves while Windows'
-        // menu is still loading or when it fails.
-        if (!container) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
+        // menu is still loading or when it fails. It opens one file, so it is offered only when one file is selected.
+        if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
         menu.Items.Add(new MenuFlyoutSeparator());
         if (!drive)

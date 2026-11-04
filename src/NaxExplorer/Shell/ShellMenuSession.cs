@@ -24,6 +24,12 @@ internal sealed class ShellMenuSession
     private volatile bool _stopping;
     private long _stopAtTicks = long.MaxValue;
 
+    /// <summary>What the menu is for, named in the log when its build gets stuck.</summary>
+    private string _subject = "";
+
+    /// <summary>Set once the stuck build was written to the log, so it is written only once.</summary>
+    private bool _reportedStuck;
+
     private ShellMenuSession()
     {
         var thread = new Thread(Loop) { IsBackground = true, Name = "Shell menu" };
@@ -41,7 +47,7 @@ internal sealed class ShellMenuSession
     public static Task<(ShellMenuSession Session, List<ShellMenuEntry> Entries)?> ForItemsAsync(IReadOnlyList<string> paths, IntPtr owner, bool extended)
     {
         if (OneIsStuck()) return Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
-        var session = new ShellMenuSession();
+        var session = new ShellMenuSession { _subject = paths.Count switch { 0 => "no items", 1 => paths[0], _ => $"{paths[0]} and {paths.Count - 1} more items" } };
         return session.Build(() => session.BuildForItems(paths, owner, extended));
     }
 
@@ -49,18 +55,32 @@ internal sealed class ShellMenuSession
     public static Task<(ShellMenuSession Session, List<ShellMenuEntry> Entries)?> ForBackgroundAsync(string folder, IntPtr owner)
     {
         if (OneIsStuck()) return Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
-        var session = new ShellMenuSession();
+        var session = new ShellMenuSession { _subject = $"the empty area of {folder}" };
         return session.Build(() => session.BuildForBackground(folder, owner));
     }
 
     /// <summary>
     /// True while a build hangs in a shell extension. No further menu thread starts then, so a hanging extension costs
-    /// one thread and not one per right-click; the app's own menu still opens, without Windows' entries.
+    /// one thread and not one per right-click; the app's own menu still opens, without Windows' entries. The first time
+    /// a build is found stuck, the log says so and names what it was for, so the missing entries can be explained.
+    /// Called on the UI thread only.
     /// </summary>
     private static bool OneIsStuck()
     {
         long limit = DateTime.UtcNow.Ticks - StuckAfter.Ticks;
-        return Building.Values.Any(started => started < limit);
+        foreach (KeyValuePair<ShellMenuSession, long> build in Building)
+        {
+            if (build.Value >= limit) continue;
+            if (!build.Key._reportedStuck)
+            {
+                build.Key._reportedStuck = true;
+                CrashLog.Write(new TimeoutException(
+                    $"Windows' context menu for {build.Key._subject} did not finish within {StuckAfter.TotalSeconds:0} seconds, " +
+                    "most likely because a shell extension hangs. Until it finishes, menus open without Windows' entries."));
+            }
+            return true;
+        }
+        return false;
     }
 
     private Task<(ShellMenuSession, List<ShellMenuEntry>)?> Build(Func<List<ShellMenuEntry>?> build)
