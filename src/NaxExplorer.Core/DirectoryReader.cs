@@ -47,10 +47,13 @@ public static class DirectoryReader
     public static FileEntry ToEntry(ref FileSystemEntry entry)
     {
         bool folder = entry.IsDirectory;
+        string fullPath = entry.ToFullPath();
         return new FileEntry
         {
             Name = entry.FileName.ToString(),
-            FullPath = entry.ToFullPath(),
+            // Localized names such as "Bilder" for Pictures; only folders with desktop.ini can have one.
+            DisplayName = folder && ShellNames.MayBeLocalized(entry.Attributes) ? ShellNames.Of(fullPath) : null!,
+            FullPath = fullPath,
             Kind = folder ? EntryKind.Folder : EntryKind.File,
             Size = folder ? 0 : entry.Length,
             ModifiedUtc = entry.LastWriteTimeUtc.UtcDateTime,
@@ -86,6 +89,8 @@ public static class DirectoryReader
             result.Add(new FileEntry
             {
                 Name = drive.Name.TrimEnd('\\'),
+                // As Explorer shows it, such as "Lokaler Datenträger (C:)" or "Sha-SSD (D:)".
+                DisplayName = ShellNames.Of(drive.Name),
                 FullPath = drive.Name,
                 Kind = EntryKind.Drive,
                 Size = total,
@@ -122,6 +127,7 @@ public static class DirectoryReader
                 return new FileEntry
                 {
                     Name = folder.Name,
+                    DisplayName = ShellNames.MayBeLocalized(folder.Attributes) || folder.Parent is null ? ShellNames.Of(folder.FullName) : null!,
                     FullPath = folder.FullName,
                     Kind = folder.Parent is null ? EntryKind.Drive : EntryKind.Folder,
                     ModifiedUtc = folder.LastWriteTimeUtc,

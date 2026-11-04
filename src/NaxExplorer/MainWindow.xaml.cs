@@ -76,8 +76,8 @@ public sealed partial class MainWindow : Window
 
         AppSettings settings = Settings;
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        LeftPane.Initialize(this, settings.Left, startPath, home);
-        RightPane.Initialize(this, settings.Right, null, PathTools.ThisPc);
+        LeftPane.Initialize(this, StartTabs(settings.LeftStart, settings.Left, home), startPath, home);
+        RightPane.Initialize(this, StartTabs(settings.RightStart, settings.Right, home), null, PathTools.ThisPc);
         _active = LeftPane;
         SetActivePane(LeftPane);
         UpdateTitle();
@@ -223,6 +223,37 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>The tabs a pane opens with: the last session's, or one tab at the start folder chosen in the settings.</summary>
+    private static PaneSettings StartTabs(string startSetting, PaneSettings saved, string home)
+    {
+        string? start = AppSettings.StartPlace(startSetting, home);
+        if (start is null) return saved;
+        return new PaneSettings { Tabs = [start], ActiveTab = 0, View = saved.View, Sort = saved.Sort, Descending = saved.Descending };
+    }
+
+    /// <summary>
+    /// The last tab of a pane was closed. In dual-pane mode that pane closes: the right one simply disappears, and when
+    /// the left one is closed it takes over the right pane's tabs. With a single pane the window closes, as in Explorer.
+    /// </summary>
+    internal void CloseLastTab(FilePane pane)
+    {
+        if (!Settings.DualPane)
+        {
+            Close();
+            return;
+        }
+        if (pane == LeftPane)
+        {
+            var (locations, active) = RightPane.TabLocations();
+            LeftPane.ResetTabs(locations, active);
+        }
+        Settings.DualPane = false;
+        ApplyLayout();
+        SetActivePane(LeftPane);
+        LeftPane.FocusListSoon();
+        App.Instance!.SaveSettings();
+    }
+
     internal FilePane? OtherPane(FilePane pane) => !Settings.DualPane ? null : pane == LeftPane ? RightPane : LeftPane;
 
     internal async void OpenInOtherPane(FilePane pane, string location)
@@ -249,9 +280,10 @@ public sealed partial class MainWindow : Window
     private void UpdateTitle()
     {
         string location = _active.Location;
-        string name = _active.IsSearchOpen ? Loc.T("SearchResults") : PathTools.TabTitle(location, Loc.T("ThisPC"));
+        string name = _active.IsSearchOpen ? Loc.T("SearchResults") : FilePane.PlaceName(location);
         Title = $"{name} - Nax Explorer";
-        TitleLocation.Text = PathTools.IsThisPc(location) ? Loc.T("ThisPC") : location;
+        // Written with the names Windows shows, as C:\Benutzer\Anna; the names come from the cache the address bar fills.
+        TitleLocation.Text = PathTools.IsThisPc(location) ? Loc.T("ThisPC") : ShellNames.KnownPath(location);
     }
 
     /// <summary>Refreshes every pane that shows a folder, for example after files were copied into it.</summary>
@@ -315,9 +347,20 @@ public sealed partial class MainWindow : Window
         };
         QuickList.ItemsSource = quick.Where(e => e.OpensInExplorer || Directory.Exists(e.Location)).ToList();
         Brush folderBrush = new SolidColorBrush(Palette.Of(FileCategory.Folder, dark));
-        PinnedList.ItemsSource = Settings.Pinned.Select(p => new SidebarEntry { Glyph = "", Label = PathTools.TabTitle(p, p), Location = p, Brush = folderBrush }).ToList();
+        // The stored names show at once; Windows is asked in the background, because a pinned share that does not
+        // answer can take seconds and must not freeze the window.
+        List<SidebarEntry> pinned = Settings.Pinned.Select(p => new SidebarEntry { Glyph ="", Label = ShellNames.Known(p), Location = p, Brush = folderBrush }).ToList();
+        PinnedList.ItemsSource = pinned;
         PinnedHeader.Visibility = PinnedList.Visibility = Settings.Pinned.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (pinned.Count > 0) _ = NamePinnedAsync(pinned);
         _ = LoadDrivesAsync();
+    }
+
+    private async Task NamePinnedAsync(List<SidebarEntry> pinned)
+    {
+        string[] names = await Task.Run(() => pinned.Select(e => ShellNames.OfFolder(e.Location)).ToArray());
+        if (!ReferenceEquals(PinnedList.ItemsSource, pinned) || pinned.Select(e => e.Label).SequenceEqual(names)) return;
+        PinnedList.ItemsSource = pinned.Select((e, i) => new SidebarEntry { Glyph = e.Glyph, Label = names[i], Location = e.Location, Brush = e.Brush }).ToList();
     }
 
     private async Task LoadDrivesAsync()

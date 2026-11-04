@@ -174,11 +174,108 @@ internal static class CoreTests
             Check.That((OperationFlags.ForRename() & OperationFlags.AllowUndo) != 0, "rename cannot be undone");
         });
 
+        yield return ("customized_folder_shows_its_localized_name", "A folder whose desktop.ini names a localized name shows that name, as Explorer shows \"Bilder\" for Pictures.", () =>
+        {
+            string parent = Fixtures.TempFolder("localized");
+            string folder = Path.Combine(parent, "Pictures-Test");
+            Directory.CreateDirectory(folder);
+            string ini = Fixtures.Write(folder, "desktop.ini", "[.ShellClassInfo]\r\nLocalizedResourceName=Meine Bilder\r\n", System.Text.Encoding.Unicode);
+            File.SetAttributes(ini, FileAttributes.Hidden | FileAttributes.System);
+            File.SetAttributes(folder, FileAttributes.ReadOnly | FileAttributes.Directory);
+            try
+            {
+                FileEntry entry = DirectoryReader.Read(parent, new ListingOptions(false)).Single();
+                Check.Equal("Pictures-Test", entry.Name, "file system name");
+                Check.Equal("Meine Bilder", entry.DisplayName, "shown name");
+            }
+            finally
+            {
+                File.SetAttributes(folder, FileAttributes.Directory);
+                File.SetAttributes(ini, FileAttributes.Normal);
+            }
+        });
+
+        yield return ("drives_show_windows_name_with_their_letter", "Drives carry the name Windows shows for them, which ends with their letter, such as \"Lokaler Datenträger (C:)\".", () =>
+        {
+            string systemRoot = Path.GetPathRoot(Environment.SystemDirectory)!;
+            FileEntry system = DirectoryReader.ReadDrives().First(d => string.Equals(d.FullPath, systemRoot, StringComparison.OrdinalIgnoreCase));
+            Check.That(system.DisplayName.Contains($"({system.Name})"), $"unexpected drive name: {system.DisplayName}");
+        });
+
+        yield return ("drive_name_follows_a_replaced_or_renamed_drive", "When a drive letter gets another medium or a new label, the drive shows its current name, not the one stored earlier.", () =>
+        {
+            string root = Path.GetPathRoot(Environment.SystemDirectory)!;
+            ShellNames.Store(root, "OLD STICK (X:)");
+            string name = ShellNames.Of(root);
+            Check.That(name != "OLD STICK (X:)" && name.Contains($"({root.TrimEnd('\\')})"), $"stale drive name: {name}");
+            Check.Equal(name, ShellNames.Known(root), "stored name");
+        });
+
+        yield return ("plain_folder_keeps_its_name_and_the_name_store_stays_bounded", "A folder without the read-only or system attribute keeps its own name, and the store of names never grows past its limit during big searches.", () =>
+        {
+            string folder = Directory.CreateDirectory(Path.Combine(Fixtures.TempFolder("names"), "Plain Folder")).FullName;
+            Check.Equal("Plain Folder", ShellNames.OfFolder(folder), "plain folder");
+            for (int i = 0; i <= ShellNames.MaxStored; i++) ShellNames.Store($@"X:\store-test\{i}", "name");
+            Check.That(ShellNames.StoredCount <= ShellNames.MaxStored, $"the store grew to {ShellNames.StoredCount} names");
+        });
+
+        yield return ("title_path_uses_the_folder_names_windows_shows", "The path in the title reads C:\\Benutzer\\Anna for C:\\Users\\Anna, and a share keeps its server and share name.", () =>
+        {
+            var shown = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [@"C:\Users"] = "Benutzer",
+                [@"\\server\share\Users"] = "Benutzer",
+            };
+            string ShownName(string path) => shown.TryGetValue(path, out string? name) ? name : "";
+            Check.Equal(@"C:\Benutzer\Anna", PathTools.DisplayPath(@"C:\Users\Anna\", ShownName), "local path");
+            Check.Equal(@"C:\", PathTools.DisplayPath(@"C:\", ShownName), "drive root");
+            Check.Equal(@"\\server\share\Benutzer\x", PathTools.DisplayPath(@"\\server\share\Users\x", ShownName), "network share");
+            Check.Equal(PathTools.ThisPc, PathTools.DisplayPath(PathTools.ThisPc, ShownName), "This PC");
+        });
+
+        yield return ("folders_sort_by_the_name_windows_shows", "Sorting by name uses the shown names, so \"Bilder\" (Pictures) comes before \"Dokumente\" (Documents), as in Explorer.", () =>
+        {
+            var entries = new List<FileEntry>
+            {
+                new() { Name = "Pictures", DisplayName = "Bilder", FullPath = @"C:\home\Pictures", Kind = EntryKind.Folder },
+                new() { Name = "Documents", DisplayName = "Dokumente", FullPath = @"C:\home\Documents", Kind = EntryKind.Folder },
+                new() { Name = "Contacts", DisplayName = "Kontakte", FullPath = @"C:\home\Contacts", Kind = EntryKind.Folder },
+            };
+            EntrySorter.Sort(entries, SortColumn.Name, descending: false);
+            Check.Sequence(["Bilder", "Dokumente", "Kontakte"], entries.Select(e => e.DisplayName));
+        });
+
+        yield return ("explorer_view_is_taken_over_only_without_a_settings_file", "Without a settings file the app shows hidden items and extensions as Explorer does; a saved file, even one from an earlier version, keeps the app's own choices.", () =>
+        {
+            string folder = Fixtures.TempFolder("settings");
+            string path = Path.Combine(folder, "settings.json");
+            ExplorerView explorer = ExplorerView.From(hidden: 1, superHidden: 0, hideExtensions: 0);
+            AppSettings first = AppSettings.Load(path, explorer);
+            Check.That(first.ShowHidden && first.ShowExtensions && !first.ShowProtectedFiles, "Explorer's view was not taken over");
+            first.ShowHidden = false;
+            first.Save(path);
+            Check.That(!AppSettings.Load(path, explorer).ShowHidden, "the app's own choice was overwritten by Explorer's");
+            string older = Fixtures.Write(folder, "older.json", "{ \"ShowHidden\": false, \"ShowExtensions\": false, \"ViewVersion\": 1 }");
+            AppSettings kept = AppSettings.Load(older, explorer);
+            Check.That(!kept.ShowHidden && !kept.ShowExtensions, "a settings file from an earlier version lost its own choices");
+        });
+
+        yield return ("start_folder_setting_names_the_place_a_pane_opens", "An empty setting restores the last session; home, This PC and an existing folder open there; a vanished folder restores the last session.", () =>
+        {
+            string folder = Fixtures.TempFolder("start");
+            const string home = @"C:\home";
+            Check.Equal(null, AppSettings.StartPlace("", home));
+            Check.Equal(home, AppSettings.StartPlace(AppSettings.StartHome, home));
+            Check.Equal(PathTools.ThisPc, AppSettings.StartPlace(PathTools.ThisPc, home));
+            Check.Equal(folder, AppSettings.StartPlace(folder, home));
+            Check.Equal(null, AppSettings.StartPlace(Path.Combine(folder, "gone"), home));
+        });
+
         yield return ("damaged_settings_file_gives_default_settings", "A settings file that is not valid JSON never stops the app; the defaults are used.", () =>
         {
             string folder = Fixtures.TempFolder("settings");
             string path = Fixtures.Write(folder, "settings.json", "{ this is not json");
-            AppSettings settings = AppSettings.Load(path);
+            AppSettings settings = AppSettings.Load(path, ExplorerView.From(null, null, 0));
             Check.That(settings.DualPane && settings.ShowExtensions, "defaults expected");
         });
 

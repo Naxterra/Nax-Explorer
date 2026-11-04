@@ -12,6 +12,15 @@ public sealed class FileEntry
 {
     public required string Name { get; init; }
 
+    private readonly string? _displayName;
+
+    /// <summary>The name Windows shows, which differs from <see cref="Name"/> for localized folders and for drives.</summary>
+    public string DisplayName
+    {
+        get => _displayName ?? Name;
+        init => _displayName = value;
+    }
+
     public required string FullPath { get; init; }
 
     public required EntryKind Kind { get; init; }

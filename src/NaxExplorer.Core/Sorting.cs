@@ -77,7 +77,7 @@ public static class EntrySorter
                 SortColumn.Type => NaturalComparer.Instance.Compare(x.Extension, y.Extension),
                 _ => 0,
             };
-            if (result == 0) result = NaturalComparer.Instance.Compare(x.Name, y.Name);
+            if (result == 0) result = NaturalComparer.Instance.Compare(x.DisplayName, y.DisplayName);
             if (result == 0) result = string.CompareOrdinal(x.FullPath, y.FullPath);
             return descending ? -result : result;
         };

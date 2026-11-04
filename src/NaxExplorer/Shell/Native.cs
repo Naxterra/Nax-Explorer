@@ -39,10 +39,10 @@ internal interface IShellFolder
 {
     void ParseDisplayName();
     void EnumObjects();
-    void BindToObject();
+    [PreserveSig] int BindToObject(IntPtr pidl, IntPtr bindContext, ref Guid riid, out IntPtr result);
     void BindToStorage();
     void CompareIDs();
-    void CreateViewObject();
+    [PreserveSig] int CreateViewObject(IntPtr hwndOwner, ref Guid riid, out IntPtr result);
     void GetAttributesOf();
     [PreserveSig] int GetUIObjectOf(IntPtr hwndOwner, uint count, [MarshalAs(UnmanagedType.LPArray)] IntPtr[] pidls, ref Guid riid, IntPtr reserved, out IntPtr result);
 }
@@ -263,6 +263,63 @@ internal static partial class Native
         public int fNC;
         public int fWide;
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct MENUITEMINFO
+    {
+        public int cbSize;
+        public uint fMask;
+        public uint fType;
+        public uint fState;
+        public uint wID;
+        public IntPtr hSubMenu;
+        public IntPtr hbmpChecked;
+        public IntPtr hbmpUnchecked;
+        public IntPtr dwItemData;
+        public IntPtr dwTypeData;
+        public uint cch;
+        public IntPtr hbmpItem;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+    }
+
+    public const uint MIIM_STATE = 0x01;
+    public const uint MIIM_ID = 0x02;
+    public const uint MIIM_SUBMENU = 0x04;
+    public const uint MIIM_STRING = 0x40;
+    public const uint MIIM_BITMAP = 0x80;
+    public const uint MIIM_FTYPE = 0x100;
+    public const uint MFT_SEPARATOR = 0x800;
+    public const uint MFT_OWNERDRAW = 0x100;
+    public const uint MFS_DISABLED = 0x3;
+    public const uint MFS_CHECKED = 0x8;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool GetMenuItemInfo(IntPtr menu, uint item, bool byPosition, ref MENUITEMINFO info);
+
+    [DllImport("user32.dll")]
+    public static extern int GetMenuItemCount(IntPtr menu);
+
+    [DllImport("user32.dll")]
+    public static extern bool PeekMessage(out MSG message, IntPtr hwnd, uint filterMin, uint filterMax, uint remove);
+
+    [DllImport("user32.dll")]
+    public static extern bool TranslateMessage(ref MSG message);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr DispatchMessage(ref MSG message);
+
+    [DllImport("shell32.dll")]
+    public static extern int SHGetDesktopFolder(out IShellFolder folder);
 
     public delegate IntPtr SubclassProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
 

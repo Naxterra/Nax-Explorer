@@ -44,6 +44,10 @@ The index and the model live in `%LOCALAPPDATA%\Nax-Explorer`. The settings can 
 | Ctrl+H | Show hidden items |
 | Shift+F10, Shift+right-click | Windows context menu |
 
+## Installing
+
+`build-installer.ps1` publishes the app self-contained for x64, collects the notices of every bundled component into THIRD-PARTY-NOTICES.txt and builds `artifacts\installer\Nax-Explorer-<version>-setup.exe` with Inno Setup 7. The installer needs no administrator rights and always installs for the current user only. Uninstalling removes the program, its settings and its crash log, and asks whether the AI index and model should be deleted too.
+
 ## Building
 
 The solution needs the .NET 11 SDK and builds for x64:

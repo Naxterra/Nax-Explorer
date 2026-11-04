@@ -13,6 +13,9 @@ public static class Program
     /// <summary>The folder or file named on the command line, if any.</summary>
     internal static string? StartPath { get; private set; }
 
+    private static Mutex? s_running;
+    private static Mutex? s_runningGlobal;
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -24,6 +27,17 @@ public static class Program
         {
             Redirect(key);
             return 0;
+        }
+        // Held for the life of the process. Setup and the uninstaller wait while either exists, so they never meet locked
+        // program files. The global one is also seen from another Windows session, for example after a user switch.
+        s_running = new Mutex(false, "NaxExplorer.Running");
+        try
+        {
+            s_runningGlobal = new Mutex(false, @"Global\NaxExplorer.Running");
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or WaitHandleCannotBeOpenedException)
+        {
+            // Without it only the session's own setup sees the app, as before.
         }
         key.Activated += (_, activation) => App.Instance?.OnRedirected(activation);
         Native.SetCurrentProcessExplicitAppUserModelID(AppUserModelId);

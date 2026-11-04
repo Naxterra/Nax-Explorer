@@ -101,7 +101,7 @@ public sealed partial class FilePane : UserControl
 
     private AppSettings Settings => App.Instance!.Settings;
 
-    private ListingOptions Listing => new(Settings.ShowHidden);
+    private ListingOptions Listing => new(Settings.ShowHidden, Settings.ShowProtectedFiles);
 
     private ItemStyle RowStyle => new(_owner.IsDark, Settings.ColorfulNames, Settings.ShowExtensions);
 
@@ -190,7 +190,7 @@ public sealed partial class FilePane : UserControl
         };
         var header = new TabViewItem
         {
-            Header = PathTools.TabTitle(location, Loc.T("ThisPC")),
+            Header = PlaceName(location),
             IconSource = new FontIconSource { Glyph = PathTools.IsThisPc(location) ? "" : "", Foreground = new SolidColorBrush(Palette.Of(FileCategory.Folder, _owner?.IsDark ?? true)) },
             Tag = tab,
         };
@@ -219,8 +219,8 @@ public sealed partial class FilePane : UserControl
     {
         if (_tabs.Count == 1)
         {
-            // The last tab of a pane stays; it goes back to This PC instead.
-            _ = NavigateAsync(PathTools.ThisPc);
+            // Closing the last tab closes the pane, or the window when it is the only pane, as in Explorer.
+            _owner.CloseLastTab(this);
             return;
         }
         int index = _tabs.IndexOf(tab);
@@ -230,6 +230,20 @@ public sealed partial class FilePane : UserControl
     }
 
     internal void CloseCurrentTab() => CloseTab(_tab);
+
+    /// <summary>The places of all tabs and the index of the shown one, for handing them to the other pane.</summary>
+    internal (List<string> Locations, int Active) TabLocations() => (_tabs.Select(t => t.Location).ToList(), Math.Max(0, _tabs.IndexOf(_tab)));
+
+    /// <summary>Replaces all tabs with tabs for these places, for example the other pane's tabs when this one takes over.</summary>
+    internal void ResetTabs(IReadOnlyList<string> locations, int active)
+    {
+        if (locations.Count == 0) return;
+        CancelSearch();
+        _tabs.Clear();
+        Tabs.TabItems.Clear();
+        foreach (string location in locations) AddTab(location, null, select: false);
+        Tabs.SelectedItem = _tabs[Math.Clamp(active, 0, _tabs.Count - 1)].Header;
+    }
 
     internal void NextTab(int step)
     {
@@ -272,7 +286,7 @@ public sealed partial class FilePane : UserControl
     private void UpdateTabHeader()
     {
         if (_tab.Header is null) return;
-        _tab.Header.Header = _tab.Search is { } search ? $"“{search.Query}”" : PathTools.TabTitle(_tab.Location, Loc.T("ThisPC"));
+        _tab.Header.Header = _tab.Search is { } search ? $"“{search.Query}”" : PlaceName(_tab.Location);
         ((FontIconSource)_tab.Header.IconSource).Glyph = _tab.Search is not null ? "" : PathTools.IsThisPc(_tab.Location) ? "" : "";
         ToolTipService.SetToolTip(_tab.Header, PathTools.IsThisPc(_tab.Location) ? Loc.T("ThisPC") : _tab.Location);
     }
@@ -356,12 +370,52 @@ public sealed partial class FilePane : UserControl
         await LoadAsync();
     }
 
+    /// <summary>The name of a place as Windows shows it: "Dieser PC", "Lokaler Datenträger (C:)", "Benutzer".</summary>
+    internal static string PlaceName(string location) => PathTools.IsThisPc(location) ? Loc.T("ThisPC") : ShellNames.Known(location);
+
+    /// <summary>
+    /// The folder a found item lies in, written with the names Windows shows. Search threads pass ask: true so the
+    /// names are stored; the UI thread passes ask: false and only reads the stored names.
+    /// </summary>
+    private static string ShownFolder(string fullPath, bool ask)
+    {
+        string? folder = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrEmpty(folder)) return "";
+        return ask ? ShellNames.PathOf(folder) : ShellNames.KnownPath(folder);
+    }
+
+    /// <summary>The filter matches the file system name and the shown name, so "Bilder" finds the Pictures folder.</summary>
+    private bool Matches(FileEntry entry) =>
+        entry.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase) || entry.DisplayName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Shows the address bar with the names Windows uses. Names not known yet are asked from Windows in the background,
+    /// because a disconnected network drive can take seconds to answer, and the bar is filled again when they arrive.
+    /// </summary>
+    private void ShowCrumbs()
+    {
+        string location = _tab.Location;
+        List<Core.PathSegment> segments = PathTools.Segments(location, Loc.T("ThisPC"));
+        Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
+        Task.Run(() =>
+        {
+            foreach (Core.PathSegment segment in segments.Skip(1)) ShellNames.OfFolder(segment.Location);
+        }).ContinueWith(_ => DispatcherQueue.SafeEnqueue(() =>
+        {
+            if (!PathTools.SameLocation(location, _tab.Location)) return;
+            Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
+            UpdateTabHeader();
+            _owner.OnPaneLocationChanged(this);
+            DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => BreadcrumbScroller.ChangeView(BreadcrumbScroller.ScrollableWidth, null, null, true));
+        }), TaskScheduler.Default);
+    }
+
     private void UpdateChrome()
     {
         BackButton.IsEnabled = _tab.History.CanGoBack || _tab.Search is not null;
         ForwardButton.IsEnabled = _tab.History.CanGoForward;
         UpButton.IsEnabled = PathTools.Parent(_tab.Location) is not null || _tab.Search is not null;
-        Breadcrumb.ItemsSource = PathTools.Segments(_tab.Location, Loc.T("ThisPC")).Select(s => new Crumb(s.Label, s.Location)).ToList();
+        ShowCrumbs();
         DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => BreadcrumbScroller.ChangeView(BreadcrumbScroller.ScrollableWidth, null, null, true));
         UpdateTabHeader();
         UpdateHeaders();
@@ -441,7 +495,7 @@ public sealed partial class FilePane : UserControl
 
     private void ApplyFilter(IReadOnlyList<string>? select)
     {
-        IEnumerable<FileItem> visible = _filter.Length == 0 ? _all : _all.Where(i => i.Entry.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase));
+        IEnumerable<FileItem> visible = _filter.Length == 0 ? _all : _all.Where(i => Matches(i.Entry));
         _items = new ObservableCollection<FileItem>(visible);
         BindList();
         if (select is { Count: > 0 }) Select(select);
@@ -668,7 +722,7 @@ public sealed partial class FilePane : UserControl
         {
             var item = new FileItem(added, style) { IsCut = cut.Contains(added.FullPath) };
             _all.Insert(SortedIndex(_all, added, order), item);
-            if (_filter.Length == 0 || added.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)) _items.Insert(SortedIndex(_items, added, order), item);
+            if (_filter.Length == 0 || Matches(added)) _items.Insert(SortedIndex(_items, added, order), item);
         }
     }
 
@@ -1216,25 +1270,52 @@ public sealed partial class FilePane : UserControl
             }
             if (Native.IsKeyDown(0x10))
             {
+                // Shift+right-click still shows Windows' own menu, as a fallback.
                 ShowNativeMenu();
             }
             else
             {
-                BuildItemMenu(item).ShowAt(ContentArea, new FlyoutShowOptions { Position = point });
+                ShowItemMenu(item, point);
             }
         }
         else
         {
             CurrentList.SelectedItems.Clear();
-            BuildBackgroundMenu().ShowAt(ContentArea, new FlyoutShowOptions { Position = point });
+            ShowBackgroundMenu(point);
         }
         e.Handled = true;
+    }
+
+    /// <summary>The app's menu for the selection, completed with the commands of the Windows menu.</summary>
+    private void ShowItemMenu(FileItem item, Windows.Foundation.Point point)
+    {
+        IReadOnlyList<string> paths = SelectedPaths;
+        if (paths.Count == 0 && item.Entry.Kind == EntryKind.Drive) paths = new[] { item.Entry.FullPath };
+        var loading = paths.Count > 0
+            ? ShellMenuSession.ForItemsAsync(paths, _owner.Hwnd, extended: false)
+            : Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
+        ShellMenuMerge.Show(BuildItemMenu(item), ContentArea, point, loading, _owner.Hwnd, background: false);
+    }
+
+    /// <summary>The app's menu for the empty area, with Windows' full "New" submenu when the folder has one.</summary>
+    private void ShowBackgroundMenu(Windows.Foundation.Point point)
+    {
+        var loading = Folder is { } folder
+            ? ShellMenuSession.ForBackgroundAsync(folder, _owner.Hwnd)
+            : Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
+        ShellMenuMerge.Show(BuildBackgroundMenu(), ContentArea, point, loading, _owner.Hwnd, background: true);
+    }
+
+    private static MenuFlyoutItemBase Tagged(MenuFlyoutItemBase item, string tag)
+    {
+        item.Tag = tag;
+        return item;
     }
 
     private void Content_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if (e.Handled) return;
-        BuildBackgroundMenu().ShowAt(ContentArea, new FlyoutShowOptions { Position = e.GetPosition(ContentArea) });
+        ShowBackgroundMenu(e.GetPosition(ContentArea));
         e.Handled = true;
     }
 
@@ -1271,8 +1352,10 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item("OpenInNewTab", "", () => OpenTab(item.Entry.FullPath, select: false)));
             menu.Items.Add(Item("OpenInOtherPane", "", () => _owner.OpenInOtherPane(this, item.Entry.FullPath)));
         }
-        if (!container) menu.Items.Add(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)));
-        if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation", "", () => OpenLocation(item)));
+        // Windows' menu brings its own "Open with" and replaces this one when it arrives; this one serves while Windows'
+        // menu is still loading or when it fails.
+        if (!container) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
+        if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
         menu.Items.Add(new MenuFlyoutSeparator());
         if (!drive)
         {
@@ -1299,9 +1382,7 @@ public sealed partial class FilePane : UserControl
                 menu.Items.Add(Item("AddToAiIndex", "", () => _owner.AddToIndex(item.Entry.FullPath)));
         }
         menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(Item("Properties", "", ShowProperties, "Alt+Enter"));
-        // The Windows menu blocks the window while it is open, so it opens after this menu has closed and gone.
-        menu.Items.Add(Item("MoreOptions", "", () => DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, ShowNativeMenu), "Shift+F10"));
+        menu.Items.Add(Tagged(Item("Properties", "", ShowProperties, "Alt+Enter"), ShellMenuMerge.PropertiesTag));
         return menu;
     }
 
@@ -1311,7 +1392,7 @@ public sealed partial class FilePane : UserControl
         bool folder = Folder is not null;
         if (folder)
         {
-            var create = new MenuFlyoutSubItem { Text = Loc.T("New"), Icon = new FontIcon { Glyph = "" } };
+            var create = new MenuFlyoutSubItem { Text = Loc.T("New"), Icon = new FontIcon { Glyph = "" }, Tag = ShellMenuMerge.NewTag };
             create.Items.Add(Item("NewFolder", "", NewFolder, "Ctrl+Shift+N"));
             create.Items.Add(Item("NewTextFile", "", NewTextFile));
             menu.Items.Add(create);
@@ -1348,7 +1429,7 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item("OpenTerminal", "", OpenTerminal));
             menu.Items.Add(Item("CopyPath", "", CopyPaths));
             menu.Items.Add(Item("PinToSidebar", "", () => _owner.Pin(FolderOrSearchRoot!)));
-            menu.Items.Add(Item("Properties", "", ShowProperties));
+            menu.Items.Add(Tagged(Item("Properties", "", ShowProperties), ShellMenuMerge.PropertiesTag));
         }
         return menu;
     }
@@ -1410,7 +1491,7 @@ public sealed partial class FilePane : UserControl
         }
         bool move = DropMoves(e, internalPaths, target);
         e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
-        e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", PathTools.TabTitle(target, Loc.T("ThisPC")));
+        e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", PlaceName(target));
         e.DragUIOverride.IsCaptionVisible = true;
     }
 
@@ -1754,15 +1835,20 @@ public sealed partial class FilePane : UserControl
     private async Task ShowSmartHitsAsync(List<SmartHit> hits, CancellationTokenSource cts)
     {
         // The index can lag behind the disk for a moment; files that are gone are left out.
-        List<(SmartHit Hit, FileEntry Entry)> found = await Task.Run(
-            () => hits.Select(h => (h, DirectoryReader.ReadOne(h.Path))).Where(p => p.Item2 is not null).Select(p => (p.h, p.Item2!)).ToList(), cts.Token);
+        // The folder column shows the names Windows shows, such as C:\Benutzer\Anna\Bilder; they are asked here, off the UI thread.
+        List<(SmartHit Hit, FileEntry Entry, string Folder)> found = await Task.Run(
+            () => hits.Select(h => (h, DirectoryReader.ReadOne(h.Path)))
+                .Where(p => p.Item2 is not null)
+                .Select(p => (p.h, p.Item2!, ShownFolder(p.Item2!.FullPath, ask: true)))
+                .ToList(),
+            cts.Token);
         if (cts.IsCancellationRequested) return;
         ItemStyle style = RowStyle;
         _all = found.Select(f => new FileItem(f.Entry, style)
         {
             Snippet = f.Hit.Snippet,
             Match = f.Hit.Kinds,
-            FolderText = Path.GetDirectoryName(f.Entry.FullPath) ?? "",
+            FolderText = f.Folder,
         }).ToList();
         _items = new ObservableCollection<FileItem>(_all);
         BindList();
@@ -1783,7 +1869,12 @@ public sealed partial class FilePane : UserControl
             foreach (string folder in roots)
             {
                 var request = new SearchRequest(folder, state.Query, state.InNames, state.InContents, state.Subfolders, Settings.ShowHidden);
-                await LiveSearch.RunAsync(request, _pendingHits.Enqueue, counters, cts.Token);
+                // The names Windows shows for the hit's folder are asked here, on the search thread, so the list shows them at once.
+                await LiveSearch.RunAsync(request, hit =>
+                {
+                    _ = ShownFolder(hit.Entry.FullPath, ask: true);
+                    _pendingHits.Enqueue(hit);
+                }, counters, cts.Token);
                 if (cts.IsCancellationRequested) break;
             }
         }
@@ -1806,7 +1897,7 @@ public sealed partial class FilePane : UserControl
             {
                 Snippet = hit.Snippet,
                 Match = (hit.NameMatched ? MatchKind.Name : MatchKind.None) | (hit.ContentMatched ? MatchKind.Words : MatchKind.None),
-                FolderText = Path.GetDirectoryName(hit.Entry.FullPath) ?? "",
+                FolderText = ShownFolder(hit.Entry.FullPath, ask: false),
             };
             _all.Add(item);
             _items.Add(item);

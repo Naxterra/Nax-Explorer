@@ -92,6 +92,25 @@ public static class PathTools
         return result;
     }
 
+    /// <summary>
+    /// The path written with the folder names Windows shows, such as C:\Benutzer\Anna for C:\Users\Anna. The
+    /// drive or share stays as it is, and every folder below it gets the name <paramref name="shownName"/> gives for
+    /// its full path, or its own name when that is empty.
+    /// </summary>
+    public static string DisplayPath(string location, Func<string, string> shownName)
+    {
+        List<PathSegment> segments = Segments(location, "");
+        if (segments.Count < 2) return location;
+        var text = new System.Text.StringBuilder(segments[1].Location);
+        for (int i = 2; i < segments.Count; i++)
+        {
+            if (i > 2) text.Append('\\');
+            string name = shownName(segments[i].Location);
+            text.Append(string.IsNullOrEmpty(name) ? segments[i].Label : name);
+        }
+        return text.ToString();
+    }
+
     /// <summary>The short name a tab shows for a place.</summary>
     public static string TabTitle(string location, string thisPcLabel)
     {

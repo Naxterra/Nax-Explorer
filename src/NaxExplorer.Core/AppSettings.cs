@@ -59,7 +59,16 @@ public sealed class AppSettings
 
     public bool ShowHidden { get; set; }
 
+    /// <summary>Shows items that are both hidden and system, such as desktop.ini, as Explorer's "protected operating system files".</summary>
+    public bool ShowProtectedFiles { get; set; }
+
     public bool ShowExtensions { get; set; } = true;
+
+    /// <summary>What the left pane opens at start: empty for the folders of the last session, or a place (see <see cref="StartPlace"/>).</summary>
+    public string LeftStart { get; set; } = "";
+
+    /// <summary>What the right pane opens at start, like <see cref="LeftStart"/>.</summary>
+    public string RightStart { get; set; } = "";
 
     public bool ColorfulNames { get; set; } = true;
 
@@ -89,23 +98,52 @@ public sealed class AppSettings
 
     public bool PauseIndexingOnBattery { get; set; } = true;
 
-    /// <summary>Reads the settings. A missing or damaged file gives the defaults, so a bad file never stops the app.</summary>
-    public static AppSettings Load(string? path = null)
+    /// <summary>
+    /// Reads the settings. A missing or damaged file gives the defaults, so a bad file never stops the app. Without a
+    /// usable file, Explorer's choices for hidden items, protected system files and file name extensions are taken
+    /// over, so the same folder shows the same items in both; a file that was read keeps the app's own choices.
+    /// </summary>
+    public static AppSettings Load(string? path = null, ExplorerView? explorer = null)
     {
         path ??= DataFolders.Settings;
         try
         {
-            AppSettings settings = JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJson.Default.AppSettings) ?? new AppSettings();
-            settings.Left ??= new PaneSettings();
-            settings.Right ??= new PaneSettings();
-            settings.Pinned ??= [];
-            settings.IndexedFolders ??= [];
-            return settings;
+            if (JsonSerializer.Deserialize(File.ReadAllText(path), AppSettingsJson.Default.AppSettings) is { } settings)
+            {
+                settings.Left ??= new PaneSettings();
+                settings.Right ??= new PaneSettings();
+                settings.Pinned ??= [];
+                settings.IndexedFolders ??= [];
+                settings.LeftStart ??= "";
+                settings.RightStart ??= "";
+                return settings;
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
         {
-            return new AppSettings();
         }
+        ExplorerView view = explorer ?? ExplorerView.Read();
+        return new AppSettings
+        {
+            ShowHidden = view.ShowHidden,
+            ShowProtectedFiles = view.ShowProtectedFiles,
+            ShowExtensions = view.ShowExtensions,
+        };
+    }
+
+    /// <summary>The value of a start setting that opens the user's home folder.</summary>
+    public const string StartHome = "::Home";
+
+    /// <summary>
+    /// The place a pane opens at start, or null for the folders of the last session. A start folder that no longer
+    /// exists falls back to the last session as well.
+    /// </summary>
+    public static string? StartPlace(string setting, string home)
+    {
+        if (string.IsNullOrEmpty(setting)) return null;
+        if (setting == StartHome) return home;
+        if (PathTools.IsThisPc(setting)) return PathTools.ThisPc;
+        return Directory.Exists(setting) ? setting : null;
     }
 
     /// <summary>Writes the settings through a temporary file, so a crash never leaves a half-written file behind.</summary>
@@ -128,6 +166,30 @@ public sealed class AppSettings
         string downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
         if (Directory.Exists(downloads)) folders.Add(downloads);
         return folders.Where(f => !string.IsNullOrEmpty(f) && Directory.Exists(f)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+}
+
+/// <summary>Explorer's view choices, from the values Explorer keeps in the registry.</summary>
+public sealed record ExplorerView(bool ShowHidden, bool ShowProtectedFiles, bool ShowExtensions)
+{
+    private const string Key = @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced";
+
+    /// <summary>Explorer's values: Hidden is 1 to show hidden items, ShowSuperHidden is 1 to show protected system files,
+    /// HideFileExt is 0 to show extensions. Missing values mean Explorer's defaults.</summary>
+    public static ExplorerView From(int? hidden, int? superHidden, int? hideExtensions) =>
+        new(hidden == 1, superHidden == 1, hideExtensions == 0);
+
+    public static ExplorerView Read()
+    {
+        try
+        {
+            using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(Key);
+            return From(key?.GetValue("Hidden") as int?, key?.GetValue("ShowSuperHidden") as int?, key?.GetValue("HideFileExt") as int?);
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            return From(null, null, null);
+        }
     }
 }
 

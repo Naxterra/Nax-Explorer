@@ -84,7 +84,8 @@ internal static class ShellImages
         }
     }
 
-    private static ImagePixels? Read(IntPtr bitmap)
+    /// <summary>The pixels of a bitmap handle, for shell images and the bitmaps of shell menu items.</summary>
+    internal static ImagePixels? Read(IntPtr bitmap)
     {
         if (Native.GetObject(bitmap, Marshal.SizeOf<Native.BITMAP>(), out Native.BITMAP info) == 0) return null;
         int width = info.bmWidth, height = Math.Abs(info.bmHeight);

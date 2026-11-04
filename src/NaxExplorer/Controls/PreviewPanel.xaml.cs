@@ -47,7 +47,7 @@ public sealed partial class PreviewPanel : UserControl
         if (item is null)
         {
             Actions.Visibility = Visibility.Collapsed;
-            NameText.Text = selectedCount > 1 ? Loc.F("SelectedCount", selectedCount) : folder is null ? Loc.T("ThisPC") : PathTools.TabTitle(folder, folder);
+            NameText.Text = selectedCount > 1 ? Loc.F("SelectedCount", selectedCount) : folder is null ? Loc.T("ThisPC") : FilePane.PlaceName(folder);
             PictureArea.Visibility = Visibility.Collapsed;
             return;
         }

@@ -43,11 +43,13 @@ public sealed partial class FileItem : INotifyPropertyChanged
         {
             if (Entry.Kind == EntryKind.Drive)
             {
+                // Windows' own name, such as "Lokaler Datenträger (C:)"; built from label and letter only when it gave none.
+                if (Entry.DisplayName != Entry.Name) return Entry.DisplayName;
                 string label = Entry.Label.Length > 0 ? Entry.Label : Loc.Drive(Entry.DriveType);
                 return $"{label} ({Entry.Name})";
             }
             if (!_style.ShowExtensions && Entry.Kind == EntryKind.File && Entry.Extension.Length > 0) return Path.GetFileNameWithoutExtension(Entry.Name);
-            return Entry.Name;
+            return Entry.DisplayName;
         }
     }
 

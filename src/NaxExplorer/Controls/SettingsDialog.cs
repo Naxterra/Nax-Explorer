@@ -46,7 +46,10 @@ internal sealed partial class SettingsDialog : ContentDialog
             index => settings.Language = index switch { 1 => "en-US", 2 => "de-DE", _ => "" }));
         general.Children.Add(Choice("Theme", ["ThemeSystem", "ThemeLight", "ThemeDark"], settings.Theme switch { "light" => 1, "dark" => 2, _ => 0 },
             index => settings.Theme = index switch { 1 => "light", 2 => "dark", _ => "system" }));
+        general.Children.Add(StartChoice("LeftStart", () => settings.LeftStart, value => settings.LeftStart = value));
+        general.Children.Add(StartChoice("RightStart", () => settings.RightStart, value => settings.RightStart = value));
         general.Children.Add(Switch("ShowHidden", settings.ShowHidden, on => settings.ShowHidden = on));
+        general.Children.Add(Switch("ShowProtectedFiles", settings.ShowProtectedFiles, on => settings.ShowProtectedFiles = on));
         general.Children.Add(Switch("ShowExtensions", settings.ShowExtensions, on => settings.ShowExtensions = on));
         general.Children.Add(Switch("ColorfulNames", settings.ColorfulNames, on => settings.ColorfulNames = on));
         general.Children.Add(Switch("OpenPicturesInViewer", settings.OpenImagesInViewer, on => settings.OpenImagesInViewer = on));
@@ -148,6 +151,51 @@ internal sealed partial class SettingsDialog : ContentDialog
         return toggle;
     }
 
+    /// <summary>
+    /// Where a pane opens at start: the folders of the last session, the home folder, This PC, or a folder the user picks.
+    /// A picked folder is shown as its own entry; cancelling the picker keeps the previous choice.
+    /// </summary>
+    private ComboBox StartChoice(string key, Func<string> current, Action<string> set)
+    {
+        var box = new ComboBox { Header = Loc.T(key), MinWidth = 320 };
+        foreach (string option in (ReadOnlySpan<string>)["StartLastSession", "StartHome", "ThisPC", "StartPickFolder"]) box.Items.Add(Loc.T(option));
+        string value = current();
+        bool custom = value.Length > 0 && value != AppSettings.StartHome && !PathTools.IsThisPc(value);
+        if (custom) box.Items.Add(value);
+        box.SelectedIndex = custom ? 4 : value == AppSettings.StartHome ? 1 : PathTools.IsThisPc(value) ? 2 : 0;
+        int previous = box.SelectedIndex;
+        box.SelectionChanged += async (_, _) =>
+        {
+            switch (box.SelectedIndex)
+            {
+                case 0:
+                    set("");
+                    break;
+                case 1:
+                    set(AppSettings.StartHome);
+                    break;
+                case 2:
+                    set(PathTools.ThisPc);
+                    break;
+                case 3:
+                    var picker = new FolderPicker(XamlRoot.ContentIslandEnvironment.AppWindowId);
+                    var result = await picker.PickSingleFolderAsync();
+                    if (result?.Path is not { Length: > 0 } folder)
+                    {
+                        box.SelectedIndex = previous;
+                        return;
+                    }
+                    set(folder);
+                    while (box.Items.Count > 4) box.Items.RemoveAt(4);
+                    box.Items.Add(folder);
+                    box.SelectedIndex = 4;
+                    break;
+            }
+            previous = box.SelectedIndex;
+        };
+        return box;
+    }
+
     private static ComboBox Choice(string key, string[] options, int selected, Action<int> changed)
     {
         var box = new ComboBox { Header = Loc.T(key), MinWidth = 240 };
@@ -171,7 +219,12 @@ internal sealed partial class SettingsDialog : ContentDialog
             var row = new Grid { ColumnSpacing = 8 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.Children.Add(new TextBlock { Text = folder, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+            // The folder is written as Windows shows it (C:\Benutzer\...); names not stored yet are asked in the background.
+            var label = new TextBlock { Text = ShellNames.KnownPath(folder), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            ToolTipService.SetToolTip(label, folder);
+            row.Children.Add(label);
+            Task.Run(() => ShellNames.PathOf(folder)).ContinueWith(
+                t => DispatcherQueue.SafeEnqueue(() => label.Text = t.Result), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
             var remove = new Button { Content = new FontIcon { Glyph = "", FontSize = 11 }, Padding = new Thickness(6) };
             ToolTipService.SetToolTip(remove, Loc.T("RemoveFolder"));
             remove.Click += (_, _) =>
