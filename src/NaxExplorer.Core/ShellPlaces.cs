@@ -73,19 +73,22 @@ public static class ShellPlaces
         && value.Length > 2 && value.IndexOf('\\', 2) is var next && (next < 0 || next == value.Length - 1);
 
     /// <summary>
-    /// True when one of the path's parents is a file, as for C:\Archiv.zip\Ordner inside a zip file. The drive or share
+    /// True when one of the path's parents is a file, as for C:\Archiv.zip\Ordner inside a zip file. Only parents whose
+    /// name has an extension can be one, so a path without such a parent asks nothing more. Otherwise the drive or share
     /// is asked first, because every question about an unreachable network waits for its timeout; when it does not
-    /// answer, no parent is asked. Only parents whose name has an extension are asked about.
+    /// answer, no parent is asked.
     /// </summary>
     private static bool InsideFile(string path, Func<string, bool> exists, Func<string, bool> isFile)
     {
-        string? root = Path.GetPathRoot(path);
-        if (string.IsNullOrEmpty(root) || !exists(root)) return false;
+        var candidates = new List<string>();
         for (string? parent = Path.GetDirectoryName(path.TrimEnd('\\')); !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
         {
-            if (Path.HasExtension(parent) && isFile(parent)) return true;
+            if (Path.HasExtension(parent)) candidates.Add(parent);
         }
-        return false;
+        if (candidates.Count == 0) return false;
+        string? root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root) || !exists(root)) return false;
+        return candidates.Any(isFile);
     }
 
     /// <summary>How long the hand-offs of one place are counted, and how many of them make a loop.</summary>

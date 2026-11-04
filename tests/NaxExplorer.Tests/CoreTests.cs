@@ -455,7 +455,7 @@ internal static class CoreTests
             Check.That(ShellPlaces.MayHandOff(@"\\SERVER", state, now.AddSeconds(40)), "the same place again much later");
         });
 
-        yield return ("an_offline_network_folder_is_asked_about_only_twice_at_start", "A deep folder on a share or drive that does not answer costs two questions, the folder and its share or drive, even when all its parents have dots in their names, so starting the app for it never waits for the network once per folder level.", () =>
+        yield return ("an_offline_network_folder_is_asked_about_at_most_twice_at_start", "A deep folder on a share that does not answer costs one question when no parent has a dot in its name, and two, the folder and its drive, when all its parents have one, so starting the app for it never waits for the network once per folder level.", () =>
         {
             var asked = new List<string>();
             Func<string, bool> offline = path =>
@@ -464,11 +464,11 @@ internal static class CoreTests
                 return false;
             };
             Check.Equal(ShellPlace.None, ShellPlaces.Route(@"\\server\share\Projekte\2026\Kunden\A", offline, offline), "an offline share");
-            Check.Equal(2, asked.Count, "questions for a deep folder on an offline share");
-            Check.Equal(@"\\server\share", asked[1], "the second question is about the share itself");
+            Check.Equal(1, asked.Count, "questions for a deep folder without dotted parents on an offline share");
             asked.Clear();
             Check.Equal(ShellPlace.None, ShellPlaces.Route(@"Z:\a.1\b.2\c.3\d.4\e", offline, offline), "an offline drive with dotted folder names");
             Check.Equal(2, asked.Count, "questions for a deep folder with dotted parents on an offline drive");
+            Check.Equal(@"Z:\", asked[1], "the second question is about the drive itself");
         });
 
         yield return ("a_handoff_marker_counts_only_for_the_same_place_and_only_for_a_moment", "The marker the app sets on the Explorer it starts is recognized for the same place even in another spelling, but not for another place, not when it is older than half a minute, and not when it is garbled.", () =>

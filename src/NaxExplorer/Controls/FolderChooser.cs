@@ -258,8 +258,10 @@ internal sealed partial class FolderChooser : ContentDialog
         var flyout = new Flyout { Content = panel };
         // Every question to the disk runs off the UI thread, because the open folder may be on a share that is slow to
         // answer, and the window must not freeze meanwhile.
+        int opening = 0;
         flyout.Opening += async (_, _) =>
         {
+            int thisOpening = ++opening;
             problem.Visibility = Visibility.Collapsed;
             if (_current is not { } folder || PathTools.IsThisPc(folder)) return;
             string wanted = Loc.T("NewFolderName");
@@ -276,8 +278,8 @@ internal sealed partial class FolderChooser : ContentDialog
                     return wanted;
                 }
             });
-            // Only while the user has not started typing a name of their own.
-            if (name.Text == wanted && free != wanted)
+            // Only for the latest opening, and only while the user has not started typing a name of their own.
+            if (thisOpening == opening && name.Text == wanted && free != wanted)
             {
                 name.Text = free;
                 name.SelectAll();
@@ -287,6 +289,7 @@ internal sealed partial class FolderChooser : ContentDialog
         async void Create()
         {
             if (creating || _current is not { } folder || PathTools.IsThisPc(folder)) return;
+            int version = _version;
             string wanted = name.Text.Trim();
             NameProblem check = NameRules.Check(wanted);
             string? message = check != NameProblem.None ? Loc.T("Name" + check) : null;
@@ -318,8 +321,9 @@ internal sealed partial class FolderChooser : ContentDialog
                 return;
             }
             flyout.Hide();
-            // Should the user have gone to another folder while it was created, the chooser stays there.
-            if (!string.Equals(_current, folder, StringComparison.OrdinalIgnoreCase) || await NavigateAsync(folder) != true) return;
+            // Should the user have started going to another folder while it was created, even one that has not loaded
+            // yet, the chooser follows the user and does not come back here.
+            if (version != _version || await NavigateAsync(folder) != true) return;
             _folders.SelectedItem = _folders.Items.OfType<ListViewItem>().FirstOrDefault(i => string.Equals(i.Tag as string, created, StringComparison.OrdinalIgnoreCase));
             _folders.ScrollIntoView(_folders.SelectedItem);
         }
