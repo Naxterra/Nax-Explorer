@@ -31,6 +31,9 @@ internal sealed partial class FolderChooser : ContentDialog
     private string? _current;
     private int _version;
 
+    /// <summary>The last navigation that has finished; while it differs from <see cref="_version"/>, a folder is loading.</summary>
+    private int _settled;
+
     /// <summary>The chosen folder after the dialog closed with the copy or move button, otherwise null.</summary>
     public string? Chosen { get; private set; }
 
@@ -147,6 +150,8 @@ internal sealed partial class FolderChooser : ContentDialog
     private async Task<bool?> NavigateAsync(string location)
     {
         int version = ++_version;
+        // No new folder while a folder is loading: it would land in the folder the user is just leaving.
+        _newFolder.IsEnabled = false;
         bool thisPc = PathTools.IsThisPc(location);
         List<(string Glyph, string Label, string Path, Brush? Brush)> rows;
         try
@@ -159,10 +164,13 @@ internal sealed partial class FolderChooser : ContentDialog
             // never let an exception end the app.
             if (ex is not (IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)) CrashLog.Write(ex);
             if (version != _version) return null;
+            _settled = version;
+            _newFolder.IsEnabled = _current is not null && !PathTools.IsThisPc(_current);
             ShowNote(ex.Message);
             return false;
         }
         if (version != _version) return null;
+        _settled = version;
         _current = location;
         _address.Text = thisPc ? Loc.T("ThisPC") : location;
         _up.IsEnabled = !thisPc;
@@ -288,7 +296,8 @@ internal sealed partial class FolderChooser : ContentDialog
         bool creating = false;
         async void Create()
         {
-            if (creating || _current is not { } folder || PathTools.IsThisPc(folder)) return;
+            // While a folder is loading, the open folder is about to change, so nothing is created yet.
+            if (creating || _settled != _version || _current is not { } folder || PathTools.IsThisPc(folder)) return;
             int version = _version;
             string wanted = name.Text.Trim();
             NameProblem check = NameRules.Check(wanted);
