@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.22000.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <RootNamespace>NaxExplorer</RootNamespace>
+    <AssemblyName>Nax-Explorer</AssemblyName>
+    <Product>Nax-Explorer</Product>
+    <Description>A dual-pane file manager for Windows with an image viewer and local AI search</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+    <!-- x64 only: the installer and every published build target 64-bit Windows. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WinUISDKReferences>false</WinUISDKReferences>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- Both .NET and the Windows App SDK ship with the app, so it runs on a PC that has neither installed. -->
+    <SelfContained>true</SelfContained>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <!-- A startup hook named in the user's environment must never load code into the file manager. -->
+    <StartupHookSupport>false</StartupHookSupport>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Compiled ahead of time, so a start does not wait for .NET to compile the app's code first. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishTrimmed>false</PublishTrimmed>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIcon-256.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <ProjectReference Include="..\NaxExplorer.Core\NaxExplorer.Core.csproj" />
+    <ProjectReference Include="..\NaxExplorer.Search\NaxExplorer.Search.csproj" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" />
+    <!-- Only the parts of the Windows App SDK the app uses, at the versions the Microsoft.WindowsAppSDK 2.4.0 bundle pins.
+         The whole bundle would also bring its AI, machine-learning and widget components, which the app does not use. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.6" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.6" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="2.0.4" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.4.0" />
+  </ItemGroup>
+
+  <Target Name="CopyGeneratedXamlToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <GeneratedXamlResources Include="$(TargetDir)**\*.xbf" />
+      <GeneratedPriResources Include="$(TargetDir)$(AssemblyName).pri" Condition="Exists('$(TargetDir)$(AssemblyName).pri')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(GeneratedXamlResources)" DestinationFiles="@(GeneratedXamlResources->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(GeneratedPriResources)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

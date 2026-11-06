@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Authors>Naxterra</Authors>
+    <Company>Naxterra</Company>
+    <Copyright>Copyright © 2026 Naxterra.</Copyright>
+    <Deterministic>true</Deterministic>
+    <Version>0.1.7</Version>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+</Project>

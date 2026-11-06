@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>NaxExplorer.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NaxExplorer.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Reads the text of PDF files for content search and the AI index. Pure managed code under the Apache 2.0 license. -->
+    <PackageReference Include="PdfPig" Version="0.1.16" />
+  </ItemGroup>
+</Project>

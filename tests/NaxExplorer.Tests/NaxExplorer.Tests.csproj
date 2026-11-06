@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RollForward>LatestMajor</RollForward>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../src/NaxExplorer/MainWindow.xaml" LogicalName="Ui.MainWindow.xaml" />
+    <EmbeddedResource Include="../../src/NaxExplorer/Controls/FilePane.xaml" LogicalName="Ui.FilePane.xaml" />
+    <EmbeddedResource Include="../../src/NaxExplorer/Controls/ImageViewer.xaml" LogicalName="Ui.ImageViewer.xaml" />
+    <!-- Exercise the UI-independent service itself without loading WinUI in the console runner. -->
+    <Compile Include="../../src/NaxExplorer/Services/SearchService.cs" Link="Services/SearchService.cs" />
+    <Compile Include="../../src/NaxExplorer/Services/CrashLog.cs" Link="Services/CrashLog.cs" />
+    <Compile Include="../../src/NaxExplorer/Services/Loc.cs" Link="Services/Loc.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/Native.cs" Link="Shell/Native.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/OperationProgress.cs" Link="Shell/OperationProgress.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/ShellActions.cs" Link="Shell/ShellActions.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/ShellWindowRegistration.cs" Link="Shell/ShellWindowRegistration.cs" />
+    <ProjectReference Include="../../src/NaxExplorer.Core/NaxExplorer.Core.csproj" />
+    <ProjectReference Include="../../src/NaxExplorer.Search/NaxExplorer.Search.csproj" />
+  </ItemGroup>
+</Project>
