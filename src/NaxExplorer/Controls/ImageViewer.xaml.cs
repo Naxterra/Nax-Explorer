@@ -54,8 +54,16 @@ public sealed partial class ImageViewer : UserControl
         _index = Math.Clamp(index, 0, _pictures.Count - 1);
         _source = source;
         Visibility = Visibility.Visible;
+        Root.UpdateLayout();
         Root.Focus(FocusState.Programmatic);
         _ = ShowCurrentAsync();
+        int version = _version;
+        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            // Input that opened the overlay can restore focus to the covered pane.
+            // Hand it back after that input and the visible layout have completed.
+            if (version == _version && Visibility == Visibility.Visible) Root.Focus(FocusState.Programmatic);
+        });
     }
 
     internal void Close()
