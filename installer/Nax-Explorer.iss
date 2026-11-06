@@ -39,6 +39,8 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+; Uninstall restores folder verbs from code; Explorer must discard its cached association information afterward.
+ChangesAssociations=yes
 ; The app holds these mutexes while it runs, the global one also visible from other Windows sessions. Setup and the
 ; uninstaller wait until it is closed, so no locked program file is left behind.
 AppMutex=NaxExplorer.Running,Global\NaxExplorer.Running
@@ -72,6 +74,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; AppUserModelID: "
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+#include "DataCleanup.iss"
+
 // The app keeps its settings, its crash log, the AI index and the AI model in this folder of the user's local
 // application data. Outside the installation folder there are only these files and, while "open folders in Nax
 // Explorer" is on, its entries under HKEY_CURRENT_USER\Software\Classes and its sign-in entry under ...\Run, which the
@@ -245,6 +249,7 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Size: Int64;
+  RemoveAiData: Boolean;
 begin
   // If the app opened folders instead of Explorer, Explorer gets them back before the app's files are gone, and the
   // app no longer starts at sign-in.
@@ -265,23 +270,14 @@ begin
     Exit;
   end;
   if (CurUninstallStep <> usPostUninstall) or not DirExists(DataFolder) then Exit;
-  // Settings and the crash log always go.
-  DeleteFile(DataFolder + '\settings.json');
-  DeleteFile(DataFolder + '\settings.json.tmp');
-  DeleteFile(DataFolder + '\crash.log');
-  DeleteFile(DataFolder + '\handoff.txt');
   // The index and the model are large and can be kept for a later installation. A silent uninstall removes them, so
-  // nothing is left behind.
-  if DirExists(DataFolder + '\index') or DirExists(DataFolder + '\models') then
+  // nothing is left behind, unless /KEEPDATA explicitly requests retaining only the index and model.
+  RemoveAiData := not HasUninstallSwitch('/KEEPDATA');
+  if RemoveAiData and not UninstallSilent and
+    (DirExists(DataFolder + '\index') or DirExists(DataFolder + '\models')) then
   begin
     Size := (FolderSize(DataFolder + '\index') + FolderSize(DataFolder + '\models')) div (1024 * 1024);
-    if UninstallSilent or
-      (MsgBox(FmtMessage(CustomMessage('DataQuestion'), [DataFolder, IntToStr(Size)]), mbConfirmation, MB_YESNO) = IDYES) then
-    begin
-      DelTree(DataFolder + '\index', True, True, True);
-      DelTree(DataFolder + '\models', True, True, True);
-    end;
+    RemoveAiData := MsgBox(FmtMessage(CustomMessage('DataQuestion'), [DataFolder, IntToStr(Size)]), mbConfirmation, MB_YESNO) = IDYES;
   end;
-  // Removed only when nothing else is left in it.
-  RemoveDir(DataFolder);
+  CleanupAppData(DataFolder, RemoveAiData);
 end;

@@ -48,6 +48,8 @@ The index and the model live in `%LOCALAPPDATA%\Nax-Explorer`. The settings can 
 
 `build-installer.ps1` publishes the app self-contained for x64, collects the notices of every bundled component into THIRD-PARTY-NOTICES.txt and builds `artifacts\installer\Nax-Explorer-<version>-setup.exe` with Inno Setup 7. The installer needs no administrator rights and always installs for the current user only. Uninstalling removes the program, its settings and its crash log, and asks whether the AI index and model should be deleted too.
 
+A silent uninstall removes the AI data too. Pass `/KEEPDATA` to the uninstaller to retain only the index and model for a later installation; settings and logs are still removed.
+
 ## Building
 
 The solution needs the .NET 11 SDK and builds for x64:
@@ -60,6 +62,12 @@ The tests are a console program. Tests that need the AI model report SKIP when i
 
 ```
 dotnet run --project tests/NaxExplorer.Tests
+```
+
+Installer cleanup regressions run the shared Inno Setup cleanup code against disposable folders, including the legacy trace log, retained AI data, unknown files and directory junctions:
+
+```
+pwsh -File tests/installer/Test-Cleanup.ps1
 ```
 
 ## Projects
