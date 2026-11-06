@@ -103,6 +103,10 @@ public sealed class IndexStore : IDisposable
         try
         {
             connection.Open();
+            // SQLite's built-in NOCASE compares ASCII only. Scoped path comparisons need the same Unicode
+            // case handling as the Windows paths used by navigation and semantic search. Keep this separate
+            // from the schema's existing collation so opening an older index requires no index migration.
+            connection.CreateCollation("NAX_PATH", (left, right) => StringComparer.OrdinalIgnoreCase.Compare(left, right));
             Execute(connection, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;");
             using (var check = connection.CreateCommand())
             {
@@ -429,8 +433,8 @@ public sealed class IndexStore : IDisposable
             command.CommandText = """
                 SELECT chunk_text.rowid, chunks.file_id, bm25(chunk_text), snippet(chunk_text, 0, $start, $end, '…', 16)
                 FROM chunk_text JOIN chunks ON chunks.id = chunk_text.rowid JOIN files ON files.id = chunks.file_id
-                WHERE chunk_text MATCH $match AND ($scope IS NULL OR files.path = $scope COLLATE NOCASE
-                    OR substr(files.path, 1, length($prefix)) = $prefix COLLATE NOCASE)
+                WHERE chunk_text MATCH $match AND ($scope IS NULL OR files.path = $scope COLLATE NAX_PATH
+                    OR substr(files.path, 1, length($prefix)) = $prefix COLLATE NAX_PATH)
                 ORDER BY bm25(chunk_text)
                 LIMIT $limit
                 """;

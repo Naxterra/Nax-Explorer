@@ -54,6 +54,16 @@ internal static class RegressionTests
             Check.Sequence([inside], hits.Select(h => h.Path));
         });
 
+        yield return ("scoped_words_match_non_ascii_folder_names_case_insensitively", "Folder-scoped full-text search uses Windows-style ordinal case-insensitive comparison for accented folder names too.", () =>
+        {
+            using var store = NewStore();
+            const string inside = @"C:\BÜRO\Überblick\notes.txt";
+            store.Save(inside, 1, 1, FileState.Indexed, Pieces("needle"));
+            store.Save(@"C:\BÜRO2\other.txt", 1, 1, FileState.Indexed, Pieces("needle"));
+            var hits = new HybridSearch(store, null).Search("needle", @"c:\büro\überblick", 10, meaning: false);
+            Check.Sequence([inside], hits.Select(h => h.Path));
+        });
+
         yield return ("stopping_search_retains_resources_until_active_queries_finish", "Stopping during a semantic query lets that query finish its snippet read before releasing its database and model.", () =>
         {
             var store = NewStore();
