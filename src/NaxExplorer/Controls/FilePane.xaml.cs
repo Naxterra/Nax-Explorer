@@ -1194,6 +1194,12 @@ public sealed partial class FilePane : UserControl
         list.Focus(FocusState.Pointer);
         // Own the empty-space gesture so the list cannot compete with the box for
         // pointer moves or clear its result when the mouse button is released.
+        // A row or the list's scrolling host can capture in its class handler,
+        // before this handled-events listener runs. Release the original route's
+        // captures before transferring ownership to the parent.
+        for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
+            if (node is UIElement element) element.ReleasePointerCaptures();
+        _selectionTrace?.Record(e.Pointer.IsInContact ? "contact" : "no-contact", Stopwatch.GetTimestamp());
         bool captured = ContentArea.CapturePointer(e.Pointer);
         _selectionTrace?.Record(captured ? "captured" : "capture-failed", Stopwatch.GetTimestamp());
         if (!captured) { EndMarquee(); return; }
