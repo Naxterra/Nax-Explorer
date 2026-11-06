@@ -56,10 +56,16 @@ public static partial class SystemActivity
         Battery,
     }
 
-    public static Reason ShouldPause(bool inFullScreen, bool onBattery)
+    public static Reason ShouldPause(bool inFullScreen, bool onBattery) => EvaluatePause(inFullScreen, onBattery,
+        static () => SHQueryUserNotificationState(out int state) == 0 ? state : null,
+        ForegroundCoversMonitor,
+        static () => GetSystemPowerStatus(out PowerStatus power) ? power.ACLineStatus : null);
+
+    internal static Reason EvaluatePause(bool inFullScreen, bool onBattery, Func<int?> notificationState,
+        Func<bool> foregroundCoversMonitor, Func<byte?> acLineStatus)
     {
-        if (inFullScreen && SHQueryUserNotificationState(out int state) == 0 && FullScreenPause(state, ForegroundCoversMonitor)) return Reason.FullScreen;
-        if (onBattery && GetSystemPowerStatus(out PowerStatus power) && power.ACLineStatus == 0) return Reason.Battery;
+        if (inFullScreen && notificationState() is int state && FullScreenPause(state, foregroundCoversMonitor)) return Reason.FullScreen;
+        if (onBattery && acLineStatus() == 0) return Reason.Battery;
         return Reason.None;
     }
 
@@ -314,10 +320,15 @@ public sealed class Indexer : IDisposable
     /// <summary>Raised on the indexer's thread, at most twice a second, and always when the phase changes.</summary>
     public event Action<IndexerStatus>? StatusChanged;
 
-    public Indexer(IndexStore store, EmbedderHost host)
+    public Indexer(IndexStore store, EmbedderHost host) : this(store, host, SystemActivity.ShouldPause) { }
+
+    private readonly Func<bool, bool, SystemActivity.Reason> _activity;
+
+    internal Indexer(IndexStore store, EmbedderHost host, Func<bool, bool, SystemActivity.Reason> activity)
     {
         _store = store;
         _host = host;
+        _activity = activity;
         _thread = new Thread(Run) { IsBackground = true, Name = "Nax-Explorer indexer", Priority = ThreadPriority.BelowNormal };
     }
 
@@ -447,7 +458,9 @@ public sealed class Indexer : IDisposable
                 if (QueueCount == 0)
                 {
                     Report(IndexerPhase.Idle, null, null, force: _status.Phase != IndexerPhase.Idle);
-                    _wake.WaitOne(TimeSpan.FromSeconds(_changed.IsEmpty ? 30 : 1));
+                    // Power and foreground changes do not produce file events. Keep pause status current even
+                    // with an empty queue, rather than waiting thirty seconds for the next idle wake-up.
+                    _wake.WaitOne(TimeSpan.FromSeconds(PauseOnBattery || PauseInFullScreen || !_changed.IsEmpty ? 1 : 30));
                     continue;
                 }
                 IndexBatch();
@@ -470,7 +483,7 @@ public sealed class Indexer : IDisposable
             SystemActivity.Reason reason = userPaused ? SystemActivity.Reason.None : ActivityReason();
             if (!userPaused && reason == SystemActivity.Reason.None) return true;
             Report(IndexerPhase.Paused, null, userPaused ? "user" : reason == SystemActivity.Reason.FullScreen ? "fullscreen" : "battery", force: _status.Phase != IndexerPhase.Paused);
-            _wake.WaitOne(TimeSpan.FromSeconds(5));
+            _wake.WaitOne(TimeSpan.FromSeconds(1));
         }
         return false;
     }
@@ -482,7 +495,7 @@ public sealed class Indexer : IDisposable
         bool fullScreen = PauseInFullScreen, battery = PauseOnBattery;
         if (now >= _nextActivityCheck || fullScreen != _checkedFullScreen || battery != _checkedBattery)
         {
-            _activityReason = SystemActivity.ShouldPause(fullScreen, battery);
+            _activityReason = _activity(fullScreen, battery);
             _checkedFullScreen = fullScreen;
             _checkedBattery = battery;
             _nextActivityCheck = now + 250;
@@ -540,6 +553,7 @@ public sealed class Indexer : IDisposable
                 Consider(entry, known.GetValueOrDefault(entry.FullPath), work, names);
                 if (names.Count >= 2000)
                 {
+                    if (!WaitForResume()) return;
                     lock (_gate)
                     {
                         if (_stopping || generation != _rootsVersion) return;
@@ -550,6 +564,7 @@ public sealed class Indexer : IDisposable
                 if (seen.Count % 500 == 0) Report(IndexerPhase.Scanning, null, null);
             }
         }
+        if (!WaitForResume()) return;
         lock (_gate)
         {
             if (_stopping || generation != _rootsVersion) return;
@@ -633,6 +648,7 @@ public sealed class Indexer : IDisposable
                     if (!WaitForResume()) return;
                     Consider(entry, _store.Find(entry.FullPath), work, names);
                 }
+                if (!WaitForResume()) return;
                 lock (_gate)
                 {
                     if (_stopping || generation != _rootsVersion) return;
@@ -675,6 +691,7 @@ public sealed class Indexer : IDisposable
             string? text = TextExtractor.Extract(item.Path, IndexRules.MaxChars);
             if (text is null || string.IsNullOrWhiteSpace(text))
             {
+                if (!WaitForResume()) return;
                 lock (_gate)
                 {
                     if (Current(item.Path, generation)) _store.Save(item.Path, item.Size, item.Modified, text is null ? FileState.Failed : FileState.NameOnly, []);
@@ -702,7 +719,9 @@ public sealed class Indexer : IDisposable
         int next = 0;
         foreach (var (item, chunks, title) in prepared)
         {
-            if (_stopping) return;
+            // Power can change during a native model call. Retain its results in memory until indexing may
+            // resume instead of committing them to the database after the pause condition became active.
+            if (!WaitForResume()) return;
             var stored = new List<StoredChunk>(chunks.Count);
             for (int i = 0; i < chunks.Count; i++)
             {

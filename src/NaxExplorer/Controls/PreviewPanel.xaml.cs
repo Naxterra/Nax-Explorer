@@ -297,8 +297,8 @@ public sealed partial class PreviewPanel : UserControl
     private void SetPicture(Microsoft.UI.Xaml.Media.ImageSource? source, int pixelWidth = 0, int pixelHeight = 0)
     {
         double scale = XamlRoot?.RasterizationScale ?? 1;
-        PreviewImage.MaxWidth = pixelWidth > 0 ? pixelWidth / scale : 64;
-        PreviewImage.MaxHeight = pixelHeight > 0 ? pixelHeight / scale : 64;
+        PreviewImage.MaxWidth = pixelWidth > 0 ? DpiMetrics.LogicalPixels(pixelWidth, scale) : 64;
+        PreviewImage.MaxHeight = pixelHeight > 0 ? DpiMetrics.LogicalPixels(pixelHeight, scale) : 64;
         PreviewImage.Source = source;
     }
 

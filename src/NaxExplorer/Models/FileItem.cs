@@ -37,6 +37,9 @@ public sealed partial class FileItem : INotifyPropertyChanged
     /// <summary>True while the row is on screen; image requests for rows that left the screen are skipped.</summary>
     public volatile bool IsRealized;
 
+    internal ImageRequestState IconRequest { get; } = new();
+    internal ImageRequestState ThumbnailRequest { get; } = new();
+
     public string DisplayName
     {
         get

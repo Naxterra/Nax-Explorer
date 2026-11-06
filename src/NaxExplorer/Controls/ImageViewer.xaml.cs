@@ -35,6 +35,7 @@ public sealed partial class ImageViewer : UserControl
     private double _panOffsetY;
     private int _pixelWidth;
     private int _pixelHeight;
+    private double _imageScale = 1;
 
     public ImageViewer()
     {
@@ -122,10 +123,7 @@ public sealed partial class ImageViewer : UserControl
         Busy.IsActive = false;
         _pixelWidth = image.Width;
         _pixelHeight = image.Height;
-        double scale = XamlRoot?.RasterizationScale ?? 1;
-        // At 100 % one picture pixel is one screen pixel.
-        Picture.Width = image.Width / scale;
-        Picture.Height = image.Height / scale;
+        ApplyPixelSize();
         Picture.Source = image.Source;
         long size = new FileInfo(path).Exists ? new FileInfo(path).Length : 0;
         InfoText.Text = $"{_index + 1} / {_pictures.Count}   ·   {image.OriginalWidth} × {image.OriginalHeight}   ·   {SizeFormat.Format(size)}";
@@ -168,6 +166,32 @@ public sealed partial class ImageViewer : UserControl
     }
 
     // ---------------------------------------------------------------- zoom and pan
+
+    private void ApplyPixelSize()
+    {
+        double scale = XamlRoot?.RasterizationScale ?? 1;
+        _imageScale = scale;
+        // At 100 % one picture pixel is one physical screen pixel, including after a DPI transition.
+        Picture.Width = Core.DpiMetrics.LogicalPixels(_pixelWidth, scale);
+        Picture.Height = Core.DpiMetrics.LogicalPixels(_pixelHeight, scale);
+    }
+
+    internal void OnRasterizationScaleChanged()
+    {
+        if (Visibility != Visibility.Visible || Picture.Source is null) return;
+        double oldScale = _imageScale, newScale = XamlRoot?.RasterizationScale ?? 1;
+        double x = Core.DpiMetrics.RescaleOffset(Scroller.HorizontalOffset, oldScale, newScale);
+        double y = Core.DpiMetrics.RescaleOffset(Scroller.VerticalOffset, oldScale, newScale);
+        double zoom = Scroller.ZoomFactor;
+        ApplyPixelSize();
+        Stage.UpdateLayout();
+        if (_fit) FitToWindow();
+        else
+        {
+            UpdateCanvas(zoom);
+            Scroller.ChangeView(x, y, (float)zoom, disableAnimation: true);
+        }
+    }
 
     /// <summary>
     /// True once a picture is shown and the viewer has a size. Before that the picture's width is NaN, and zoom values

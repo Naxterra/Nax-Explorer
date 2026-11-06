@@ -130,6 +130,16 @@ public sealed partial class FilePane : UserControl
 
     private int ThumbnailPixels => Math.Min(256, (int)Math.Ceiling(128 * (XamlRoot?.RasterizationScale ?? 1)));
 
+    internal void RefreshImagesForDpi()
+    {
+        if (_closed || _tab is null) return;
+        foreach (FileItem item in _all.Where(item => item.IsRealized))
+        {
+            ImageCache.RequestIcon(item, PathTools.IsThisPc(_tab.Location) ? IconPixels * 3 / 2 : IconPixels, DispatcherQueue);
+            if (CurrentList == Thumbs && item.Entry.Kind == EntryKind.File) ImageCache.RequestThumbnail(item, ThumbnailPixels, DispatcherQueue);
+        }
+    }
+
     internal void Initialize(MainWindow owner, PaneSettings settings, string? start, string fallback)
     {
         _owner = owner;

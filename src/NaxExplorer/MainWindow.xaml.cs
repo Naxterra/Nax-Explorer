@@ -73,6 +73,7 @@ public sealed partial class MainWindow : Window
 
         _messageTimer = new DispatcherQueueTimerWrapper(DispatcherQueue, TimeSpan.FromSeconds(5), () => Message.IsOpen = false);
         _previewTimer = new DispatcherQueueTimerWrapper(DispatcherQueue, TimeSpan.FromMilliseconds(120), UpdatePreview);
+        Root.Loaded += (_, _) => ObserveRasterizationScale();
         ApplyTheme();
         Root.ActualThemeChanged += (_, _) =>
         {
@@ -107,6 +108,8 @@ public sealed partial class MainWindow : Window
             App.Instance.Search.AvailabilityChanged -= availabilityChanged;
             _messageTimer.Stop();
             _previewTimer.Stop();
+            if (_observedRoot is not null) _observedRoot.Changed -= XamlRoot_Changed;
+            _observedRoot = null;
             Preview.StopBackgroundWork();
             LeftPane.StopBackgroundWork();
             RightPane.StopBackgroundWork();
@@ -145,6 +148,34 @@ public sealed partial class MainWindow : Window
     }
 
     internal IntPtr Hwnd { get; }
+
+    private XamlRoot? _observedRoot;
+    private double _rasterizationScale = 1;
+
+    private void ObserveRasterizationScale()
+    {
+        if (_observedRoot == Root.XamlRoot) return;
+        if (_observedRoot is not null) _observedRoot.Changed -= XamlRoot_Changed;
+        _observedRoot = Root.XamlRoot;
+        if (_observedRoot is null) return;
+        _rasterizationScale = _observedRoot.RasterizationScale;
+        _observedRoot.Changed += XamlRoot_Changed;
+    }
+
+    private void XamlRoot_Changed(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        double scale = sender.RasterizationScale;
+        if (scale == _rasterizationScale) return;
+        _rasterizationScale = scale;
+        DispatcherQueue.SafeEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (_observedRoot is null || scale != _observedRoot.RasterizationScale) return;
+            LeftPane.RefreshImagesForDpi();
+            RightPane.RefreshImagesForDpi();
+            _previewTimer.Restart();
+            Viewer.OnRasterizationScaleChanged();
+        });
+    }
 
     internal AppSettings Settings => App.Instance!.Settings;
 

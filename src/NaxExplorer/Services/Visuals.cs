@@ -90,11 +90,11 @@ internal static class ImageCache
     /// <summary>Sets the item's icon, at once from the cache or later from the shell.</summary>
     public static void RequestIcon(FileItem item, int pixels, DispatcherQueue ui)
     {
-        if (item.Icon is not null) return;
         string key = IconKey(item.Entry, pixels);
+        if (!item.IconRequest.Begin(key, item.Icon is not null)) return;
         if (Icons.TryGetValue(key, out ImageSource? cached))
         {
-            item.Icon = cached;
+            if (item.IconRequest.Complete(key)) item.Icon = cached;
             return;
         }
         // An icon shared by extension serves many rows, so it is fetched even when this row has scrolled away.
@@ -103,19 +103,20 @@ internal static class ImageCache
         {
             if (image is null) return;
             Icons[key] = image;
-            item.Icon = image;
+            if (item.IconRequest.Complete(key)) item.Icon = image;
         });
     }
 
     public static void RequestThumbnail(FileItem item, int pixels, DispatcherQueue ui)
     {
-        if (item.Thumbnail is not null || item.Entry.Kind == EntryKind.Drive) return;
+        if (item.Entry.Kind == EntryKind.Drive) return;
         string key = $"{item.Entry.FullPath}|{item.Entry.ModifiedUtc.Ticks}|{pixels}";
+        if (!item.ThumbnailRequest.Begin(key, item.Thumbnail is not null)) return;
         if (Thumbnails.TryGetValue(key, out var node))
         {
             ThumbnailOrder.Remove(node);
             ThumbnailOrder.AddFirst(node);
-            item.Thumbnail = node.Value.Image;
+            if (item.ThumbnailRequest.Complete(key)) item.Thumbnail = node.Value.Image;
             return;
         }
         Load(key, item.Entry.FullPath, pixels, thumbnail: true, () => item.IsRealized, ui, image =>
@@ -128,7 +129,7 @@ internal static class ImageCache
                 Thumbnails.Remove(ThumbnailOrder.Last!.Value.Key);
                 ThumbnailOrder.RemoveLast();
             }
-            item.Thumbnail = image;
+            if (item.ThumbnailRequest.Complete(key)) item.Thumbnail = image;
         });
     }
 
