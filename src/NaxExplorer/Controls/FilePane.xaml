@@ -259,9 +259,7 @@
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
                       DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived" KeyDown="List_KeyDown" />
             <!-- The selection box drawn while the mouse is dragged over the empty part of the list. -->
-            <Canvas x:Name="MarqueeLayer" IsHitTestVisible="False">
-                <Rectangle x:Name="MarqueeRect" Visibility="Collapsed" Fill="#333B82F6" Stroke="#3B82F6" StrokeThickness="1" RadiusX="2" RadiusY="2" />
-            </Canvas>
+            <Canvas x:Name="MarqueeLayer" IsHitTestVisible="False" />
             <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10" Visibility="Collapsed" IsHitTestVisible="False" MaxWidth="420">
                 <FontIcon x:Name="EmptyGlyph" Glyph="&#xE8B7;" FontSize="40" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 <TextBlock x:Name="EmptyText" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
