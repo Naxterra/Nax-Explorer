@@ -8,6 +8,22 @@ internal static class TransitionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("viewer_reopen_waits_for_observed_zoom_and_offsets", "Reopening after custom zoom or a hidden DPI change retries an ignored reset until the actual zoom and pan settle; a user zoom cancels the pending reset.", () =>
+        {
+            var reset = new ViewResetState();
+            reset.Request();
+            Check.That(!reset.Observe(1.25, 1, 0, 0), "old zoom completed the reset");
+            Check.That(!reset.Observe(1.25, 1, 240, 120), "an ignored request was not retried");
+            Check.That(!reset.Observe(1, 1, 240, 120), "zoom settling hid stale pan offsets");
+            Check.That(reset.Observe(1, 1, 0, 0) && !reset.Pending, "settled view did not finish the reset");
+            reset.Request();
+            reset.Cancel();
+            Check.That(reset.Observe(1.5, 1, 200, 50) && !reset.Pending, "cancelled reset would override user zoom");
+            reset.Request();
+            Check.That(!reset.Observe(double.NaN, 1, 0, 0), "invalid layout completed the reset");
+            Check.That(reset.Observe(0.5, 0.5, 0, 0), "large picture fit was not accepted");
+        });
+
         yield return ("dpi_image_requests_reject_late_sizes_and_retry_cancelled_loads", "An icon requested at a new DPI is retried if the row left the screen before loading; a late old-size result cannot overwrite the current size, including a rapid round trip.", () =>
         {
             var request = new ImageRequestState();

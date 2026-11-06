@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using NaxExplorer.Core;
 using NaxExplorer.Services;
 using NaxExplorer.Shell;
@@ -36,11 +37,13 @@ public sealed partial class ImageViewer : UserControl
     private int _pixelWidth;
     private int _pixelHeight;
     private double _imageScale = 1;
+    private readonly ViewResetState _viewReset = new();
 
     public ImageViewer()
     {
         InitializeComponent();
         Canvas.ManipulationMode = ManipulationModes.None;
+        Unloaded += (_, _) => CancelViewReset();
     }
 
     internal void Attach(MainWindow owner) => _owner = owner;
@@ -57,6 +60,7 @@ public sealed partial class ImageViewer : UserControl
 
     internal void Close()
     {
+        CancelViewReset();
         _cts?.Cancel();
         _version++;
         _ahead = null;
@@ -73,6 +77,7 @@ public sealed partial class ImageViewer : UserControl
 
     private async Task ShowCurrentAsync()
     {
+        CancelViewReset();
         if (_pictures.Count == 0)
         {
             Close();
@@ -128,6 +133,10 @@ public sealed partial class ImageViewer : UserControl
         long size = new FileInfo(path).Exists ? new FileInfo(path).Length : 0;
         InfoText.Text = $"{_index + 1} / {_pictures.Count}   ·   {image.OriginalWidth} × {image.OriginalHeight}   ·   {SizeFormat.Format(size)}";
         _fit = true;
+        // A reused ScrollViewer can ignore ChangeView while returning from Collapsed,
+        // especially if DPI changed while it was hidden. Retry after layout/rendering
+        // until its reported view actually matches the new picture's fitted view.
+        RequestViewReset();
         // The new picture size takes effect in the next layout pass; fitting before it used the old size, which left a
         // turned picture unfitted and off centre.
         Stage.UpdateLayout();
@@ -214,14 +223,43 @@ public sealed partial class ImageViewer : UserControl
         SetZoom(FitZoom(), null);
     }
 
+    private void RequestViewReset()
+    {
+        CancelViewReset();
+        _viewReset.Request();
+        CompositionTarget.Rendering += CompleteViewReset;
+    }
+
+    private void CancelViewReset()
+    {
+        _viewReset.Cancel();
+        CompositionTarget.Rendering -= CompleteViewReset;
+    }
+
+    private void CompleteViewReset(object? sender, object e)
+    {
+        if (Visibility != Visibility.Visible || !_fit)
+        {
+            CancelViewReset();
+            return;
+        }
+        if (!HasLayout) return;
+        FitToWindow();
+        if (_viewReset.Observe(Scroller.ZoomFactor,
+            Math.Clamp(FitZoom(), Scroller.MinZoomFactor, Scroller.MaxZoomFactor),
+            Scroller.HorizontalOffset, Scroller.VerticalOffset)) CancelViewReset();
+    }
+
     /// <summary>Zooms, keeping the point under <paramref name="anchor"/> (in viewport coordinates) in place.</summary>
     private void SetZoom(double zoom, Windows.Foundation.Point? anchor)
     {
         if (!HasLayout || !double.IsFinite(zoom) || zoom <= 0) return;
+        if (!_fit) CancelViewReset();
         zoom = Math.Clamp(zoom, Scroller.MinZoomFactor, Scroller.MaxZoomFactor);
         double oldZoom = Scroller.ZoomFactor;
         double viewWidth = Scroller.ViewportWidth, viewHeight = Scroller.ViewportHeight;
         UpdateCanvas(zoom);
+        Scroller.UpdateLayout();
         var point = anchor ?? new Windows.Foundation.Point(viewWidth / 2, viewHeight / 2);
         double contentX = (Scroller.HorizontalOffset + point.X) / oldZoom;
         double contentY = (Scroller.VerticalOffset + point.Y) / oldZoom;
@@ -233,7 +271,7 @@ public sealed partial class ImageViewer : UserControl
             offsetY = 0;
         }
         Scroller.ChangeView(offsetX, offsetY, (float)zoom, disableAnimation: true);
-        ZoomText.Text = $"{Math.Round(zoom * 100)} %";
+        ZoomText.Text = $"{Math.Round(Scroller.ZoomFactor * 100)} %";
     }
 
     /// <summary>Keeps the canvas at least as large as the window at this zoom, so the picture can sit in its middle.</summary>
