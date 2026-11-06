@@ -1148,7 +1148,7 @@ public sealed partial class FilePane : UserControl
     private SelectionTrace? _selectionTrace;
     private Windows.Foundation.Point _marqueePointer;
     private Windows.Foundation.Point _marqueeOrigin;
-    private DispatcherQueueTimer? _marqueeScrollTimer;
+    private DispatcherTimer? _marqueeScrollTimer;
     private long _marqueeScrollTick;
     private MarqueeGrid? _marqueeGrid;
     private readonly Dictionary<int, Windows.Foundation.Rect> _marqueeVisited = [];
@@ -1370,12 +1370,13 @@ public sealed partial class FilePane : UserControl
         if (_marqueeScroller is not { } scroll || !_marqueeShown) return;
         double top = scroll.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).Y;
         double speed = MarqueeScroll.Speed(_marqueePointer.Y - top, scroll.ViewportHeight);
+        _selectionTrace?.Scroll(_marqueePointer.Y - top, scroll.ViewportHeight, scroll.ScrollableHeight, scroll.VerticalOffset, speed, scroll.ActualHeight);
         if (speed == 0) { _marqueeScrollTimer?.Stop(); return; }
         if (_marqueeScrollTimer is null)
         {
-            _marqueeScrollTimer = DispatcherQueue.CreateTimer();
+            _marqueeScrollTimer = new DispatcherTimer();
             _marqueeScrollTimer.Interval = TimeSpan.FromMilliseconds(16);
-            _marqueeScrollTimer.SafeTick(() =>
+            _marqueeScrollTimer.Tick += (_, _) => SafeDispatch.Run(() =>
             {
                 if (_marqueeStart is null || _marqueeScroller is not { } viewer) return;
                 long now = Stopwatch.GetTimestamp();
@@ -1385,11 +1386,12 @@ public sealed partial class FilePane : UserControl
                 double velocity = MarqueeScroll.Speed(_marqueePointer.Y - origin, viewer.ViewportHeight);
                 double target = Math.Clamp(viewer.VerticalOffset + velocity * seconds, 0, viewer.ScrollableHeight);
                 if (velocity == 0 || Math.Abs(target - viewer.VerticalOffset) < 0.01) { _marqueeScrollTimer.Stop(); return; }
-                viewer.ChangeView(null, target, null, disableAnimation: true);
+                bool accepted = viewer.ChangeView(null, target, null, disableAnimation: true);
+                _selectionTrace?.Record(accepted ? "scroll-requested" : "scroll-rejected", Stopwatch.GetTimestamp());
                 QueueMarquee(_marqueePointer);
             });
         }
-        if (!_marqueeScrollTimer.IsRunning)
+        if (!_marqueeScrollTimer.IsEnabled)
         {
             _marqueeScrollTick = Stopwatch.GetTimestamp();
             _marqueeScrollTimer.Start();

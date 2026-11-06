@@ -8,10 +8,12 @@ internal sealed class SelectionTrace
 {
     private readonly string _folder;
     private readonly List<Sample> _samples = [];
+    private readonly List<ScrollSample> _scroll = [];
     private long _previousFrame;
     private long _input;
     private int _layouts;
     private readonly record struct Sample(string Stage, long Tick, double Milliseconds, int Rows, int Added, int Removed, int Selected);
+    private readonly record struct ScrollSample(double Position, double Viewport, double Scrollable, double Offset, double Speed, double ActualHeight);
 
     private SelectionTrace(string folder) => _folder = folder;
 
@@ -22,6 +24,8 @@ internal sealed class SelectionTrace
     }
 
     public void Input() => _input = Stopwatch.GetTimestamp();
+    public void Scroll(double position, double viewport, double scrollable, double offset, double speed, double actualHeight) =>
+        _scroll.Add(new(position, viewport, scrollable, offset, speed, actualHeight));
     public void Layout() => _layouts++;
     public void Record(string stage, long start, int rows = 0, int added = 0, int removed = 0, int selected = 0) =>
         _samples.Add(new(stage, Stopwatch.GetTimestamp(), Stopwatch.GetElapsedTime(start).TotalMilliseconds, rows, added, removed, selected));
@@ -36,7 +40,7 @@ internal sealed class SelectionTrace
 
     public void Finish()
     {
-        var capture = new { Frequency = Stopwatch.Frequency, Layouts = _layouts, Samples = _samples.ToArray() };
+        var capture = new { Frequency = Stopwatch.Frequency, Layouts = _layouts, Samples = _samples.ToArray(), Scroll = _scroll.ToArray() };
         string folder = _folder;
         _ = Task.Run(() =>
         {
