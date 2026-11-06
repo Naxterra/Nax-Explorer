@@ -62,6 +62,7 @@ public sealed partial class FilePane : UserControl
     private string _freeSpace = "";
     private bool _switchingTabs;
     private bool _closed;
+    private readonly Dictionary<ListViewBase, HashSet<SelectorItem>> _realizedRows = [];
 
     /// <summary>Closed windows release their watchers and searches while the app continues in the background.</summary>
     internal void StopBackgroundWork()
@@ -999,12 +1000,15 @@ public sealed partial class FilePane : UserControl
 
     private void List_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (args.Item is not FileItem item) return;
+        if (!_realizedRows.TryGetValue(sender, out var rows)) _realizedRows[sender] = rows = [];
         if (args.InRecycleQueue)
         {
-            item.IsRealized = false;
+            rows.Remove(args.ItemContainer);
+            if (args.Item is FileItem recycled) recycled.IsRealized = false;
             return;
         }
+        if (args.Item is not FileItem item) return;
+        rows.Add(args.ItemContainer);
         item.IsRealized = true;
         if (sender == List && !PathTools.IsThisPc(_tab.Location) && args.ItemContainer.ContentTemplateRoot is Grid row) ApplyColumns(row);
         ImageCache.RequestIcon(item, PathTools.IsThisPc(_tab.Location) ? IconPixels * 3 / 2 : IconPixels, DispatcherQueue);
@@ -1036,7 +1040,15 @@ public sealed partial class FilePane : UserControl
 
     private void List_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        // Correcting a click or updating a selection box can raise this once per row.
+        // Recalculate the status and preview once after that batch, not for every item.
+        if (_adjustingSelection) return;
         if (sender is ListViewBase list) KeepClickSelection(list, e);
+        NotifySelectionChanged();
+    }
+
+    private void NotifySelectionChanged()
+    {
         UpdateStatus();
         _owner.OnPaneSelectionChanged(this);
     }
@@ -1096,7 +1108,9 @@ public sealed partial class FilePane : UserControl
 
     private Windows.Foundation.Point? _marqueeStart;
     private bool _marqueeShown;
-    private HashSet<FileItem> _marqueeBase = [];
+    private MarqueeSelection<FileItem>? _marqueeSelection;
+
+    internal bool IsSelectingWithMouse => _marqueeStart is not null;
 
     /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
     private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -1107,7 +1121,8 @@ public sealed partial class FilePane : UserControl
         _marqueeStart = point.Position;
         _marqueeShown = false;
         bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
-        _marqueeBase = keep ? list.SelectedItems.OfType<FileItem>().ToHashSet() : [];
+        _marqueeSelection = new(keep ? list.SelectedItems.OfType<FileItem>() : []);
+        _owner.OnPaneMouseSelectionStarted(this);
         if (!keep) list.SelectedItems.Clear();
         // No pointer capture: the list takes the capture for itself, and losing it would end the box at once.
         list.Focus(FocusState.Pointer);
@@ -1134,30 +1149,28 @@ public sealed partial class FilePane : UserControl
         MarqueeRect.Height = height;
         MarqueeRect.Visibility = Visibility.Visible;
         var box = new Windows.Foundation.Rect(left, top, width, height);
-        var wanted = new HashSet<FileItem>(_marqueeBase);
-        for (int i = 0; i < _items.Count; i++)
+        var intersecting = new List<FileItem>();
+        // Virtualized folders can contain hundreds of thousands of items. Hit-test
+        // only their realized containers instead of querying every index per move.
+        foreach (SelectorItem row in _realizedRows.GetValueOrDefault(list) ?? [])
         {
-            if (list.ContainerFromIndex(i) is not FrameworkElement row) continue;
+            if (row.Content is not FileItem item || row.ActualWidth <= 0 || row.ActualHeight <= 0) continue;
             Windows.Foundation.Rect bounds = row.TransformToVisual(ContentArea).TransformBounds(new Windows.Foundation.Rect(0, 0, row.ActualWidth, row.ActualHeight));
             bounds.Intersect(box);
-            if (!bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) wanted.Add(_items[i]);
+            if (!bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) intersecting.Add(item);
         }
+        var delta = _marqueeSelection!.Update(intersecting);
         _adjustingSelection = true;
         try
         {
-            foreach (FileItem selected in list.SelectedItems.OfType<FileItem>().ToList())
-            {
-                if (!wanted.Contains(selected)) list.SelectedItems.Remove(selected);
-            }
-            foreach (FileItem item in wanted)
-            {
-                if (!list.SelectedItems.Contains(item)) list.SelectedItems.Add(item);
-            }
+            foreach (FileItem item in delta.Removed) list.SelectedItems.Remove(item);
+            foreach (FileItem item in delta.Added) list.SelectedItems.Add(item);
         }
         finally
         {
             _adjustingSelection = false;
         }
+        if (delta.Added.Count > 0 || delta.Removed.Count > 0) NotifySelectionChanged();
         e.Handled = true;
     }
 
@@ -1168,8 +1181,9 @@ public sealed partial class FilePane : UserControl
         if (_marqueeStart is null) return;
         _marqueeStart = null;
         _marqueeShown = false;
-        _marqueeBase = [];
+        _marqueeSelection = null;
         MarqueeRect.Visibility = Visibility.Collapsed;
+        if (!_closed) _owner.OnPaneSelectionChanged(this);
     }
 
     /// <summary>True when a press landed on a row or on a scroll bar, where it keeps its usual meaning.</summary>

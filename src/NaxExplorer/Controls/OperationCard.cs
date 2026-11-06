@@ -7,7 +7,7 @@ namespace NaxExplorer.Controls;
 
 /// <summary>
 /// One running copy, move or delete in the window's corner: what it does, the item being worked on, a progress bar and
-/// a Cancel button. When it ends it says so briefly and disappears, or stays open with the items that failed.
+/// a Cancel button. A clean finish removes it immediately; failures remain available to inspect.
 /// </summary>
 internal sealed class OperationCard : UserControl
 {
@@ -64,7 +64,7 @@ internal sealed class OperationCard : UserControl
     }
 
     /// <summary>
-    /// Ends the card: a clean finish closes it after a moment; failures stay listed until the user closes it. A
+    /// Ends the card: a clean finish closes it immediately; failures stay listed until the user closes it. A
     /// failure of the whole operation comes as <paramref name="error"/>.
     /// </summary>
     public void Finish(string? error)
@@ -76,9 +76,7 @@ internal sealed class OperationCard : UserControl
         _action.Content = Loc.T("Close");
         if (failures.Count == 0 && error is null)
         {
-            _bar.Value = 1;
-            _detail.Text = Loc.T(_progress.IsCancelled ? "OperationCancelled" : "OperationDone");
-            StartClose(DispatcherQueue.CreateTimer());
+            Close();
             return;
         }
         _bar.Visibility = Visibility.Collapsed;
@@ -90,14 +88,6 @@ internal sealed class OperationCard : UserControl
             _failures.Children.Add(new TextBlock { Text = $"{failure.Name}: {failure.Message}", FontSize = 12, TextWrapping = TextWrapping.Wrap, Style = (Style)Application.Current.Resources["SecondaryTextStyle"] });
         }
         _failures.Visibility = Visibility.Visible;
-    }
-
-    private void StartClose(Microsoft.UI.Dispatching.DispatcherQueueTimer timer)
-    {
-        timer.Interval = TimeSpan.FromSeconds(2.5);
-        timer.IsRepeating = false;
-        timer.Tick += (_, _) => Close();
-        timer.Start();
     }
 
     private void Close() => _host.Children.Remove(this);

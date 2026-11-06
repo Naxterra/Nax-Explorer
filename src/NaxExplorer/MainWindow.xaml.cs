@@ -285,7 +285,8 @@ public sealed partial class MainWindow : Window
         if (changed)
         {
             UpdateTitle();
-            _previewTimer.Restart();
+            if (pane.IsSelectingWithMouse) OnPaneMouseSelectionStarted(pane);
+            else _previewTimer.Restart();
             _shellWindow?.Navigated(pane.Location);
         }
     }
@@ -352,7 +353,14 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneSelectionChanged(FilePane pane)
     {
-        if (pane == _active) _previewTimer.Restart();
+        if (pane == _active && !pane.IsSelectingWithMouse) _previewTimer.Restart();
+    }
+
+    internal void OnPaneMouseSelectionStarted(FilePane pane)
+    {
+        if (pane != _active) return;
+        _previewTimer.Stop();
+        Preview.StopBackgroundWork();
     }
 
     private void UpdateTitle()
@@ -398,7 +406,7 @@ public sealed partial class MainWindow : Window
 
     private void UpdatePreview()
     {
-        if (!Settings.ShowPreview) return;
+        if (!Settings.ShowPreview || _active.IsSelectingWithMouse) return;
         _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }

@@ -13,6 +13,7 @@ var suites = new (string File, IEnumerable<(string Name, string Scenario, Action
     ("SearchServiceTests.cs", SearchServiceTests.All()),
     ("RegressionTests.cs", RegressionTests.All()),
     ("TransitionTests.cs", TransitionTests.All()),
+    ("SelectionTests.cs", SelectionTests.All()),
     ("ShellTests.cs", ShellTests.All()),
     ("ModelTests.cs", ModelTests.All()),
 };
