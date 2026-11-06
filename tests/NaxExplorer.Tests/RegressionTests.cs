@@ -9,6 +9,35 @@ internal static class RegressionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("preview_totals_are_recounted_after_folder_contents_change", "After a preview is cached, deleting its only file invalidates both folder and selection totals instead of showing the old count and size for two minutes.", () =>
+        {
+            string root = Fixtures.TempFolder("preview-totals");
+            string file = Fixtures.Write(root, "fixture.txt", "temporary");
+            var cache = new FolderTotalsCache();
+            cache.Remember(root, FolderStats.Measure([root], default), cache.Generation);
+            cache.Remember(file, FolderStats.Measure([file], default), cache.Generation);
+            Check.That(cache.TryGet(root.ToUpperInvariant(), out var before), "fresh totals were not reusable");
+            Check.Equal(1L, before!.Files);
+            File.Delete(file);
+            cache.Invalidate();
+            Check.That(!cache.TryGet(root, out _) && !cache.TryGet(file, out _), "folder change retained stale totals");
+            cache.Remember(root, FolderStats.Measure([root], default), cache.Generation);
+            Check.That(cache.TryGet(root, out var after), "recount was not cached");
+            Check.Equal(0L, after!.Files);
+            Check.Equal(0L, after.Bytes);
+        });
+
+        yield return ("late_preview_count_cannot_restore_invalidated_totals", "A count started before a mutation cannot repopulate the cache after invalidation; a new count can still be remembered.", () =>
+        {
+            var cache = new FolderTotalsCache();
+            long old = cache.Generation;
+            cache.Invalidate();
+            cache.Remember("folder", new FolderTotals(0, 1, 22, true), old);
+            Check.That(!cache.TryGet("folder", out _), "old in-flight count revived stale totals");
+            cache.Remember("folder", new FolderTotals(0, 0, 0, true), cache.Generation);
+            Check.That(cache.TryGet("folder", out var fresh) && fresh!.Files == 0, "new generation was rejected");
+        });
+
         yield return ("icon_commands_have_localized_accessible_names", "Every icon command in the main toolbar, file pane and image viewer exposes a localized name in English and German, including buttons hidden until search or image navigation.", () =>
         {
             var assembly = typeof(RegressionTests).Assembly;

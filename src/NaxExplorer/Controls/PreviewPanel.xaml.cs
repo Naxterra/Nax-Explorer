@@ -181,7 +181,13 @@ public sealed partial class PreviewPanel : UserControl
     }
 
     /// <summary>Counts already done, kept for two minutes, so going back to a folder does not count it again.</summary>
-    private readonly Dictionary<string, (FolderTotals Totals, DateTime When)> _totals = new(StringComparer.OrdinalIgnoreCase);
+    private readonly FolderTotalsCache _totals = new();
+
+    internal void InvalidateTotals()
+    {
+        _totals.Invalidate();
+        StopBackgroundWork();
+    }
 
     /// <summary>
     /// Adds the number of all folders and files below the paths and their total size. Large folders are counted in the
@@ -207,9 +213,10 @@ public sealed partial class PreviewPanel : UserControl
             online.Text = Loc.F("OnlineOnlyTotals", totals.OnlineFiles, SizeFormat.Format(totals.OnlineBytes)) + running;
         }
         string key = string.Join("|", paths);
-        if (_totals.TryGetValue(key, out var known) && DateTime.UtcNow - known.When < TimeSpan.FromMinutes(2))
+        long generation = _totals.Generation;
+        if (_totals.TryGet(key, out var known))
         {
-            Show(known.Totals);
+            Show(known!);
             return;
         }
         if (paths.Any(FolderStats.IsNetworkPath))
@@ -241,8 +248,7 @@ public sealed partial class PreviewPanel : UserControl
         try
         {
             FolderTotals totals = await Task.Run(() => FolderStats.Measure(paths, token, partial => DispatcherQueue.SafeEnqueue(() => Show(partial)), skipUnfetchedRoots: selection), token);
-            if (_totals.Count > 200) _totals.Clear();
-            _totals[key] = (totals, DateTime.UtcNow);
+            _totals.Remember(key, totals, generation);
             Show(totals);
         }
         catch (OperationCanceledException)

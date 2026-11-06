@@ -530,6 +530,7 @@ public sealed partial class FilePane : UserControl
         }
         if (cts.IsCancellationRequested || tab != _tab || !ReferenceEquals(location, tab.Location)) return;
         _entries = entries;
+        _owner.OnPaneContentsChanged();
         ShowEntries(tab.Selection);
         if (error is not null) ShowEmpty("", error);
         StartWatcher(location);
@@ -768,6 +769,7 @@ public sealed partial class FilePane : UserControl
         _entries = fresh;
         if (!changes.IsEmpty)
         {
+            _owner.OnPaneContentsChanged();
             if (changes.Added.Count + changes.Removed.Count > 400)
             {
                 ShowEntries(SelectedPaths.ToList());

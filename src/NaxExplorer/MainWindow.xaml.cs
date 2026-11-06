@@ -338,11 +338,24 @@ public sealed partial class MainWindow : Window
     {
         foreach (MainWindow window in App.Instance!.Windows)
         {
+            window.InvalidatePreviewTotals();
             foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
             {
                 if (pane.Folder is { } shown && PathTools.SameLocation(shown, folder)) pane.ScheduleRefresh();
             }
         }
+    }
+
+    internal void OnPaneContentsChanged()
+    {
+        // Recursive totals can describe an ancestor of the changed folder, including in another window.
+        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals();
+    }
+
+    private void InvalidatePreviewTotals()
+    {
+        Preview.InvalidateTotals();
+        _previewTimer.Restart();
     }
 
     internal void SetCutPaths(IReadOnlyList<string> paths)
