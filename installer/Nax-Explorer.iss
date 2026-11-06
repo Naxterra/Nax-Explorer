@@ -74,7 +74,8 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchApp}"; Flags: nowait postin
 [Code]
 // The app keeps its settings, its crash log, the AI index and the AI model in this folder of the user's local
 // application data. Outside the installation folder there are only these files and, while "open folders in Nax
-// Explorer" is on, its entries under HKEY_CURRENT_USER\Software\Classes, which the uninstall step below removes.
+// Explorer" is on, its entries under HKEY_CURRENT_USER\Software\Classes and its sign-in entry under ...\Run, which the
+// uninstall step below removes.
 function DataFolder: String;
 begin
   Result := ExpandConstant('{localappdata}\Nax-Explorer');
@@ -187,13 +188,69 @@ begin
   DeleteNotes(VerbKey);
 end;
 
+const
+  // The hidden window the app keeps while it runs in the background; it must match BackgroundWindow.Title in the app.
+  BackgroundTitle = 'Nax Explorer Background';
+  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  RunValue = 'Nax Explorer';
+  WM_CLOSE = $0010;
+
+// While the app opens folders instead of Explorer it runs in the background without a window, so the user could not
+// close it for setup. It is asked to end through its hidden window, and setup waits up to ten seconds for that.
+procedure CloseBackgroundApp;
+var
+  Wnd: HWND;
+  Tries: Integer;
+begin
+  Wnd := FindWindowByWindowName(BackgroundTitle);
+  if Wnd = 0 then Exit;
+  PostMessage(Wnd, WM_CLOSE, 0, 0);
+  Tries := 0;
+  while (FindWindowByWindowName(BackgroundTitle) <> 0) and (Tries < 100) do
+  begin
+    Sleep(100);
+    Tries := Tries + 1;
+  end;
+  // The hidden window goes first; the app still saves its state and closes its index after it. Setup waits until the
+  // app's mutex is free as well, so no program file or index file is still open when setup goes on.
+  Tries := 0;
+  while CheckForMutexes('NaxExplorer.Running') and (Tries < 100) do
+  begin
+    Sleep(100);
+    Tries := Tries + 1;
+  end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  CloseBackgroundApp;
+  Result := True;
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  CloseBackgroundApp;
+  Result := True;
+end;
+
+// Removes the sign-in entry, but only the app's own: a value of the same name another program wrote stays.
+procedure RemoveStartAtSignIn;
+var
+  Command: String;
+begin
+  if RegQueryStringValue(HKCU, RunKey, RunValue, Command) and (Pos('nax-explorer.exe', Lowercase(Command)) > 0) then
+    RegDeleteValue(HKCU, RunKey, RunValue);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Size: Int64;
 begin
-  // If the app opened folders instead of Explorer, Explorer gets them back before the app's files are gone.
+  // If the app opened folders instead of Explorer, Explorer gets them back before the app's files are gone, and the
+  // app no longer starts at sign-in.
   if CurUninstallStep = usUninstall then
   begin
+    RemoveStartAtSignIn;
     ReleaseFolderType('Directory');
     ReleaseFolderType('Drive');
     if ReleaseCommand(WinEKey) then

@@ -184,6 +184,38 @@ internal static class IndexTests
             WaitFor(() => store.Counts().Files == 3 && search.Search("weekend", null, 10).Count == 0, "deleted file");
         });
 
+        yield return ("paused_indexer_does_not_scan_or_update_the_index", "Starting while paused leaves both file names and document contents unindexed until indexing resumes.", () =>
+        {
+            string folder = Fixtures.TempFolder("paused-indexer");
+            Fixtures.Write(folder, "notes.txt", "database notes");
+            Fixtures.Write(folder, "archive.zip", "name only");
+            using IndexStore store = NewStore(out _);
+            using var host = new EmbedderHost(() => new FakeEmbedder());
+            using var indexer = new Indexer(store, host) { UserPaused = true, PauseInFullScreen = false, PauseOnBattery = false };
+            indexer.Start([folder]);
+            WaitFor(() => indexer.Status.Phase == IndexerPhase.Paused, "paused status");
+            Check.Equal(0, store.Counts().Files, "files scanned while paused");
+            Check.That(!host.IsLoaded, "model loaded while paused");
+            indexer.UserPaused = false;
+            indexer.Nudge();
+            WaitFor(() => store.Counts().Files == 2 && store.Counts().Documents == 1, "resume after pause");
+        });
+
+        yield return ("disposed_model_host_releases_the_model_after_its_last_lease", "Stopping AI search during an active lease retains the model until the lease ends, then disposes it exactly once.", () =>
+        {
+            var embedder = new DisposalEmbedder();
+            using var host = new EmbedderHost(() => embedder);
+            EmbedderHost.Lease first = host.Acquire(), last = host.Acquire();
+            host.Dispose();
+            Check.Equal(0, embedder.Disposals, "disposed an active model");
+            first.Dispose();
+            Check.Equal(0, embedder.Disposals);
+            last.Dispose();
+            last.Dispose();
+            Check.Equal(1, embedder.Disposals, "model retained after final lease");
+            Check.That(!host.IsLoaded, "disposed model remains loaded");
+        });
+
         yield return ("indexing_never_changes_the_users_files", "After indexing, every file has the same bytes, size and modification time as before.", () =>
         {
             string folder = Fixtures.TempFolder("untouched");
@@ -199,6 +231,15 @@ internal static class IndexTests
             }
             Check.Sequence(before, Snapshot(text, docx), "file state");
         });
+    }
+
+    private sealed class DisposalEmbedder : IEmbedder
+    {
+        public int Disposals { get; private set; }
+        public int Dimensions => 384;
+        public string Device => "test";
+        public float[][] Embed(IReadOnlyList<string> texts, CancellationToken token = default) => throw new NotSupportedException();
+        public void Dispose() => Disposals++;
     }
 
     private static IndexStore NewStore(out string folder)

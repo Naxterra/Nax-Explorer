@@ -339,20 +339,15 @@ public sealed partial class ImageViewer : UserControl
 
     private async void Delete_Click(object sender, RoutedEventArgs e) => await DeleteCurrentAsync(permanently: Native.IsKeyDown(0x10));
 
-    /// <summary>Moves the picture to the Recycle Bin (Windows asks first when that is set) and shows the next one.</summary>
+    /// <summary>
+    /// Moves the picture to the Recycle Bin, or deletes it for good after the app asked, and shows the next one. A
+    /// failure shows on the app's progress card, and the picture then stays in the viewer.
+    /// </summary>
     private async Task DeleteCurrentAsync(bool permanently)
     {
         if (_pictures.Count == 0) return;
         string path = _pictures[_index];
-        try
-        {
-            await ShellActions.DeleteAsync(new[] { path }, _owner.Hwnd, permanently);
-        }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
-        {
-            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return;
-        }
+        if (!await _owner.DeleteAsync(new[] { path }, permanently)) return;
         if (File.Exists(path)) return;
         _pictures.RemoveAt(_index);
         _ahead = null;

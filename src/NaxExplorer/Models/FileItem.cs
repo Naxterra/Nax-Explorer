@@ -57,7 +57,7 @@ public sealed partial class FileItem : INotifyPropertyChanged
         ? ""
         : Entry.ModifiedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-    public string TypeText => ImageCache.TypeName(Entry);
+    public string TypeText => Entry.TypeName ?? ImageCache.TypeName(Entry);
 
     public string SizeText => Entry.Kind switch
     {
@@ -233,6 +233,9 @@ internal sealed class PaneTab
     }
 
     public string Location { get; set; }
+
+    /// <summary>For a shell place: the place one level up, as Windows named it when the place was listed.</summary>
+    public string? ShellParent { get; set; }
 
     public NavigationHistory History { get; } = new();
 

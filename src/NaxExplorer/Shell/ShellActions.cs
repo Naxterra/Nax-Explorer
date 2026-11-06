@@ -5,14 +5,15 @@ namespace NaxExplorer.Shell;
 
 /// <summary>
 /// File operations and shell commands. Copy, move, delete and rename go through the Windows copy engine
-/// (IFileOperation), so they show the Windows progress and conflict dialogs, ask for administrator rights only when a
-/// file needs them, can be undone with Ctrl+Z in Explorer, and delete to the Recycle Bin.
+/// (IFileOperation), with the app's own progress and conflict UI. Operations ask for administrator rights only when a
+/// file needs them, can be undone with Ctrl+Z in Explorer, and normally delete to the Recycle Bin.
 /// </summary>
 internal static class ShellActions
 {
-    /// <summary>Opens a file with its default program.</summary>
+    /// <summary>Opens a file with its default program, or an item of a shell place with its default command.</summary>
     public static bool Open(string path, IntPtr owner, string? verb = null)
     {
+        if (Core.PathTools.IsShellPlace(path)) return InvokeShellItem(path, owner, verb);
         var info = new Native.SHELLEXECUTEINFO
         {
             cbSize = Marshal.SizeOf<Native.SHELLEXECUTEINFO>(),
@@ -32,6 +33,11 @@ internal static class ShellActions
     public static void ShowProperties(IReadOnlyList<string> paths, IntPtr owner)
     {
         if (paths.Count == 0) return;
+        if (paths.Count == 1 && Core.PathTools.IsShellPlace(paths[0]))
+        {
+            InvokeShellItem(paths[0], owner, "properties");
+            return;
+        }
         if (paths.Count == 1)
         {
             var info = new Native.SHELLEXECUTEINFO
@@ -54,6 +60,32 @@ internal static class ShellActions
         Marshal.Release(data);
         Native.SHMultiFileProperties(dataObject, 0);
         Native.Release(dataObject);
+    }
+
+    /// <summary>
+    /// Runs a command on an item that has no path of its own, such as a deleted file in the Recycle Bin or a file on a
+    /// phone, through the item's identity in the shell. Without <paramref name="verb"/> its default command runs.
+    /// </summary>
+    private static bool InvokeShellItem(string location, IntPtr owner, string? verb)
+    {
+        if (Native.SHParseDisplayName(location, IntPtr.Zero, out IntPtr pidl, 0, out _) != 0 || pidl == IntPtr.Zero) return false;
+        try
+        {
+            var info = new Native.SHELLEXECUTEINFO
+            {
+                cbSize = Marshal.SizeOf<Native.SHELLEXECUTEINFO>(),
+                fMask = Native.SEE_MASK_INVOKEIDLIST,
+                hwnd = owner,
+                lpVerb = verb,
+                lpIDList = pidl,
+                nShow = 1,
+            };
+            return Native.ShellExecuteEx(ref info);
+        }
+        finally
+        {
+            Native.ILFree(pidl);
+        }
     }
 
     /// <summary>The folder a shortcut points to, or null when it points to a file or cannot be read.</summary>
@@ -79,25 +111,40 @@ internal static class ShellActions
         }
     }
 
-    public static Task CopyAsync(IReadOnlyList<string> sources, string folder, IntPtr owner) => TransferAsync(sources, folder, owner, move: false);
-
-    public static Task MoveAsync(IReadOnlyList<string> sources, string folder, IntPtr owner) => TransferAsync(sources, folder, owner, move: true);
-
-    private static Task TransferAsync(IReadOnlyList<string> sources, string folder, IntPtr owner, bool move)
+    /// <summary>
+    /// Runs the planned batches of a copy or move one after another (see <see cref="Core.TransferPlan"/>). Every batch
+    /// is attempted even when an earlier one failed, and all failures are reported together.
+    /// </summary>
+    public static Task TransferAsync(IReadOnlyList<Core.TransferBatch> batches, bool move, IntPtr owner, OperationProgress progress) => RunOnSta(() =>
     {
-        // Copies into the folder the items already live in get "- Copy" names, as in Explorer; others ask on conflicts.
-        var sameFolder = sources.Where(s => Core.PathTools.SameLocation(Path.GetDirectoryName(s.TrimEnd('\\')) ?? "", folder)).ToList();
-        var elsewhere = sources.Except(sameFolder).ToList();
-        return RunOnSta(() =>
+        var errors = new List<COMException>();
+        for (int i = 0; i < batches.Count && !progress.IsCancelled; i++)
         {
-            if (elsewhere.Count > 0) Perform(owner, Core.OperationFlags.ForTransfer(renameOnCollision: false), op => Transfer(op, elsewhere, folder, move));
-            if (sameFolder.Count > 0 && !move) Perform(owner, Core.OperationFlags.ForTransfer(renameOnCollision: true), op => Transfer(op, sameFolder, folder, move: false));
-        });
+            Core.TransferBatch batch = batches[i];
+            // A copy into the folder the items live in is always a copy, also as part of a move request.
+            bool batchMove = move && !batch.Sources.All(s => Core.PathTools.SameLocation(Path.GetDirectoryName(s.TrimEnd('\\')) ?? "", batch.TargetFolder));
+            progress.BeginBatch(i, batches.Count);
+            Attempt(errors, () => Perform(owner, batch.Flags, progress, op => Transfer(op, batch.Sources, batch.TargetFolder, batchMove)));
+        }
+        if (errors.Count == 1) throw errors[0];
+        if (errors.Count > 1) throw new COMException(string.Join(" ", errors.Select(e => e.Message).Distinct()), errors[0].ErrorCode);
+    });
+
+    private static void Attempt(List<COMException> errors, Action work)
+    {
+        try
+        {
+            work();
+        }
+        catch (COMException ex)
+        {
+            errors.Add(ex);
+        }
     }
 
     private static int Transfer(IFileOperation operation, IReadOnlyList<string> sources, string folder, bool move)
     {
-        using var items = ShellItems.Create(sources);
+        using var items = ShellItems.Create(sources, requireAll: true);
         if (items.Array is null) return -1;
         Guid riid = Native.IID_IShellItem;
         if (Native.SHCreateItemFromParsingName(folder, IntPtr.Zero, ref riid, out IShellItem destination) != 0) return -1;
@@ -111,19 +158,23 @@ internal static class ShellActions
         }
     }
 
-    /// <summary>Deletes to the Recycle Bin, or permanently with <paramref name="permanently"/>, which Windows confirms first.</summary>
-    public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently) => RunOnSta(() =>
+    /// <summary>
+    /// Deletes to the Recycle Bin, or permanently with <paramref name="permanently"/>, after the user confirmed it in the
+    /// app. An item that cannot go to the Recycle Bin still brings up Windows' warning first.
+    /// </summary>
+    public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently, OperationProgress progress) => RunOnSta(() =>
     {
-        Perform(owner, Core.OperationFlags.ForDelete(permanently), operation =>
+        Perform(owner, Core.OperationFlags.ForDelete(permanently), progress, operation =>
         {
-            using var items = ShellItems.Create(paths);
+            using var items = ShellItems.Create(paths, requireAll: true);
             return items.Array is null ? -1 : operation.DeleteItems(items.Array);
         });
     });
 
+    /// <summary>Renames one item. The caller checks first that the new name is free.</summary>
     public static Task RenameAsync(string path, string newName, IntPtr owner) => RunOnSta(() =>
     {
-        Perform(owner, Core.OperationFlags.ForRename(), operation =>
+        Perform(owner, Core.OperationFlags.ForRename(), null, operation =>
         {
             Guid riid = Native.IID_IShellItem;
             if (Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref riid, out IShellItem item) != 0) return -1;
@@ -138,22 +189,48 @@ internal static class ShellActions
         });
     });
 
-    /// <summary>Runs one operation with exactly the given flags (see <see cref="Core.OperationFlags"/>).</summary>
-    private static void Perform(IntPtr owner, uint flags, Func<IFileOperation, int> queue)
+    /// <summary>
+    /// Runs one operation with exactly the given flags (see <see cref="Core.OperationFlags"/>). With
+    /// <paramref name="progress"/>, the app follows it for its own progress window and can cancel it. Items that failed
+    /// are collected there; a failure of the whole operation is thrown.
+    /// </summary>
+    private static void Perform(IntPtr owner, uint flags, OperationProgress? progress, Func<IFileOperation, int> queue)
     {
         var operation = (IFileOperation)Activator.CreateInstance(Type.GetTypeFromCLSID(Native.CLSID_FileOperation)!)!;
+        uint cookie = 0;
+        bool advised = false;
+        // The progress collects the failures of every batch of a request; only those of this run excuse its result.
+        int failuresBefore = progress?.Failures.Count ?? 0;
         try
         {
-            operation.SetOwnerWindow(owner);
-            operation.SetOperationFlags(flags);
-            if (queue(operation) != 0) return;
-            operation.PerformOperations();
+            Marshal.ThrowExceptionForHR(operation.SetOwnerWindow(owner));
+            Marshal.ThrowExceptionForHR(operation.SetOperationFlags(flags));
+            if (progress is not null)
+            {
+                Marshal.ThrowExceptionForHR(operation.Advise(progress, out cookie));
+                advised = true;
+            }
+            // A failure is reported to the caller, which shows it, instead of the operation silently doing nothing.
+            int queued = queue(operation);
+            if (queued != 0) throw new COMException(Loc.T("OperationNotStarted"), queued == -1 ? unchecked((int)0x80004005) : queued);
+            int done = operation.PerformOperations();
+            if (progress is not null && (IsCancel(done) || operation.GetAnyOperationsAborted(out bool aborted) == 0 && aborted)) progress.Cancel();
+            // Only a failure counts: the copy engine also returns success codes other than S_OK, for example when an
+            // item was skipped. Failed items are already listed by the progress; anything else is thrown.
+            bool listed = progress is not null && progress.Failures.Count > failuresBefore;
+            if (done < 0 && !IsCancel(done) && !listed) throw new COMException(Marshal.GetExceptionForHR(done)?.Message, done);
         }
         finally
         {
+            if (advised) operation.Unadvise(cookie);
             Native.Release(operation);
         }
     }
+
+    /// <summary>True for the results Windows gives when the user cancelled in its own dialog, which is no error.</summary>
+    private static bool IsCancel(int hr) =>
+        hr == unchecked((int)0x800704C7) // ERROR_CANCELLED
+        || hr == unchecked((int)0x80270000); // COPYENGINE_E_USER_CANCELLED
 
     /// <summary>Runs shell work on its own STA thread, so a long copy never blocks the window.</summary>
     private static Task RunOnSta(Action work)
@@ -193,16 +270,33 @@ internal sealed class ShellItems : IDisposable
         Array = array;
     }
 
-    public static ShellItems Create(IEnumerable<string> paths)
+    public static ShellItems Create(IEnumerable<string> paths, bool requireAll = false)
     {
         var pidls = new List<IntPtr>();
-        foreach (string path in paths)
+        try
         {
-            if (Native.SHParseDisplayName(path, IntPtr.Zero, out IntPtr pidl, 0, out _) == 0 && pidl != IntPtr.Zero) pidls.Add(pidl);
+            foreach (string path in paths)
+            {
+                int parsed = Native.SHParseDisplayName(path, IntPtr.Zero, out IntPtr pidl, 0, out _);
+                if (parsed == 0 && pidl != IntPtr.Zero) pidls.Add(pidl);
+                else if (pidl != IntPtr.Zero) Native.ILFree(pidl);
+                if (requireAll && (parsed != 0 || pidl == IntPtr.Zero))
+                    throw new COMException(Loc.T("OperationNotStarted"), parsed < 0 ? parsed : unchecked((int)0x80004005));
+            }
+            IShellItemArray? array = null;
+            if (pidls.Count > 0)
+            {
+                int created = Native.SHCreateShellItemArrayFromIDLists((uint)pidls.Count, [.. pidls], out IShellItemArray items);
+                if (created == 0) array = items;
+                else if (requireAll) throw new COMException(Loc.T("OperationNotStarted"), created);
+            }
+            return new ShellItems(pidls, array);
         }
-        IShellItemArray? array = null;
-        if (pidls.Count > 0 && Native.SHCreateShellItemArrayFromIDLists((uint)pidls.Count, [.. pidls], out IShellItemArray created) == 0) array = created;
-        return new ShellItems(pidls, array);
+        catch
+        {
+            foreach (IntPtr pidl in pidls) Native.ILFree(pidl);
+            throw;
+        }
     }
 
     public void Dispose()
@@ -357,7 +451,7 @@ internal static class FileClipboard
     }
 
     /// <summary>The files on the clipboard and whether they were cut, or null when it holds no files.</summary>
-    public static (List<string> Paths, bool Cut)? Get(IntPtr owner)
+    public static (List<string> Paths, bool Cut, Core.CutPasteCompletion Completion)? Get(IntPtr owner)
     {
         if (!Native.IsClipboardFormatAvailable(Native.CF_HDROP) || !Open(owner)) return null;
         try
@@ -384,7 +478,7 @@ internal static class FileClipboard
                     Native.GlobalUnlock(effect);
                 }
             }
-            return (paths, cut);
+            return (paths, cut, new Core.CutPasteCompletion(paths, Native.GetClipboardSequenceNumber()));
         }
         finally
         {
@@ -395,11 +489,14 @@ internal static class FileClipboard
     public static bool HasFiles => Native.IsClipboardFormatAvailable(Native.CF_HDROP);
 
     /// <summary>Empties the clipboard after cut files were pasted, as Explorer does.</summary>
-    public static void Clear(IntPtr owner)
+    public static bool ClearIfUnchanged(IntPtr owner, Core.CutPasteCompletion completion)
     {
-        if (!Open(owner)) return;
-        Native.EmptyClipboard();
-        Native.CloseClipboard();
+        if (!Open(owner)) return false;
+        try
+        {
+            return completion.OwnsClipboard(Native.GetClipboardSequenceNumber()) && Native.EmptyClipboard();
+        }
+        finally { Native.CloseClipboard(); }
     }
 
     private static bool Open(IntPtr owner)

@@ -77,8 +77,8 @@ internal interface IContextMenu3
 [ComImport, Guid("947AAB5F-0A5C-4C13-B4D6-4BF7836FC9F8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IFileOperation
 {
-    void Advise();
-    void Unadvise();
+    [PreserveSig] int Advise(IFileOperationProgressSink sink, out uint cookie);
+    [PreserveSig] int Unadvise(uint cookie);
     [PreserveSig] int SetOperationFlags(uint flags);
     void SetProgressMessage();
     void SetProgressDialog();
@@ -115,6 +115,8 @@ internal interface IPersistFile
 
 internal static partial class Native
 {
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
     public static readonly Guid IID_IShellItem = typeof(IShellItem).GUID;
     public static readonly Guid IID_IShellFolder = typeof(IShellFolder).GUID;
     public static readonly Guid IID_IContextMenu = typeof(IContextMenu).GUID;
@@ -323,11 +325,18 @@ internal static partial class Native
 
     public delegate IntPtr SubclassProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    public static extern int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid riid, out IShellItem item);
+    // Both take a path or one of the app's shell places ("shell:..."), which they hand Windows by its parsing name.
+    public static int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid riid, out IShellItem item) =>
+        SHCreateItemFromParsingNameRaw(Core.PathTools.ParsingName(path), bindContext, ref riid, out item);
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    public static extern int SHParseDisplayName(string name, IntPtr bindContext, out IntPtr pidl, uint attributesIn, out uint attributesOut);
+    public static int SHParseDisplayName(string name, IntPtr bindContext, out IntPtr pidl, uint attributesIn, out uint attributesOut) =>
+        SHParseDisplayNameRaw(Core.PathTools.ParsingName(name), bindContext, out pidl, attributesIn, out attributesOut);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHCreateItemFromParsingName")]
+    private static extern int SHCreateItemFromParsingNameRaw(string path, IntPtr bindContext, ref Guid riid, out IShellItem item);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHParseDisplayName")]
+    private static extern int SHParseDisplayNameRaw(string name, IntPtr bindContext, out IntPtr pidl, uint attributesIn, out uint attributesOut);
 
     [DllImport("shell32.dll")]
     public static extern int SHBindToParent(IntPtr pidl, ref Guid riid, out IntPtr folder, out IntPtr childPidl);
@@ -343,6 +352,27 @@ internal static partial class Native
 
     [DllImport("shell32.dll")]
     public static extern IntPtr ILFindLastID(IntPtr pidl);
+
+    [DllImport("shell32.dll")]
+    public static extern IntPtr ILCombine(IntPtr parent, IntPtr child);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "ILCreateFromPathW")]
+    public static extern IntPtr ILCreateFromPath(string path);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateWindowExW")]
+    public static extern IntPtr CreateWindowEx(int exStyle, string className, string name, int style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyWindow(IntPtr hwnd);
+
+    [DllImport("shell32.dll")]
+    public static extern uint ILGetSize(IntPtr pidl);
+
+    [DllImport("shell32.dll")]
+    public static extern int SHGetNameFromIDList(IntPtr pidl, uint sigdn, out IntPtr name);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("shell32.dll")]
     public static extern void ILFree(IntPtr pidl);
@@ -454,6 +484,9 @@ internal static partial class Native
 
     [DllImport("comctl32.dll")]
     public static extern IntPtr DefSubclassProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("comctl32.dll")]
+    public static extern bool RemoveWindowSubclass(IntPtr hwnd, SubclassProc proc, UIntPtr id);
 
     [DllImport("uxtheme.dll", EntryPoint = "#135")]
     private static extern int SetPreferredAppMode(int mode);

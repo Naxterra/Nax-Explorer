@@ -62,6 +62,8 @@ internal sealed partial class SettingsDialog : ContentDialog
             if (ExplorerIntegration.Apply(on))
             {
                 settings.ReplaceExplorer = on;
+                // The start at sign-in, the background running and the catching of Explorer windows follow at once.
+                App.Instance?.UpdateBackground();
                 return;
             }
             // Windows refused the change, so the switch goes back and never shows a state that is not true.
@@ -327,11 +329,13 @@ internal sealed partial class SettingsDialog : ContentDialog
         RefreshAi();
     }
 
-    private void DeleteIndex(bool model)
+    private async void DeleteIndex(bool model)
     {
         App.Instance!.Search.Stop();
+        IsEnabled = false;
         try
         {
+            await App.Instance.Search.ShutdownCompletion;
             SearchService.DeleteData(model);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -339,6 +343,7 @@ internal sealed partial class SettingsDialog : ContentDialog
             _aiState.Text = ex.Message;
             return;
         }
+        finally { IsEnabled = true; }
         if (model)
         {
             _settings.AiSearch = false;

@@ -7,6 +7,27 @@
     xmlns:m="using:NaxExplorer.Models">
 
     <UserControl.Resources>
+        <!-- Selected rows get a clear blue background, so several selected files are easy to tell apart. These keys
+             replace the list's own faint grey for every row inside the pane. -->
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#403B82F6" />
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#553B82F6" />
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#663B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelected" Color="#403B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPointerOver" Color="#553B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPressed" Color="#663B82F6" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#663B82F6" />
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#803B82F6" />
+                    <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#993B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelected" Color="#663B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPointerOver" Color="#803B82F6" />
+                    <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPressed" Color="#993B82F6" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         <!-- One row of the details view. Column widths are set from code, so the header and the rows line up. -->
         <DataTemplate x:Key="DetailsTemplate" x:DataType="m:FileItem">
             <Grid Height="30" Opacity="{x:Bind Opacity, Mode=OneWay}">
@@ -108,6 +129,7 @@
                          Loaded="RenameBox_Loaded" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
             </Grid>
         </DataTemplate>
+        </ResourceDictionary>
     </UserControl.Resources>
 
     <Grid x:Name="Root" Background="{ThemeResource PaneBackgroundBrush}" CornerRadius="8" BorderThickness="1"
@@ -236,6 +258,10 @@
                       Padding="8,4,8,8" CanDragItems="True" DragItemsStarting="List_DragItemsStarting" DragItemsCompleted="List_DragItemsCompleted"
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
                       DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived" KeyDown="List_KeyDown" />
+            <!-- The selection box drawn while the mouse is dragged over the empty part of the list. -->
+            <Canvas x:Name="MarqueeLayer" IsHitTestVisible="False">
+                <Rectangle x:Name="MarqueeRect" Visibility="Collapsed" Fill="#333B82F6" Stroke="#3B82F6" StrokeThickness="1" RadiusX="2" RadiusY="2" />
+            </Canvas>
             <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10" Visibility="Collapsed" IsHitTestVisible="False" MaxWidth="420">
                 <FontIcon x:Name="EmptyGlyph" Glyph="&#xE8B7;" FontSize="40" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 <TextBlock x:Name="EmptyText" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

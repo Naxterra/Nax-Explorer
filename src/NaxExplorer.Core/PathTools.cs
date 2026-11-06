@@ -11,6 +11,32 @@ public static class PathTools
 
     public static bool IsThisPc(string location) => string.Equals(location, ThisPc, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The start of a place that is not a folder on disk but a place Windows lists itself, such as the Recycle Bin,
+    /// Network, a computer under Network, a library, a phone or a folder inside a zip file. The rest is the name
+    /// Windows parses the place from, for example "shell:::{645FF040-5081-101B-9F08-00AA002F954E}" for the Recycle Bin.
+    /// </summary>
+    public const string ShellPrefix = "shell:";
+
+    /// <summary>True for a place Windows lists itself (see <see cref="ShellPrefix"/>), which has no folder on disk.</summary>
+    public static bool IsShellPlace(string location) => location.StartsWith(ShellPrefix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The place for a name Windows parses, such as "::{GUID}" or "\\SERVER".</summary>
+    public static string ShellPlace(string parsingName) => IsShellPlace(parsingName) ? parsingName : ShellPrefix + parsingName;
+
+    /// <summary>
+    /// The name to hand Windows for a place or path. A shell place gives its parsing name, except a named place such as
+    /// "shell:RecycleBinFolder", which Windows only knows with the prefix; anything else is returned as it is.
+    /// </summary>
+    public static string ParsingName(string location)
+    {
+        if (!IsShellPlace(location)) return location;
+        string rest = location[ShellPrefix.Length..];
+        bool parsable = rest.StartsWith("::", StringComparison.Ordinal) || rest.StartsWith(@"\\", StringComparison.Ordinal)
+            || rest.Length >= 2 && char.IsAsciiLetter(rest[0]) && rest[1] == ':';
+        return parsable ? rest : location;
+    }
+
     /// <summary>True when both name the same place, ignoring case and a trailing backslash.</summary>
     public static bool SameLocation(string a, string b) =>
         string.Equals(Trim(a), Trim(b), StringComparison.OrdinalIgnoreCase);
@@ -34,6 +60,8 @@ public static class PathTools
     public static string? Parent(string location)
     {
         if (IsThisPc(location)) return null;
+        // The pane knows the parent of a shell place from Windows; This PC is the way back when it does not.
+        if (IsShellPlace(location)) return ThisPc;
         string? parent = Path.GetDirectoryName(Trim(location));
         if (string.IsNullOrEmpty(parent)) return ThisPc;
         return parent;

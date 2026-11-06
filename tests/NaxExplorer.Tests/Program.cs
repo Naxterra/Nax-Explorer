@@ -10,6 +10,9 @@ var suites = new (string File, IEnumerable<(string Name, string Scenario, Action
     ("ExtractionTests.cs", ExtractionTests.All()),
     ("LiveSearchTests.cs", LiveSearchTests.All()),
     ("IndexTests.cs", IndexTests.All()),
+    ("SearchServiceTests.cs", SearchServiceTests.All()),
+    ("RegressionTests.cs", RegressionTests.All()),
+    ("ShellTests.cs", ShellTests.All()),
     ("ModelTests.cs", ModelTests.All()),
 };
 
@@ -41,7 +44,12 @@ foreach (var (file, tests) in suites)
     }
 }
 Fixtures.Cleanup();
-Console.WriteLine(failures == 0 ? $"No failures ({skipped} skipped)." : $"{failures} failed, {skipped} skipped.");
+if (count == 0)
+{
+    Console.Error.WriteLine($"No tests matched '{only}'.");
+    return 1;
+}
+Console.WriteLine($"{count - failures - skipped} passed, {failures} failed, {skipped} skipped ({count} tests).");
 return failures;
 
 namespace NaxExplorer.Tests

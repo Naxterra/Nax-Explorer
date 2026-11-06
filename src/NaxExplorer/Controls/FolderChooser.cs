@@ -74,7 +74,7 @@ internal sealed partial class FolderChooser : ContentDialog
         placeList.Items.Add(Row("", Loc.T("ThisPC"), PathTools.ThisPc, null));
         foreach (SidebarEntry place in places)
         {
-            if (!place.OpensInExplorer) placeList.Items.Add(Row(place.Glyph, place.Label, place.Location, place.Brush));
+            if (!place.IsShellPlace) placeList.Items.Add(Row(place.Glyph, place.Label, place.Location, place.Brush));
         }
         placeList.ItemClick += (_, e) =>
         {

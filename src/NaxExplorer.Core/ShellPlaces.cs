@@ -12,7 +12,10 @@ public enum ShellPlace
     /// <summary>This PC, which the app shows itself.</summary>
     ThisPc,
 
-    /// <summary>A place only Explorer can show, such as the Recycle Bin, Control Panel, Network or a library.</summary>
+    /// <summary>
+    /// A place that is not a folder on disk, such as the Recycle Bin, Control Panel, Network or a library. The app lists
+    /// most of them itself and hands only those it leaves to Explorer, such as Control Panel, on to Explorer.
+    /// </summary>
     Explorer,
 }
 
@@ -165,6 +168,22 @@ public static class ShellPlaces
         while (value.Length > 1 && value.EndsWith('\\') && !(value.Length == 3 && value[1] == ':')) value = value[..^1];
         return value.ToUpperInvariant();
     }
+
+    /// <summary>
+    /// Control Panel and its pages, which are Windows' own settings pages rather than lists of items, so the app leaves
+    /// them to Explorer. Every other place Windows lists, such as the Recycle Bin or Network, the app shows itself.
+    /// </summary>
+    private static readonly string[] ExplorerOnly =
+    [
+        "{26EE0668-A00A-44D7-9371-BEB064C98683}", // Control Panel
+        "{21EC2020-3AEA-1069-A2DD-08002B30309D}", // All Control Panel items
+        "{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}", // Control Panel home
+        "{ED7BA470-8E54-465E-825C-99712043E01C}", // All tasks
+        "ControlPanelFolder",
+    ];
+
+    /// <summary>True for a place the app leaves to Explorer even though Windows can list it (see <see cref="ExplorerOnly"/>).</summary>
+    public static bool OnlyExplorerShows(string place) => ExplorerOnly.Any(id => place.Contains(id, StringComparison.OrdinalIgnoreCase));
 
     private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 }

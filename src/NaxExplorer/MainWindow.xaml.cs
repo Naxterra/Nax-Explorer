@@ -37,8 +37,11 @@ public sealed class SidebarEntry
 
     public Visibility UsageVisibility => UsageBrush is null ? Visibility.Collapsed : Visibility.Visible;
 
-    /// <summary>Entries that Windows shows in its own Explorer, such as the Recycle Bin.</summary>
-    public bool OpensInExplorer { get; init; }
+    /// <summary>
+    /// Entries for places Windows lists itself, such as the Recycle Bin or Network. They open in the app like folders,
+    /// but nothing can be copied into them, and they are no target in the folder chooser.
+    /// </summary>
+    public bool IsShellPlace { get; init; }
 
     /// <summary>For quick access entries: the entry as the settings store it, a key such as "::Downloads" or a path.</summary>
     public string? QuickKey { get; init; }
@@ -92,12 +95,33 @@ public sealed partial class MainWindow : Window
         Preview.Attach(this);
         Viewer.Attach(this);
 
-        App.Instance!.Search.StatusChanged += _ => DispatcherQueue.SafeEnqueue(UpdateAiCard);
-        App.Instance.Search.AvailabilityChanged += () => DispatcherQueue.SafeEnqueue(UpdateAiCard);
-        Closed += (_, _) => SaveState();
+        Action<IndexerStatus> statusChanged = _ => DispatcherQueue.SafeEnqueue(UpdateAiCard);
+        Action availabilityChanged = () => DispatcherQueue.SafeEnqueue(UpdateAiCard);
+        App.Instance!.Search.StatusChanged += statusChanged;
+        App.Instance.Search.AvailabilityChanged += availabilityChanged;
+        Closed += (_, _) =>
+        {
+            SaveState();
+            App.Instance.Search.StatusChanged -= statusChanged;
+            App.Instance.Search.AvailabilityChanged -= availabilityChanged;
+            _messageTimer.Stop();
+            _previewTimer.Stop();
+            Preview.StopBackgroundWork();
+            LeftPane.StopBackgroundWork();
+            RightPane.StopBackgroundWork();
+        };
+        // Listed with Windows' open folder windows, so "Show in folder" in other programs finds this window and the
+        // file it names gets selected here.
+        _shellWindow = new ShellWindowRegistration(Hwnd, (name, only) => DispatcherQueue.SafeEnqueue(() =>
+        {
+            _active.SelectFromShell(name, only);
+            BringToFront();
+        }));
+        Closed += (_, _) => _shellWindow.Dispose();
         bool firstActivation = true;
         Activated += (_, args) =>
         {
+            _shellWindow.Activated(args.WindowActivationState != WindowActivationState.Deactivated);
             if (args.WindowActivationState == WindowActivationState.Deactivated) return;
             _active.UpdateCutMarks();
             // On its first activation the window gives the focus to its first control; the list takes it back, so
@@ -174,6 +198,12 @@ public sealed partial class MainWindow : Window
         _active.FocusList();
     }
 
+    /// <summary>Selects items in the active pane, as soon as its folder is shown.</summary>
+    internal void SelectInActivePane(IReadOnlyList<string> paths)
+    {
+        for (int i = 0; i < paths.Count; i++) _active.SelectFromShell(paths[i], only: i == 0);
+    }
+
     private void ApplyTheme()
     {
         Root.RequestedTheme = Settings.Theme switch
@@ -224,6 +254,7 @@ public sealed partial class MainWindow : Window
         {
             UpdateTitle();
             _previewTimer.Restart();
+            _shellWindow?.Navigated(pane.Location);
         }
     }
 
@@ -271,10 +302,13 @@ public sealed partial class MainWindow : Window
         await other.NavigateAsync(location);
     }
 
+    private readonly ShellWindowRegistration _shellWindow;
+
     internal void OnPaneLocationChanged(FilePane pane)
     {
         if (pane != _active) return;
         UpdateTitle();
+        _shellWindow?.Navigated(pane.Location);
         // Another tab or folder in the active pane: the details panel shows that folder now. The address bar reports
         // the same folder again when its names arrive, which leaves the panel as it is.
         if (!string.Equals(pane.Folder ?? pane.FolderOrSearchRoot, _previewFolder, StringComparison.OrdinalIgnoreCase)) _previewTimer.Restart();
@@ -354,7 +388,7 @@ public sealed partial class MainWindow : Window
             [QuickAccessList.Pictures] = new() { QuickKey = QuickAccessList.Pictures, Glyph = "", Label = Loc.T("Pictures"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), Brush = Color(0xEC, 0x48, 0x99) },
             [QuickAccessList.Music] = new() { QuickKey = QuickAccessList.Music, Glyph = "", Label = Loc.T("Music"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), Brush = Color(0xF5, 0x9E, 0x0B) },
             [QuickAccessList.Videos] = new() { QuickKey = QuickAccessList.Videos, Glyph = "", Label = Loc.T("Videos"), Location = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), Brush = Color(0x8B, 0x5C, 0xF6) },
-            [QuickAccessList.RecycleBin] = new() { QuickKey = QuickAccessList.RecycleBin, Glyph = "", Label = Loc.T("RecycleBin"), Location = "shell:RecycleBinFolder", Brush = Color(0x94, 0xA3, 0xB8), OpensInExplorer = true },
+            [QuickAccessList.RecycleBin] = new() { QuickKey = QuickAccessList.RecycleBin, Glyph = "", Label = Loc.T("RecycleBin"), Location = PathTools.ShellPlace(ShellFolderReader.RecycleBin), Brush = Color(0x94, 0xA3, 0xB8), IsShellPlace = true },
         };
         Brush folderBrush = new SolidColorBrush(Palette.Of(FileCategory.Folder, dark));
         var quick = new List<SidebarEntry>();
@@ -362,7 +396,7 @@ public sealed partial class MainWindow : Window
         {
             if (specials.TryGetValue(key, out SidebarEntry? special))
             {
-                if (special.OpensInExplorer || Directory.Exists(special.Location)) quick.Add(special);
+                if (special.IsShellPlace || Directory.Exists(special.Location)) quick.Add(special);
                 continue;
             }
             // The stored name shows at once; Windows is asked in the background, because a folder on a share that does
@@ -441,25 +475,35 @@ public sealed partial class MainWindow : Window
                 UsageBrush = d.Size > 0 ? new SolidColorBrush(Palette.Usage(used)) : null,
                 Detail = d.Size > 0 ? Loc.F("DriveFree", SizeFormat.Format(d.FreeBytes), SizeFormat.Format(d.Size)) : "",
             };
+        }).Append(new SidebarEntry
+        {
+            // The computers and shares of the local network, as under "Netzwerk" in Explorer.
+            Glyph = "",
+            Label = Loc.T("Network"),
+            Location = PathTools.ShellPlace(NetworkPlace),
+            Brush = new SolidColorBrush(Palette.Of(FileCategory.DiskImage, IsDark)),
+            IsShellPlace = true,
         }).ToList();
     }
+
+    /// <summary>The parsing name of Network, the computers and shares of the local network.</summary>
+    private const string NetworkPlace = "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}";
 
     private async void Sidebar_ItemClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is not SidebarEntry entry) return;
-        if (entry.OpensInExplorer)
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", entry.Location) { UseShellExecute = true });
-            return;
-        }
         await _active.NavigateAsync(entry.Location);
     }
+
+    /// <summary>True for the Recycle Bin's own entry, onto which dropped items are deleted, as in Explorer.</summary>
+    private static bool IsRecycleBin(SidebarEntry entry) =>
+        PathTools.SameLocation(entry.Location, PathTools.ShellPlace(ShellFolderReader.RecycleBin));
 
     /// <summary>A middle click opens the entry in a new tab.</summary>
     private void Sidebar_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (!e.GetCurrentPoint(null).Properties.IsMiddleButtonPressed) return;
-        if ((e.OriginalSource as FrameworkElement)?.DataContext is SidebarEntry { OpensInExplorer: false } entry)
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is SidebarEntry entry)
         {
             _active.OpenTab(entry.Location);
             e.Handled = true;
@@ -477,7 +521,7 @@ public sealed partial class MainWindow : Window
             item.Click += (_, _) => action();
             return item;
         }
-        if (!entry.OpensInExplorer) menu.Items.Add(Command("OpenInNewTab", "", () => _active.OpenTab(entry.Location)));
+        menu.Items.Add(Command("OpenInNewTab", "", () => _active.OpenTab(entry.Location)));
         menu.Items.Add(new MenuFlyoutSeparator());
         menu.Items.Add(Command("MoveUp", "", () => ChangeQuickAccess(settings => QuickAccessList.Move(settings, key, -1))));
         menu.Items.Add(Command("MoveDown", "", () => ChangeQuickAccess(settings => QuickAccessList.Move(settings, key, 1))));
@@ -498,10 +542,29 @@ public sealed partial class MainWindow : Window
         foreach (MainWindow window in App.Instance.Windows) window.BuildSidebar();
     }
 
+    /// <summary>The sidebar entry under the pointer, found by hit-testing, because the event's source is not reliably the row.</summary>
+    private static SidebarEntry? SidebarEntryAt(object sender, DragEventArgs e)
+    {
+        if (sender is UIElement list)
+        {
+            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(e.GetPosition(null), list))
+            {
+                if (element is SelectorItem { Content: SidebarEntry entry }) return entry;
+            }
+        }
+        return (e.OriginalSource as FrameworkElement)?.DataContext as SidebarEntry;
+    }
+
     private void Sidebar_DragOver(object sender, DragEventArgs e)
     {
-        if ((e.OriginalSource as FrameworkElement)?.DataContext is SidebarEntry { OpensInExplorer: false } entry
-            && (e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths")))
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths");
+        if (files && SidebarEntryAt(sender, e) is { } bin && IsRecycleBin(bin))
+        {
+            e.AcceptedOperation = DataPackageOperation.Move;
+            e.DragUIOverride.Caption = Loc.T("DropToRecycleBin");
+            return;
+        }
+        if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
         {
             bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
@@ -513,7 +576,7 @@ public sealed partial class MainWindow : Window
 
     private async void Sidebar_Drop(object sender, DragEventArgs e)
     {
-        if ((e.OriginalSource as FrameworkElement)?.DataContext is not SidebarEntry { OpensInExplorer: false } entry) return;
+        if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry)) return;
         DragOperationDeferral deferral = e.GetDeferral();
         try
         {
@@ -522,11 +585,20 @@ public sealed partial class MainWindow : Window
             {
                 paths = (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
             }
+            if (IsRecycleBin(entry))
+            {
+                // Dropping on the Recycle Bin deletes, as in Explorer; items of shell places are left alone.
+                List<string> files = paths.Where(p => !PathTools.IsShellPlace(p)).ToList();
+                if (files.Count > 0) await DeleteAsync(files, permanently: false);
+                return;
+            }
             bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
             if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None) return;
-            if (move) await ShellActions.MoveAsync(paths, entry.Location, Hwnd);
-            else await ShellActions.CopyAsync(paths, entry.Location, Hwnd);
-            RefreshPanesShowing(entry.Location);
+            await TransferAsync(paths, entry.Location, move);
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
         finally
         {
@@ -619,6 +691,102 @@ public sealed partial class MainWindow : Window
         App.Instance!.SaveSettings();
         App.Instance.Search.Apply(Settings, restart: false);
         ShowMessage(Loc.F("AddedToIndex", folder), InfoBarSeverity.Success);
+    }
+
+    /// <summary>
+    /// Copies or moves with the app's own windows: it asks about conflicts first, then runs the copy engine silently
+    /// with a progress card in the corner. Returns false when the user cancelled before anything started.
+    /// </summary>
+    internal async Task<bool> TransferAsync(IReadOnlyList<string> paths, string target, bool move)
+    {
+        TransferConflicts conflicts = await Task.Run(() => TransferPlan.FindConflicts(paths, target));
+        // Without a question there is no answer: a conflict that appears only later is left to Windows to ask about.
+        ConflictChoice? choice = null;
+        if (conflicts.Any)
+        {
+            if (await AskSafelyAsync(() => FileOperationDialogs.AskConflictAsync(Root.XamlRoot, Root.RequestedTheme, conflicts, FilePane.PlaceName(target), move)) is not { } picked) return false;
+            choice = picked;
+        }
+        IReadOnlyList<TransferBatch> batches = await Task.Run(() => TransferPlan.Plan(paths, target, move, choice, conflicts.Items));
+        if (batches.Count == 0) return true;
+        string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
+        bool completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
+        RefreshPanesShowing(target);
+        if (move)
+        {
+            foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+        }
+        return completed;
+    }
+
+    /// <summary>
+    /// Deletes to the Recycle Bin, or for good with <paramref name="permanently"/> after the app asked. Items on a drive
+    /// without a Recycle Bin, such as a network share, are never deleted for good without that question either.
+    /// Returns false when nothing was deleted because the user said no.
+    /// </summary>
+    internal async Task<bool> DeleteAsync(IReadOnlyList<string> paths, bool permanently)
+    {
+        if (paths.Count == 0) return false;
+        // Items of the Recycle Bin itself, or of another shell place, can only be deleted for good.
+        if (paths.Any(PathTools.IsShellPlace)) permanently = true;
+        bool noBin = !permanently && !await Task.Run(() => paths.All(FileOperationDialogs.HasRecycleBin));
+        if (permanently || noBin)
+        {
+            if (await AskSafelyAsync(async () => (bool?)await FileOperationDialogs.ConfirmPermanentDeleteAsync(Root.XamlRoot, Root.RequestedTheme, paths, noBin)) != true) return false;
+            permanently = true;
+        }
+        string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
+        await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what), progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress));
+        foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+        return true;
+    }
+
+    /// <summary>Runs one operation with its progress card; a failure ends up on the card instead of being thrown.</summary>
+    private async Task<bool> RunOperationAsync(string title, Func<OperationProgress, Task> run)
+    {
+        var progress = new OperationProgress();
+        var card = new OperationCard(OperationsPanel, title, progress);
+        long lastUpdate = 0;
+        progress.Changed += (share, item) =>
+        {
+            // The engine reports very often; the card is updated at most every tenth of a second.
+            long now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref lastUpdate) < 100) return;
+            Interlocked.Exchange(ref lastUpdate, now);
+            DispatcherQueue.SafeEnqueue(() => card.Update(share, item));
+        };
+        string? error = null;
+        // The app does not end while this runs, so no file is left half-written by a closing app.
+        App.Instance?.OperationStarted();
+        try
+        {
+            await run(progress);
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            App.Instance?.OperationEnded();
+        }
+        card.Finish(error);
+        return error is null && !progress.IsCancelled && progress.Failures.Count == 0;
+    }
+
+    /// <summary>Shows one of the app's questions; when the window cannot show it, the answer is "cancel".</summary>
+    private async Task<T?> AskSafelyAsync<T>(Func<Task<T?>> ask) where T : struct
+    {
+        try
+        {
+            return await ask();
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or ArgumentException)
+        {
+            CrashLog.Write(ex);
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+            return null;
+        }
     }
 
     /// <summary>
@@ -876,4 +1044,6 @@ internal sealed class DispatcherQueueTimerWrapper
         _timer.Stop();
         _timer.Start();
     }
+
+    public void Stop() => _timer.Stop();
 }

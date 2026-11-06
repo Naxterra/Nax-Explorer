@@ -157,22 +157,104 @@ internal static class CoreTests
             Check.Equal(TransferProblem.None, TransferCheck.Check([file], folder, move: false));
         });
 
-        yield return ("permanent_delete_never_allows_undo_so_windows_asks_first", "Shift+Delete hands Windows a delete without undo and without suppressed confirmation, so Windows deletes for good only after asking.", () =>
+        yield return ("permanent_delete_never_allows_undo_and_is_only_asked_by_the_app", "Shift+Delete, after the app's own question, hands Windows a delete without undo or Recycle Bin and without Windows' own windows.", () =>
         {
             uint flags = OperationFlags.ForDelete(permanently: true);
             Check.That((flags & OperationFlags.AllowUndo) == 0, "permanent delete allows undo, so it would go to the Recycle Bin");
             Check.That((flags & OperationFlags.RecycleOnDelete) == 0, "permanent delete asks for the Recycle Bin");
-            Check.That((flags & 0x10 /* FOF_NOCONFIRMATION */) == 0, "the confirmation is suppressed");
+            Check.That((flags & OperationFlags.Silent) != 0, "Windows' progress window still shows");
         });
 
-        yield return ("normal_delete_goes_to_the_recycle_bin", "Delete without Shift always goes to the Recycle Bin and can be undone, and copies and renames can be undone too.", () =>
+        yield return ("normal_delete_goes_to_the_recycle_bin_and_warns_before_destroying", "Delete without Shift goes to the Recycle Bin and can be undone, and an item that cannot go there still brings up Windows' warning instead of vanishing.", () =>
         {
             uint flags = OperationFlags.ForDelete(permanently: false);
             Check.That((flags & OperationFlags.AllowUndo) != 0 && (flags & OperationFlags.RecycleOnDelete) != 0, "delete does not use the Recycle Bin");
+            Check.That((flags & OperationFlags.WantNukeWarning) != 0, "an item that cannot be recycled would be deleted for good without warning");
             Check.That((OperationFlags.ForTransfer(false) & OperationFlags.AllowUndo) != 0, "copy cannot be undone");
-            Check.That((OperationFlags.ForTransfer(false) & OperationFlags.RenameOnCollision) == 0, "copies elsewhere rename silently instead of asking");
-            Check.That((OperationFlags.ForTransfer(true) & OperationFlags.RenameOnCollision) != 0, "copies into the same folder ask instead of naming them - Copy");
             Check.That((OperationFlags.ForRename() & OperationFlags.AllowUndo) != 0, "rename cannot be undone");
+        });
+
+        yield return ("copy_replaces_without_asking_only_when_the_user_chose_replace", "Only a copy the user chose to replace runs with Windows' 'replace without asking'; every other copy keeps Windows' question for a conflict that appears later.", () =>
+        {
+            Check.That((OperationFlags.ForTransfer(false) & OperationFlags.NoConfirmation) == 0, "a plain copy replaces without asking");
+            Check.That((OperationFlags.ForTransfer(true) & OperationFlags.NoConfirmation) == 0, "keep both replaces without asking");
+            Check.That((OperationFlags.ForTransfer(true) & OperationFlags.RenameOnCollision) != 0, "keep both does not pick a free name");
+            Check.That((OperationFlags.ForTransfer(false, replace: true) & OperationFlags.NoConfirmation) != 0, "replace still asks");
+            Check.That((OperationFlags.ForTransfer(false) & OperationFlags.Silent) != 0, "Windows' progress window still shows");
+        });
+
+        yield return ("shell_places_keep_their_windows_name_and_control_panel_stays_with_explorer", "A place such as the Recycle Bin is told apart from a folder path and handed to Windows by its own name, named places keep their prefix, and only Control Panel is left to Explorer.", () =>
+        {
+            string bin = PathTools.ShellPlace("::{645FF040-5081-101B-9F08-00AA002F954E}");
+            Check.That(PathTools.IsShellPlace(bin) && !PathTools.IsShellPlace(@"C:\Users"), "a shell place and a folder path are confused");
+            Check.Equal("::{645FF040-5081-101B-9F08-00AA002F954E}", PathTools.ParsingName(bin), "parsing name of the Recycle Bin");
+            Check.Equal(@"\\SERVER", PathTools.ParsingName(PathTools.ShellPlace(@"\\SERVER")), "parsing name of a computer");
+            Check.Equal("shell:RecycleBinFolder", PathTools.ParsingName("shell:RecycleBinFolder"), "a named place lost its prefix");
+            Check.Equal(@"C:\Users", PathTools.ParsingName(@"C:\Users"), "a folder path was changed");
+            Check.Equal(PathTools.ThisPc, PathTools.Parent(bin), "the way up from a shell place");
+            Check.That(ShellPlaces.OnlyExplorerShows("::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0"), "Control Panel would be opened in the app");
+            Check.That(!ShellPlaces.OnlyExplorerShows("::{645FF040-5081-101B-9F08-00AA002F954E}"), "the Recycle Bin would be left to Explorer");
+        });
+
+        yield return ("a_conflict_that_appears_after_the_check_is_never_replaced_without_asking", "When no conflict was found and the user was not asked, an item whose name became taken in the meantime runs without 'replace', so Windows asks.", () =>
+        {
+            string from = Fixtures.TempFolder("late-from"), to = Fixtures.TempFolder("late-to");
+            string source = Fixtures.Write(from, "late.txt", "new");
+            Check.That(!TransferPlan.FindConflicts([source], to).Any, "a conflict was found before the name was taken");
+            Fixtures.Write(to, "late.txt", "written by another program meanwhile");
+            var batches = TransferPlan.Plan([source], to, move: false, choice: null);
+            Check.That(batches.All(b => (b.Flags & OperationFlags.NoConfirmation) == 0), "the late conflict is replaced without asking");
+        });
+
+        yield return ("recycle_bin_query_matches_the_64_bit_layout_and_finds_the_system_drive", "The question whether a drive has a Recycle Bin uses Windows' 24-byte layout for 64-bit programs, finds the system drive's bin, and treats a network path as having none.", () =>
+        {
+            Check.Equal(24, RecycleBins.QueryInfoSize, "size of SHQUERYRBINFO handed to Windows");
+            string system = Path.GetPathRoot(Environment.SystemDirectory)!;
+            Check.That(RecycleBins.HasRecycleBin(Path.Combine(system, "some-file.txt")), "the system drive is said to have no Recycle Bin, so every delete would be asked as permanent");
+            Check.That(!RecycleBins.HasRecycleBin(@"\\server\share\file.txt"), "a network path is said to have a Recycle Bin");
+        });
+
+        yield return ("skip_merges_folders_and_never_touches_an_existing_file", "With Skip, a folder of the same name only gets the files it is missing, and no batch names a file that already exists in the target.", () =>
+        {
+            string from = Fixtures.TempFolder("skip-from"), to = Fixtures.TempFolder("skip-to");
+            Fixtures.Write(from, @"Pics\a.jpg", "new a");
+            Fixtures.Write(from, @"Pics\b.jpg", "new b");
+            Fixtures.Write(from, @"Pics\Sub\c.jpg", "new c");
+            Fixtures.Write(from, "note.txt", "new note");
+            Fixtures.Write(from, "fresh.txt", "fresh");
+            Fixtures.Write(to, @"Pics\a.jpg", "old a");
+            Fixtures.Write(to, @"Pics\Sub\keep.jpg", "old keep");
+            Fixtures.Write(to, "note.txt", "old note");
+            string[] sources = [Path.Combine(from, "Pics"), Path.Combine(from, "note.txt"), Path.Combine(from, "fresh.txt")];
+            TransferConflicts conflicts = TransferPlan.FindConflicts(sources, to);
+            Check.Equal(2, conflicts.Items.Count, "conflicting top-level items");
+            Check.Equal(2, conflicts.FilesReplaced, "files Replace would overwrite (Pics\\a.jpg and note.txt)");
+            var batches = TransferPlan.Plan(sources, to, move: false, ConflictChoice.Skip);
+            var planned = batches.SelectMany(b => b.Sources.Select(s => (Source: s, Into: b.TargetFolder))).ToList();
+            Check.That(planned.Contains((Path.Combine(from, "fresh.txt"), to)), "the new file is not copied");
+            Check.That(planned.Contains((Path.Combine(from, @"Pics\b.jpg"), Path.Combine(to, "Pics"))), "the missing file is not added to the merged folder");
+            Check.That(planned.Contains((Path.Combine(from, @"Pics\Sub\c.jpg"), Path.Combine(to, @"Pics\Sub"))), "the missing file deeper down is not added");
+            foreach ((string source, string into) in planned)
+            {
+                Check.That(!File.Exists(Path.Combine(into, Path.GetFileName(source))), $"{source} would land on an existing item");
+            }
+            Check.That(batches.All(b => (b.Flags & OperationFlags.NoConfirmation) == 0), "a skip batch replaces without asking");
+        });
+
+        yield return ("replace_and_keep_both_only_flag_the_conflicting_items", "Replace and Keep both apply their flags only to the items that conflict; items without a conflict run as a plain copy, and a copy into the items' own folder always keeps both.", () =>
+        {
+            string from = Fixtures.TempFolder("replace-from"), to = Fixtures.TempFolder("replace-to");
+            string clash = Fixtures.Write(from, "same.txt", "new");
+            string free = Fixtures.Write(from, "free.txt", "new");
+            Fixtures.Write(to, "same.txt", "old");
+            var replace = TransferPlan.Plan([clash, free], to, move: true, ConflictChoice.Replace);
+            Check.That(replace.Single(b => b.Sources.Contains(clash)).Flags is var r && (r & OperationFlags.NoConfirmation) != 0, "the conflicting item is not replaced");
+            Check.That((replace.Single(b => b.Sources.Contains(free)).Flags & OperationFlags.NoConfirmation) == 0, "the free item runs with replace");
+            var keep = TransferPlan.Plan([clash, free], to, move: false, ConflictChoice.KeepBoth);
+            Check.That((keep.Single(b => b.Sources.Contains(clash)).Flags & OperationFlags.RenameOnCollision) != 0, "keep both does not rename");
+            var same = TransferPlan.Plan([clash], from, move: false, ConflictChoice.Replace);
+            Check.That(same.Count == 1 && (same[0].Flags & OperationFlags.RenameOnCollision) != 0 && (same[0].Flags & OperationFlags.NoConfirmation) == 0, "a copy into its own folder replaces itself");
+            Check.Equal(0, TransferPlan.Plan([clash], from, move: true, ConflictChoice.Replace).Count, "a move into its own folder does something");
         });
 
         yield return ("customized_folder_shows_its_localized_name", "A folder whose desktop.ini names a localized name shows that name, as Explorer shows \"Bilder\" for Pictures.", () =>
@@ -732,6 +814,34 @@ internal static class CoreTests
             Check.Equal(false, loaded.DualPane, "dual pane");
             Check.Equal(@"C:\Work", loaded.Pinned.Single(), "pinned");
             Check.Equal(SortColumn.Size, loaded.Left.Sort, "sort");
+        });
+
+        yield return ("partially_damaged_settings_keep_valid_choices_and_repair_invalid_values", "Null strings, lists and entries and unsupported view values are repaired before the UI uses them, preserving valid choices.", () =>
+        {
+            string folder = Fixtures.TempFolder("settings");
+            string path = Fixtures.Write(folder, "settings.json", """
+                { "Language": null, "Theme": null, "DualPane": false,
+                  "Left": { "Tabs": null, "View": null, "Sort": 999 },
+                  "Right": { "Tabs": [null, "", "C:\\Work"], "View": "invalid" },
+                  "Pinned": [null, "", "D:\\Docs"], "QuickAccess": [null, "::Home"],
+                  "IndexedFolders": [null, "", "D:\\Docs"] }
+                """);
+            AppSettings settings = AppSettings.Load(path);
+            Check.Equal("", settings.Language);
+            Check.Equal("system", settings.Theme);
+            Check.That(!settings.DualPane, "valid choice was lost");
+            Check.Equal(0, settings.Left.Tabs.Count);
+            Check.Equal("details", settings.Left.View);
+            Check.Equal(SortColumn.Name, settings.Left.Sort);
+            Check.Equal("details", settings.Right.View);
+            Check.Sequence([@"C:\Work"], settings.Right.Tabs);
+            Check.Sequence([@"D:\Docs"], settings.Pinned);
+            Check.Sequence(["::Home"], settings.QuickAccess!);
+            Check.Sequence([@"D:\Docs"], settings.IndexedFolders);
+            File.WriteAllText(path, """{ "Language": "not_a_culture!", "Theme": "invalid" }""");
+            settings = AppSettings.Load(path);
+            Check.Equal("", settings.Language);
+            Check.Equal("system", settings.Theme);
         });
 
         yield return ("reading_a_file_never_blocks_other_programs", "While the app reads a file, other programs can still write to it and delete it.", () =>

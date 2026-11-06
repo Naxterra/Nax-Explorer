@@ -31,6 +31,12 @@ public sealed partial class PreviewPanel : UserControl
 
     internal void Attach(MainWindow owner) => _owner = owner;
 
+    internal void StopBackgroundWork()
+    {
+        _version++;
+        _cts?.Cancel();
+    }
+
     /// <summary>
     /// Shows the selection: one item with its picture, text and details; several items with their counts and total
     /// size; nothing selected with the counts and size of the folder shown, or the space of a drive.
@@ -58,7 +64,7 @@ public sealed partial class PreviewPanel : UserControl
                 NameText.Text = Loc.F("SelectedCount", selected.Count);
                 int folders = selected.Count(i => i.Entry.IsContainer);
                 AddDetail("DetailSelection", Loc.F("Contains", folders, selected.Count - folders));
-                if (selected.All(i => i.Entry.Kind != EntryKind.Drive))
+                if (selected.All(i => i.Entry.Kind != EntryKind.Drive && !PathTools.IsShellPlace(i.Entry.FullPath)))
                 {
                     // Selected cloud folders whose list is not on this device are not looked into, so selecting them
                     // never makes the sync app fetch anything; the totals say how many were left out.
@@ -96,6 +102,12 @@ public sealed partial class PreviewPanel : UserControl
         if (item.Cloud != CloudState.None) AddDetail("DetailCloud", item.CloudText);
 
         int side = (int)Math.Min(1200, Math.Max(200, ActualWidth - 24) * (XamlRoot?.RasterizationScale ?? 1));
+        if (PathTools.IsShellPlace(entry.FullPath))
+        {
+            // An item of the Recycle Bin, a phone or another shell place has no path to read; Windows draws its picture.
+            ShowShellThumbnail(entry.FullPath, entry.IsContainer ? 256 : side, version);
+            return;
+        }
         if (entry.Kind == EntryKind.File && entry.IsOnlineOnly)
         {
             // Reading the picture or text would download the file; it is downloaded only when the user opens it.

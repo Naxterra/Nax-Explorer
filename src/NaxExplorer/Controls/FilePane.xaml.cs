@@ -61,6 +61,17 @@ public sealed partial class FilePane : UserControl
     private string? _selectAfterRefresh;
     private string _freeSpace = "";
     private bool _switchingTabs;
+    private bool _closed;
+
+    /// <summary>Closed windows release their watchers and searches while the app continues in the background.</summary>
+    internal void StopBackgroundWork()
+    {
+        _closed = true;
+        _loadCts?.Cancel();
+        CancelSearch();
+        StopWatcher();
+        EndMarquee();
+    }
 
     public FilePane()
     {
@@ -75,6 +86,13 @@ public sealed partial class FilePane : UserControl
         // The list marks pointer presses as handled, so the pane listens to handled ones too, to know it is active.
         Root.AddHandler(PointerPressedEvent, new PointerEventHandler(Root_PointerPressed), handledEventsToo: true);
         List.AddHandler(KeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
+        foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
+        {
+            list.AddHandler(PointerPressedEvent, new PointerEventHandler(List_PointerPressedAny), handledEventsToo: true);
+            list.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
+            list.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
+            list.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
+        }
     }
 
     // ---------------------------------------------------------------- public surface
@@ -84,10 +102,10 @@ public sealed partial class FilePane : UserControl
     internal string Location => _tab.Location;
 
     /// <summary>The folder shown, or null on "This PC" and while search results are shown.</summary>
-    internal string? Folder => _tab.Search is null && !PathTools.IsThisPc(_tab.Location) ? _tab.Location : null;
+    internal string? Folder => _tab.Search is null && !PathTools.IsThisPc(_tab.Location) && !PathTools.IsShellPlace(_tab.Location) ? _tab.Location : null;
 
     /// <summary>The folder the pane is in, also while search results are shown.</summary>
-    internal string? FolderOrSearchRoot => PathTools.IsThisPc(_tab.Location) ? null : _tab.Location;
+    internal string? FolderOrSearchRoot => PathTools.IsThisPc(_tab.Location) || PathTools.IsShellPlace(_tab.Location) ? null : _tab.Location;
 
     internal bool IsSearchOpen => _tab.Search is not null;
 
@@ -114,12 +132,12 @@ public sealed partial class FilePane : UserControl
         _owner = owner;
         foreach (string location in settings.Tabs)
         {
-            if (PathTools.IsThisPc(location) || Directory.Exists(location)) AddTab(location, settings, select: false);
+            if (PathTools.IsThisPc(location) || PathTools.IsShellPlace(location) || Directory.Exists(location)) AddTab(location, settings, select: false);
         }
         if (start is not null)
         {
-            string folder = Directory.Exists(start) ? start : Path.GetDirectoryName(start) ?? fallback;
-            AddTab(folder, settings, select: false).Selection = File.Exists(start) ? [start] : [];
+            string folder = PathTools.IsThisPc(start) || PathTools.IsShellPlace(start) || Directory.Exists(start) ? start : Path.GetDirectoryName(start) ?? fallback;
+            AddTab(folder, settings, select: false).Selection = !PathTools.IsShellPlace(start) && File.Exists(start) ? [start] : [];
         }
         if (_tabs.Count == 0) AddTab(fallback, settings, select: false);
         int active = start is not null ? _tabs.Count - 1 : Math.Clamp(settings.ActiveTab, 0, _tabs.Count - 1);
@@ -205,7 +223,7 @@ public sealed partial class FilePane : UserControl
     {
         string? folder = location;
         string? file = null;
-        if (!PathTools.IsThisPc(location) && File.Exists(location))
+        if (!PathTools.IsThisPc(location) && !PathTools.IsShellPlace(location) && File.Exists(location))
         {
             file = location;
             folder = Path.GetDirectoryName(location);
@@ -295,7 +313,7 @@ public sealed partial class FilePane : UserControl
 
     internal async Task NavigateAsync(string location, string? select = null, bool record = true)
     {
-        if (!PathTools.IsThisPc(location) && !Directory.Exists(location))
+        if (!PathTools.IsThisPc(location) && !PathTools.IsShellPlace(location) && !Directory.Exists(location))
         {
             _owner.ShowMessage(Loc.F("FolderNotFound", location), InfoBarSeverity.Warning);
             return;
@@ -334,6 +352,12 @@ public sealed partial class FilePane : UserControl
             return;
         }
         string from = _tab.Location;
+        if (PathTools.IsShellPlace(from))
+        {
+            // Windows named the place one level up when the shell place was listed.
+            await NavigateAsync(_tab.ShellParent ?? PathTools.ThisPc, from);
+            return;
+        }
         if (PathTools.Parent(from) is { } parent) await NavigateAsync(parent, PathTools.IsThisPc(parent) ? Path.GetPathRoot(from) : from);
     }
 
@@ -371,7 +395,18 @@ public sealed partial class FilePane : UserControl
     }
 
     /// <summary>The name of a place as Windows shows it: "Dieser PC", "Lokaler Datenträger (C:)", "Benutzer".</summary>
-    internal static string PlaceName(string location) => PathTools.IsThisPc(location) ? Loc.T("ThisPC") : ShellNames.Known(location);
+    internal static string PlaceName(string location) =>
+        PathTools.IsThisPc(location) ? Loc.T("ThisPC")
+        : PathTools.IsShellPlace(location) ? ShellFolderReader.KnownName(location) ?? ShellPlaceFallbackName(location)
+        : ShellNames.Known(location);
+
+    /// <summary>A readable name for a shell place whose own name Windows has not given yet.</summary>
+    private static string ShellPlaceFallbackName(string location)
+    {
+        string parsing = PathTools.ParsingName(location).TrimEnd('\\');
+        int slash = parsing.LastIndexOf('\\');
+        return slash >= 0 && slash < parsing.Length - 1 ? parsing[(slash + 1)..] : parsing;
+    }
 
     /// <summary>
     /// The folder a found item lies in, written with the names Windows shows. Search threads pass ask: true so the
@@ -395,6 +430,15 @@ public sealed partial class FilePane : UserControl
     private void ShowCrumbs()
     {
         string location = _tab.Location;
+        if (PathTools.IsShellPlace(location))
+        {
+            // A shell place shows the place above it, when Windows named one, and itself.
+            var crumbs = new List<Crumb> { new(Loc.T("ThisPC"), PathTools.ThisPc) };
+            if (_tab.ShellParent is { } above && !PathTools.IsThisPc(above)) crumbs.Add(new Crumb(PlaceName(above), above));
+            crumbs.Add(new Crumb(PlaceName(location), location));
+            Breadcrumb.ItemsSource = crumbs;
+            return;
+        }
         List<Core.PathSegment> segments = PathTools.Segments(location, Loc.T("ThisPC"));
         Breadcrumb.ItemsSource = segments.Select(s => new Crumb(PlaceName(s.Location), s.Location)).ToList();
         Microsoft.UI.Dispatching.DispatcherQueue queue = DispatcherQueue;
@@ -427,6 +471,7 @@ public sealed partial class FilePane : UserControl
         BackButton.IsEnabled = _tab.History.CanGoBack || _tab.Search is not null;
         ForwardButton.IsEnabled = _tab.History.CanGoForward;
         UpButton.IsEnabled = PathTools.Parent(_tab.Location) is not null || _tab.Search is not null;
+        if (!PathTools.IsShellPlace(_tab.Location)) _tab.ShellParent = null;
         ShowCrumbs();
         DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => BreadcrumbScroller.ChangeView(BreadcrumbScroller.ScrollableWidth, null, null, true));
         UpdateTabHeader();
@@ -441,6 +486,7 @@ public sealed partial class FilePane : UserControl
 
     private async Task LoadAsync()
     {
+        if (_closed) return;
         _loadCts?.Cancel();
         var cts = new CancellationTokenSource();
         _loadCts = cts;
@@ -458,7 +504,7 @@ public sealed partial class FilePane : UserControl
         ListingOptions listing = Listing;
         try
         {
-            entries = await Task.Run(() => PathTools.IsThisPc(location) ? DirectoryReader.ReadDrives() : DirectoryReader.Read(location, listing, cts.Token), cts.Token);
+            entries = await ReadEntriesAsync(tab, location, listing, cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -490,6 +536,28 @@ public sealed partial class FilePane : UserControl
             FocusAfterFirstLoad = false;
             FocusListSoon();
         }
+    }
+
+    /// <summary>
+    /// Reads a place: the drives for This PC, Windows' own list for a shell place, the folder otherwise. For a shell
+    /// place the tab learns the place one level up, and the address bar is drawn again with the names Windows gave.
+    /// </summary>
+    private async Task<List<FileEntry>> ReadEntriesAsync(PaneTab tab, string location, ListingOptions listing, CancellationToken token)
+    {
+        if (PathTools.IsShellPlace(location))
+        {
+            ShellListing shell = await ShellFolderReader.ReadAsync(location, listing.ShowHidden, token);
+            token.ThrowIfCancellationRequested();
+            tab.ShellParent = shell.Parent;
+            if (tab == _tab && ReferenceEquals(location, tab.Location))
+            {
+                ShowCrumbs();
+                UpdateTabHeader();
+                _owner.OnPaneLocationChanged(this);
+            }
+            return shell.Entries;
+        }
+        return await Task.Run(() => PathTools.IsThisPc(location) ? DirectoryReader.ReadDrives() : DirectoryReader.Read(location, listing, token), token);
     }
 
     /// <summary>Set by the window for the pane that should take the keyboard focus when its first folder is shown.</summary>
@@ -563,7 +631,7 @@ public sealed partial class FilePane : UserControl
     private void UpdateFreeSpace(string location)
     {
         _freeSpace = "";
-        if (PathTools.IsThisPc(location)) return;
+        if (PathTools.IsThisPc(location) || PathTools.IsShellPlace(location)) return;
         string? root = Path.GetPathRoot(location);
         if (string.IsNullOrEmpty(root)) return;
         Task.Run(() =>
@@ -631,7 +699,7 @@ public sealed partial class FilePane : UserControl
 
     private void StartWatcher(string location)
     {
-        if (PathTools.IsThisPc(location)) return;
+        if (_closed || PathTools.IsThisPc(location) || PathTools.IsShellPlace(location)) return;
         try
         {
             var watcher = new FileSystemWatcher(location)
@@ -664,6 +732,7 @@ public sealed partial class FilePane : UserControl
 
     internal void ScheduleRefresh()
     {
+        if (_closed) return;
         _refreshTimer.Stop();
         _refreshTimer.Start();
     }
@@ -671,24 +740,27 @@ public sealed partial class FilePane : UserControl
     /// <summary>Reads the folder again and updates only the rows that changed, keeping the selection and scroll position.</summary>
     private async Task RefreshAsync()
     {
-        if (_tab.Search is not null) return;
+        if (_closed || _tab.Search is not null) return;
         PaneTab tab = _tab;
         string location = tab.Location;
         ListingOptions listing = Listing;
         List<FileEntry> fresh;
         try
         {
-            fresh = await Task.Run(() => PathTools.IsThisPc(location) ? DirectoryReader.ReadDrives() : DirectoryReader.Read(location, listing));
+            fresh = await ReadEntriesAsync(tab, location, listing, CancellationToken.None);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (_closed) return;
             // The folder itself was deleted or renamed: go to the nearest folder that still exists.
+            // A shell place that cannot be listed any more keeps its rows until the user goes elsewhere.
+            if (PathTools.IsShellPlace(location)) return;
             string? up = location;
             while (up is not null && !PathTools.IsThisPc(up) && !Directory.Exists(up)) up = PathTools.Parent(up);
             if (tab == _tab && up is not null && !PathTools.SameLocation(up, location)) await NavigateAsync(up);
             return;
         }
-        if (tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (_closed || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
         FolderChanges changes = FolderChanges.Compute(_entries, fresh);
         _entries = fresh;
         if (!changes.IsEmpty)
@@ -949,8 +1021,150 @@ public sealed partial class FilePane : UserControl
 
     private void List_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (sender is ListViewBase list) KeepClickSelection(list, e);
         UpdateStatus();
         _owner.OnPaneSelectionChanged(this);
+    }
+
+    /// <summary>When the last mouse press on the list happened, so a selection change can be told to come from a click.</summary>
+    private long _listPressedAt;
+
+    /// <summary>The row a Shift+click selects from: the row of the last click without Shift.</summary>
+    private FileItem? _selectionAnchor;
+
+    private bool _adjustingSelection;
+
+    private void List_PointerPressedAny(object sender, PointerRoutedEventArgs e)
+    {
+        if (e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse) _listPressedAt = Environment.TickCount64;
+    }
+
+    /// <summary>
+    /// Ctrl+click adds a row to the selection and Shift+click selects the rows from the last clicked one, as in Explorer.
+    /// The list does this itself only when it sees the modifier keys, which it does not always do; when a click with
+    /// Ctrl or Shift held replaced the selection instead, the selection is put right here.
+    /// </summary>
+    private void KeepClickSelection(ListViewBase list, SelectionChangedEventArgs e)
+    {
+        if (_adjustingSelection || Environment.TickCount64 - _listPressedAt > 1500) return;
+        bool ctrl = Native.IsKeyDown(0x11), shift = Native.IsKeyDown(0x10);
+        FileItem? clicked = e.AddedItems.Count == 1 ? e.AddedItems[0] as FileItem : null;
+        _adjustingSelection = true;
+        try
+        {
+            if (shift && clicked is not null && _selectionAnchor is { } anchor && _items.IndexOf(anchor) is var from and >= 0)
+            {
+                int to = _items.IndexOf(clicked);
+                if (to >= 0 && list.SelectedItems.Count != Math.Abs(to - from) + 1)
+                {
+                    if (!ctrl) list.SelectedItems.Clear();
+                    list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(Math.Min(from, to), (uint)(Math.Abs(to - from) + 1)));
+                }
+                return;
+            }
+            if (ctrl && !shift && clicked is not null && e.RemovedItems.Count > 0)
+            {
+                foreach (object removed in e.RemovedItems)
+                {
+                    if (!list.SelectedItems.Contains(removed)) list.SelectedItems.Add(removed);
+                }
+            }
+            if (!shift && clicked is not null) _selectionAnchor = clicked;
+        }
+        finally
+        {
+            _adjustingSelection = false;
+        }
+    }
+
+    // ---------------------------------------------------------------- selection box
+
+    private Windows.Foundation.Point? _marqueeStart;
+    private bool _marqueeShown;
+    private HashSet<FileItem> _marqueeBase = [];
+
+    /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
+    private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not ListViewBase list || e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        PointerPoint point = e.GetCurrentPoint(ContentArea);
+        if (!point.Properties.IsLeftButtonPressed || OnRowOrScrollBar(e.OriginalSource as DependencyObject, list)) return;
+        _marqueeStart = point.Position;
+        _marqueeShown = false;
+        bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
+        _marqueeBase = keep ? list.SelectedItems.OfType<FileItem>().ToHashSet() : [];
+        if (!keep) list.SelectedItems.Clear();
+        // No pointer capture: the list takes the capture for itself, and losing it would end the box at once.
+        list.Focus(FocusState.Pointer);
+    }
+
+    private void Marquee_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_marqueeStart is not { } start || sender is not ListViewBase list) return;
+        PointerPoint current = e.GetCurrentPoint(ContentArea);
+        if (!current.Properties.IsLeftButtonPressed)
+        {
+            // The button was released outside the list, where the release was not seen.
+            EndMarquee();
+            return;
+        }
+        Windows.Foundation.Point now = current.Position;
+        double left = Math.Min(start.X, now.X), top = Math.Min(start.Y, now.Y);
+        double width = Math.Abs(now.X - start.X), height = Math.Abs(now.Y - start.Y);
+        if (!_marqueeShown && width < 4 && height < 4) return;
+        _marqueeShown = true;
+        Canvas.SetLeft(MarqueeRect, left);
+        Canvas.SetTop(MarqueeRect, top);
+        MarqueeRect.Width = width;
+        MarqueeRect.Height = height;
+        MarqueeRect.Visibility = Visibility.Visible;
+        var box = new Windows.Foundation.Rect(left, top, width, height);
+        var wanted = new HashSet<FileItem>(_marqueeBase);
+        for (int i = 0; i < _items.Count; i++)
+        {
+            if (list.ContainerFromIndex(i) is not FrameworkElement row) continue;
+            Windows.Foundation.Rect bounds = row.TransformToVisual(ContentArea).TransformBounds(new Windows.Foundation.Rect(0, 0, row.ActualWidth, row.ActualHeight));
+            bounds.Intersect(box);
+            if (!bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) wanted.Add(_items[i]);
+        }
+        _adjustingSelection = true;
+        try
+        {
+            foreach (FileItem selected in list.SelectedItems.OfType<FileItem>().ToList())
+            {
+                if (!wanted.Contains(selected)) list.SelectedItems.Remove(selected);
+            }
+            foreach (FileItem item in wanted)
+            {
+                if (!list.SelectedItems.Contains(item)) list.SelectedItems.Add(item);
+            }
+        }
+        finally
+        {
+            _adjustingSelection = false;
+        }
+        e.Handled = true;
+    }
+
+    private void Marquee_PointerReleased(object sender, PointerRoutedEventArgs e) => EndMarquee();
+
+    private void EndMarquee()
+    {
+        if (_marqueeStart is null) return;
+        _marqueeStart = null;
+        _marqueeShown = false;
+        _marqueeBase = [];
+        MarqueeRect.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>True when a press landed on a row or on a scroll bar, where it keeps its usual meaning.</summary>
+    private static bool OnRowOrScrollBar(DependencyObject? source, ListViewBase list)
+    {
+        for (DependencyObject? node = source; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is SelectorItem or ScrollBar) return true;
+        }
+        return false;
     }
 
     private void List_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
@@ -1052,7 +1266,7 @@ public sealed partial class FilePane : UserControl
             await NavigateAsync(target);
             return;
         }
-        if (Settings.OpenImagesInViewer && FileTypes.IsViewerImage(item.Entry.Extension))
+        if (Settings.OpenImagesInViewer && !PathTools.IsShellPlace(path) && FileTypes.IsViewerImage(item.Entry.Extension))
         {
             ShowInViewer(item);
             return;
@@ -1066,6 +1280,25 @@ public sealed partial class FilePane : UserControl
         int index = pictures.FindIndex(p => string.Equals(p, item.Entry.FullPath, StringComparison.OrdinalIgnoreCase));
         if (index < 0) return;
         _owner.ShowViewer(pictures, index, this);
+    }
+
+    /// <summary>
+    /// Selects an item another program asked for through "Show in folder". While the folder is still loading, the
+    /// request is kept and applied when the list is shown.
+    /// </summary>
+    internal void SelectFromShell(string path, bool only)
+    {
+        FileItem? item = _items.FirstOrDefault(i => PathTools.SameLocation(i.Entry.FullPath, path) || PathTools.SameLocation(i.Entry.FullPath, PathTools.ShellPlace(path)));
+        if (item is null)
+        {
+            if (only) _tab.Selection = [path];
+            else _tab.Selection.Add(path);
+            return;
+        }
+        if (only) CurrentList.SelectedItems.Clear();
+        if (!CurrentList.SelectedItems.Contains(item)) CurrentList.SelectedItems.Add(item);
+        CurrentList.ScrollIntoView(item);
+        if (_owner.ActivePane == this && CurrentList.ContainerFromItem(item) is Control row) row.Focus(FocusState.Programmatic);
     }
 
     /// <summary>Selects a file after the viewer moved to it, so closing the viewer leaves the list on the same picture.</summary>
@@ -1091,7 +1324,7 @@ public sealed partial class FilePane : UserControl
     internal void Copy(bool cut)
     {
         IReadOnlyList<string> paths = SelectedPaths;
-        if (paths.Count == 0) return;
+        if (paths.Count == 0 || RefuseShellItems(paths)) return;
         if (!FileClipboard.Put(paths, cut, _owner.Hwnd))
         {
             _owner.ShowMessage(Loc.T("ClipboardBusy"), InfoBarSeverity.Warning);
@@ -1101,17 +1334,27 @@ public sealed partial class FilePane : UserControl
         _owner.ShowMessage(Loc.F(cut ? "CutDone" : "CopyDone", paths.Count), InfoBarSeverity.Informational);
     }
 
+    /// <summary>
+    /// True, with a note to the user, when some items have no path of their own, such as deleted files in the Recycle
+    /// Bin. Copying such an item by path would copy Windows' internal file under a wrong name, so it is refused.
+    /// </summary>
+    private bool RefuseShellItems(IReadOnlyList<string> paths)
+    {
+        if (!paths.Any(PathTools.IsShellPlace)) return false;
+        _owner.ShowMessage(Loc.T("ShellItemsNoCopy"), InfoBarSeverity.Warning);
+        return true;
+    }
+
     internal async void Paste(string? into = null)
     {
         string? target = into ?? Folder;
         if (target is null) return;
         var content = FileClipboard.Get(_owner.Hwnd);
         if (content is not { } clip || clip.Paths.Count == 0) return;
-        if (!await CheckedTransfer(clip.Paths, target, clip.Cut)) return;
-        if (clip.Cut)
+        bool completed = await CheckedTransfer(clip.Paths, target, clip.Cut);
+        if (clip.Cut && await Task.Run(() => clip.Completion.AllMoved(completed)))
         {
-            FileClipboard.Clear(_owner.Hwnd);
-            _owner.SetCutPaths([]);
+            if (FileClipboard.ClearIfUnchanged(_owner.Hwnd, clip.Completion)) _owner.SetCutPaths([]);
         }
     }
 
@@ -1134,9 +1377,10 @@ public sealed partial class FilePane : UserControl
         await CheckedTransfer(paths, target, move);
     }
 
-    /// <summary>Checks a copy or move, then hands it to Windows. Returns false when it did not start.</summary>
+    /// <summary>Checks a copy or move, then runs it with the app's own windows. Returns false when it did not start.</summary>
     private async Task<bool> CheckedTransfer(IReadOnlyList<string> paths, string target, bool move)
     {
+        if (RefuseShellItems(paths) || PathTools.IsShellPlace(target)) return false;
         switch (TransferCheck.Check(paths, target, move))
         {
             case TransferProblem.IntoItself:
@@ -1146,18 +1390,7 @@ public sealed partial class FilePane : UserControl
             case TransferProblem.Nothing:
                 return false;
         }
-        try
-        {
-            if (move) await ShellActions.MoveAsync(paths, target, _owner.Hwnd);
-            else await ShellActions.CopyAsync(paths, target, _owner.Hwnd);
-        }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
-        {
-            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return false;
-        }
-        _owner.RefreshPanesShowing(target);
-        return true;
+        return await _owner.TransferAsync(paths, target, move);
     }
 
     internal async void Delete(bool permanently)
@@ -1165,15 +1398,7 @@ public sealed partial class FilePane : UserControl
         IReadOnlyList<string> paths = SelectedPaths;
         if (paths.Count == 0) return;
         int index = CurrentList.SelectedIndex;
-        try
-        {
-            await ShellActions.DeleteAsync(paths, _owner.Hwnd, permanently);
-        }
-        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
-        {
-            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return;
-        }
+        if (!await _owner.DeleteAsync(paths, permanently)) return;
         await RefreshAsync();
         // The row after the deleted ones gets the selection, so Delete can be pressed again.
         if (_items.Count > 0 && CurrentList.SelectedIndex < 0) CurrentList.SelectedIndex = Math.Clamp(index, 0, _items.Count - 1);
@@ -1185,13 +1410,31 @@ public sealed partial class FilePane : UserControl
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
         CurrentList.ScrollIntoView(item);
+        _renameStarted = Environment.TickCount64;
         item.IsRenaming = true;
     }
+
+    /// <summary>
+    /// When the rename box last opened. Right after it opens, focus can still move on its own: a menu that closes gives
+    /// focus back to its button, and the list moves it to the selected row. Such a move must not end the rename, or a
+    /// new folder would keep its default name before the user could type one.
+    /// </summary>
+    private long _renameStarted;
+
+    private static readonly TimeSpan RenameSettleTime = TimeSpan.FromMilliseconds(1000);
 
     private void RenameBox_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not TextBox box || box.DataContext is not FileItem item) return;
         box.Text = item.Entry.Name;
+        FocusRenameBox(box, item);
+        // Focus is given again once a closing menu has put it back on its button.
+        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => FocusRenameBox(box, item));
+    }
+
+    private static void FocusRenameBox(TextBox box, FileItem item)
+    {
+        if (!item.IsRenaming || box.FocusState != FocusState.Unfocused) return;
         box.Focus(FocusState.Programmatic);
         int dot = item.Entry.Kind == EntryKind.File ? item.Entry.Name.LastIndexOf('.') : -1;
         if (dot > 0) box.Select(0, dot);
@@ -1216,7 +1459,26 @@ public sealed partial class FilePane : UserControl
 
     private void RenameBox_LostFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TextBox { DataContext: FileItem item } box) CommitRename(item, box.Text);
+        if (sender is not TextBox { DataContext: FileItem item } box) return;
+        if (item.IsRenaming && Environment.TickCount64 - _renameStarted < RenameSettleTime.TotalMilliseconds && FocusWentAstray(box))
+        {
+            DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => FocusRenameBox(box, item));
+            return;
+        }
+        CommitRename(item, box.Text);
+    }
+
+    /// <summary>
+    /// True when focus left the rename box on its own rather than through the user: no mouse button and no Tab key is
+    /// down, and focus went to nothing, the list or one of its rows, or a button, which is where a closing menu or the
+    /// list put it. A click anywhere, also on another row or a toolbar button, or Tab, still ends the rename.
+    /// </summary>
+    private static bool FocusWentAstray(TextBox box)
+    {
+        const int LeftButton = 0x01, RightButton = 0x02, MiddleButton = 0x04, Tab = 0x09;
+        if (Native.IsKeyDown(LeftButton) || Native.IsKeyDown(RightButton) || Native.IsKeyDown(MiddleButton) || Native.IsKeyDown(Tab)) return false;
+        object? focused = box.XamlRoot is { } root ? FocusManager.GetFocusedElement(root) : null;
+        return focused is null or ListViewBase or SelectorItem or ButtonBase;
     }
 
     private async void CommitRename(FileItem item, string text)
@@ -1234,6 +1496,14 @@ public sealed partial class FilePane : UserControl
         }
         string? folder = Path.GetDirectoryName(item.Entry.FullPath.TrimEnd('\\'));
         if (folder is null) return;
+        // A rename never replaces another item: a name that is taken is refused here, so Windows is never asked.
+        // Changing only the case of the item's own name is allowed.
+        bool caseOnly = string.Equals(name, item.Entry.Name, StringComparison.OrdinalIgnoreCase);
+        if (!caseOnly && await Task.Run(() => Path.Exists(Path.Combine(folder, name))))
+        {
+            _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
+            return;
+        }
         _selectAfterRefresh = Path.Combine(folder, name);
         try
         {
@@ -1371,7 +1641,9 @@ public sealed partial class FilePane : UserControl
     /// <summary>The app's menu for the empty area, with Windows' full "New" submenu when the folder has one.</summary>
     private void ShowBackgroundMenu(Windows.Foundation.Point point)
     {
-        var loading = Folder is { } folder
+        // A shell place brings Windows' own commands for it, such as "Empty Recycle Bin".
+        string? place = Folder ?? (PathTools.IsShellPlace(_tab.Location) && _tab.Search is null ? _tab.Location : null);
+        var loading = place is { } folder
             ? ShellMenuSession.ForBackgroundAsync(folder, _owner.Hwnd)
             : Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
         ShellMenuMerge.Show(BuildBackgroundMenu(), ContentArea, point, loading, _owner.Hwnd, background: true);
@@ -1428,6 +1700,14 @@ public sealed partial class FilePane : UserControl
         if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
         menu.Items.Add(new MenuFlyoutSeparator());
+        // An item of the Recycle Bin or another shell place cannot be copied, moved or renamed by path; Windows' part
+        // of the menu brings what it offers instead, such as "Restore".
+        if (PathTools.IsShellPlace(item.Entry.FullPath))
+        {
+            menu.Items.Add(Item("Delete", "", () => Delete(permanently: false), "Del"));
+            menu.Items.Add(Tagged(Item("Properties", "", ShowProperties, "Alt+Enter"), ShellMenuMerge.PropertiesTag));
+            return menu;
+        }
         if (!drive)
         {
             menu.Items.Add(Item("Cut", "", () => Copy(cut: true), "Ctrl+X"));
@@ -1522,7 +1802,9 @@ public sealed partial class FilePane : UserControl
     private void List_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
         string[] paths = e.Items.OfType<FileItem>().Where(i => i.Entry.Kind != EntryKind.Drive).Select(i => i.Entry.FullPath).ToArray();
-        if (paths.Length == 0)
+        // Items of the Recycle Bin or a phone have no path another folder could take; they are restored or copied
+        // through their context menu instead.
+        if (paths.Length == 0 || paths.Any(PathTools.IsShellPlace))
         {
             e.Cancel = true;
             return;
@@ -1554,14 +1836,33 @@ public sealed partial class FilePane : UserControl
 
     private void List_DragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args) => ScheduleRefresh();
 
-    private string? DropTarget(DragEventArgs e) =>
-        (e.OriginalSource as FrameworkElement)?.DataContext is FileItem { Entry.IsContainer: true } item ? item.Entry.FullPath : Folder;
+    /// <summary>
+    /// The folder a drop goes into: the folder or drive row under the pointer, otherwise the folder the pane shows. The
+    /// row is found by hit-testing the pointer, because the event's source is not reliably the row it is over, which
+    /// made a drop on a folder row land in the pane's own folder instead.
+    /// </summary>
+    private string? DropTarget(DragEventArgs e)
+    {
+        if (XamlRoot is not null)
+        {
+            Windows.Foundation.Point point = e.GetPosition(null);
+            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, CurrentList))
+            {
+                if (element is SelectorItem { Content: FileItem item }) return item.Entry.IsContainer ? item.Entry.FullPath : Folder;
+            }
+        }
+        return Folder;
+    }
+
+    /// <summary>True when every dragged item already lies in <paramref name="target"/>, so a move there would do nothing.</summary>
+    private static bool AllAlreadyIn(string[]? sources, string target) =>
+        sources is { Length: > 0 } && sources.All(s => Path.GetDirectoryName(s.TrimEnd('\\')) is { } parent && PathTools.SameLocation(parent, target));
 
     private void Content_DragOver(object sender, DragEventArgs e)
     {
         string? target = DropTarget(e);
         bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey(InternalDragFormat);
-        if (target is null || !files)
+        if (target is null || PathTools.IsShellPlace(target) || !files)
         {
             e.AcceptedOperation = DataPackageOperation.None;
             return;
@@ -1573,6 +1874,12 @@ public sealed partial class FilePane : UserControl
             return;
         }
         bool move = DropMoves(e, internalPaths, target);
+        // Moving items into the folder they are already in does nothing, so the pointer says so instead of promising it.
+        if (move && AllAlreadyIn(internalPaths, target))
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
         e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
         e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", PlaceName(target));
         e.DragUIOverride.IsCaptionVisible = true;
@@ -1657,6 +1964,8 @@ public sealed partial class FilePane : UserControl
         string? full = PathTools.Normalize(text, Folder);
         if (full is not null && Directory.Exists(full)) await NavigateAsync(full);
         else if (full is not null && File.Exists(full)) await NavigateAsync(Path.GetDirectoryName(full)!, full);
+        // Places only Windows lists, such as "shell:RecycleBinFolder", "\\SERVER" or a folder inside a zip file.
+        else if (await ShellFolderReader.ResolveAsync(text) is { } place) await NavigateAsync(place);
         else _owner.ShowMessage(Loc.F("FolderNotFound", text), InfoBarSeverity.Warning);
     }
 

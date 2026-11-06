@@ -72,6 +72,12 @@
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="NewFolder_Click" ToolTipService.ToolTip="{local:T Key=NewFolderTip}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8F4;" FontSize="15" Foreground="#F59E0B" />
+                        <TextBlock Text="{local:T Key=NewFolderName}" />
+                    </StackPanel>
+                </Button>
                 <AppBarSeparator />
                 <Button Style="{StaticResource ToolbarButtonStyle}" Click="Cut_Click" ToolTipService.ToolTip="{local:T Key=CutTip}">
                     <FontIcon Glyph="&#xE8C6;" FontSize="15" />
@@ -216,6 +222,9 @@
         </Grid>
 
         <InfoBar x:Name="Message" Grid.Row="2" VerticalAlignment="Bottom" HorizontalAlignment="Center" MaxWidth="720" Margin="0,0,0,24" IsOpen="False" IsClosable="True" />
+
+        <!-- The app's own progress cards for copy, move and delete, in place of Windows' progress window. -->
+        <StackPanel x:Name="OperationsPanel" Grid.Row="2" VerticalAlignment="Bottom" HorizontalAlignment="Right" Width="380" Margin="0,0,20,20" Spacing="8" />
 
         <!-- Below the title bar, whose area belongs to window dragging. -->
         <controls:ImageViewer x:Name="Viewer" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />

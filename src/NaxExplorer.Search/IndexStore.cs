@@ -418,7 +418,7 @@ public sealed class IndexStore : IDisposable
     /// Pieces that contain the words, best first by BM25. Every word must appear unless <paramref name="anyWord"/> is
     /// set. Words match as prefixes, so "upgrad" finds "upgrade" and "upgrades".
     /// </summary>
-    public List<FullTextHit> FullText(IReadOnlyList<string> terms, bool anyWord, int limit)
+    public List<FullTextHit> FullText(IReadOnlyList<string> terms, bool anyWord, int limit, string? scope = null)
     {
         string? match = BuildMatch(terms, anyWord);
         if (match is null) return [];
@@ -428,8 +428,9 @@ public sealed class IndexStore : IDisposable
             using var command = _connection.CreateCommand();
             command.CommandText = """
                 SELECT chunk_text.rowid, chunks.file_id, bm25(chunk_text), snippet(chunk_text, 0, $start, $end, '…', 16)
-                FROM chunk_text JOIN chunks ON chunks.id = chunk_text.rowid
-                WHERE chunk_text MATCH $match
+                FROM chunk_text JOIN chunks ON chunks.id = chunk_text.rowid JOIN files ON files.id = chunks.file_id
+                WHERE chunk_text MATCH $match AND ($scope IS NULL OR files.path = $scope COLLATE NOCASE
+                    OR substr(files.path, 1, length($prefix)) = $prefix COLLATE NOCASE)
                 ORDER BY bm25(chunk_text)
                 LIMIT $limit
                 """;
@@ -437,6 +438,8 @@ public sealed class IndexStore : IDisposable
             command.Parameters.AddWithValue("$start", MarkStart.ToString());
             command.Parameters.AddWithValue("$end", MarkEnd.ToString());
             command.Parameters.AddWithValue("$limit", limit);
+            command.Parameters.AddWithValue("$scope", (object?)scope ?? DBNull.Value);
+            command.Parameters.AddWithValue("$prefix", scope is null ? DBNull.Value : scope.TrimEnd('\\', '/') + "\\");
             try
             {
                 using SqliteDataReader reader = command.ExecuteReader();

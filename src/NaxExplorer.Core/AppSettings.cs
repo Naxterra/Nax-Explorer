@@ -125,8 +125,13 @@ public sealed class AppSettings
             {
                 settings.Left ??= new PaneSettings();
                 settings.Right ??= new PaneSettings();
-                settings.Pinned ??= [];
-                settings.IndexedFolders ??= [];
+                RepairPane(settings.Left);
+                RepairPane(settings.Right);
+                settings.Pinned = UsableEntries(settings.Pinned);
+                settings.IndexedFolders = UsableEntries(settings.IndexedFolders);
+                if (settings.QuickAccess is not null) settings.QuickAccess = UsableEntries(settings.QuickAccess);
+                settings.Language = settings.Language is "en-US" or "de-DE" ? settings.Language : "";
+                settings.Theme = settings.Theme is "light" or "dark" ? settings.Theme : "system";
                 settings.LeftStart ??= "";
                 settings.RightStart ??= "";
                 return settings;
@@ -142,6 +147,16 @@ public sealed class AppSettings
             ShowProtectedFiles = view.ShowProtectedFiles,
             ShowExtensions = view.ShowExtensions,
         };
+    }
+
+    private static List<string> UsableEntries(List<string>? entries) =>
+        entries?.Where(entry => !string.IsNullOrWhiteSpace(entry)).ToList() ?? [];
+
+    private static void RepairPane(PaneSettings pane)
+    {
+        pane.Tabs = UsableEntries(pane.Tabs);
+        pane.View = pane.View == "thumbnails" ? "thumbnails" : "details";
+        if (!Enum.IsDefined(pane.Sort)) pane.Sort = SortColumn.Name;
     }
 
     /// <summary>The value of a start setting that opens the user's home folder.</summary>

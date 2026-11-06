@@ -14,6 +14,9 @@ public static class Program
     /// <summary>The folder or file named on the command line, if any.</summary>
     internal static string? StartPath { get; private set; }
 
+    /// <summary>True for the start at sign-in, which opens no window and only keeps the app ready in the background.</summary>
+    internal static bool Background { get; private set; }
+
     private static Mutex? s_running;
     private static Mutex? s_runningGlobal;
 
@@ -27,14 +30,19 @@ public static class Program
         // The marker of an earlier hand-off is read once and then removed, so nothing this process starts inherits it.
         string? marker = Environment.GetEnvironmentVariable(Core.ShellPlaces.HandOffMarker);
         if (marker is not null) Environment.SetEnvironmentVariable(Core.ShellPlaces.HandOffMarker, null);
-        if (StartArguments.ExplorerPlace(args) is { } place)
+        // Places such as the Recycle Bin, Network, a computer under Network or a folder inside a zip file open in the
+        // app's own pane. Only what the app cannot list, such as Control Panel, still goes to Explorer.
+        string? place = StartArguments.ExplorerPlace(args);
+        string? inApp = place is null ? null : StartArguments.InAppPlace(place);
+        if (place is not null && inApp is null)
         {
             bool startedByOwnHandOff = Core.ShellPlaces.IsOwnHandOff(marker, place, DateTime.UtcNow);
             if (!startedByOwnHandOff && Core.ShellPlaces.MayHandOff(place, Core.DataFolders.HandOff, DateTime.UtcNow)) StartArguments.OpenInExplorer(place);
             else Native.MessageBox(IntPtr.Zero, Loc.F("HandOffLoop", place), "Nax Explorer", 0x30);
             return 0;
         }
-        StartPath = StartArguments.LocationFrom(args);
+        StartPath = inApp ?? StartArguments.LocationFrom(args);
+        Background = args.Any(StartArguments.IsBackgroundSwitch);
         // One process serves every window: a second start hands its folder to the running app and ends.
         AppInstance key = AppInstance.FindOrRegisterForKey("Naxterra.NaxExplorer.Main");
         if (!key.IsCurrent)
@@ -98,12 +106,39 @@ internal static class StartArguments
     {
         List<string> list = args.ToList();
         if (list.Any(a => Core.ShellPlaces.Classify(a) == Core.ShellPlace.ThisPc)) return Core.PathTools.ThisPc;
-        return PathFrom(list);
+        if (PathFrom(list) is { } path) return path;
+        return ExplorerPlace(list) is { } place ? InAppPlace(place) : null;
     }
 
-    /// <summary>The first argument that names a place only Explorer can show, or null.</summary>
+    /// <summary>The switch the sign-in entry passes, see <see cref="Shell.StartAtSignIn"/>.</summary>
+    public const string BackgroundSwitch = "--background";
+
+    public static bool IsBackgroundSwitch(string arg) => string.Equals(arg.Trim().Trim('"'), BackgroundSwitch, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The first argument that names a place that is not a folder on disk, such as the Recycle Bin, or null.</summary>
     public static string? ExplorerPlace(IEnumerable<string> args) =>
         args.FirstOrDefault(a => Core.ShellPlaces.Route(a, Path.Exists, File.Exists) == Core.ShellPlace.Explorer);
+
+    /// <summary>
+    /// The app's own place for something Windows handed over that is not a folder on disk, or null when only Explorer
+    /// can show it, such as Control Panel, or when Windows does not know it as a folder.
+    /// </summary>
+    public static string? InAppPlace(string argument)
+    {
+        string text = argument.Trim().Trim('"').Trim();
+        if (Core.ShellPlaces.OnlyExplorerShows(text)) return null;
+        string? place;
+        try
+        {
+            place = ShellFolderReader.ResolveAsync(text).GetAwaiter().GetResult();
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException or IOException)
+        {
+            CrashLog.Write(ex);
+            return null;
+        }
+        return place is not null && !Core.ShellPlaces.OnlyExplorerShows(place) ? place : null;
+    }
 
     /// <summary>
     /// Opens a place in Explorer. Started with the place itself, Explorer shows it directly and does not ask the

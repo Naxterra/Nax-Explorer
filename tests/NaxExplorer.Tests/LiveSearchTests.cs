@@ -76,6 +76,26 @@ internal static class LiveSearchTests
             }
         });
 
+        yield return ("content_readers_recheck_cloud_attributes_at_read_time", "Even when queued while local, a file that becomes online-only is refused by plain-text search and document extraction before it is opened.", () =>
+        {
+            string folder = Fixtures.TempFolder("cloud-read");
+            string plain = Fixtures.Write(folder, "notes.txt", "budget needle");
+            string document = Fixtures.Docx(folder, "notes.docx", "budget needle");
+            foreach (string path in new[] { plain, document })
+            {
+                File.SetAttributes(path, FileAttributes.Offline);
+                try
+                {
+                    Check.That(!new ContentMatcher("needle").Matches(path, out _), "content search read an online-only file");
+                    Check.Equal<string?>(null, TextExtractor.Extract(path, 1000), "extraction read an online-only file");
+                }
+                finally
+                {
+                    File.SetAttributes(path, FileAttributes.Normal);
+                }
+            }
+        });
+
         yield return ("live_search_finds_names_and_contents_in_subfolders", "A recursive search reports name matches and content matches from subfolders, including inside a Word file.", () =>
         {
             string folder = Fixtures.TempFolder("live");

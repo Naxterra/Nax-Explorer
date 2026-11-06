@@ -2,8 +2,8 @@
 
 This list names what Nax Explorer must never do. Every release report marks each item as verified by a named test or as not verified. The owner approved this list on 2026-11-04.
 
-1. The app never deletes, overwrites, moves or renames a file or folder unless the user chose that action. Deleting goes to the Recycle Bin; permanent deletion needs Shift and the Windows confirmation.
-2. Copy, move, rename and delete never replace an existing item without the Windows conflict dialog, and never move or copy a folder into itself or one of its own subfolders.
+1. The app never deletes, overwrites, moves or renames a file or folder unless the user chose that action. Deleting goes to the Recycle Bin; permanent deletion needs Shift, or a drive without a Recycle Bin, and Nax Explorer's own confirmation. The owner approved this wording on 2026-11-05.
+2. Copy, move, rename and delete never replace an existing item unless the user chose Replace in Nax Explorer's conflict window, and never move or copy a folder into itself or one of its own subfolders. The owner approved this wording on 2026-11-05.
 3. Reading folders, previews, searches and the AI index never change a user's file, its contents, size or modification time, and never stop other programs from writing, renaming or deleting it.
 4. Turning a picture in the viewer never changes the picture file.
 5. The app never sends file names, file contents, search text or anything else about the PC to a server. The only network access is the model download the user starts, from a fixed address, and the model is kept only when its SHA-256 hashes match.

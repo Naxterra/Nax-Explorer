@@ -42,6 +42,9 @@ public sealed class FileEntry
 
     public DriveType DriveType { get; init; } = DriveType.Unknown;
 
+    /// <summary>The type Windows names for an item of a shell place, such as a deleted file in the Recycle Bin.</summary>
+    public string? TypeName { get; init; }
+
     public bool IsContainer => Kind != EntryKind.File;
 
     /// <summary>The extension with its dot, such as ".txt", or empty for folders, drives and files without one.</summary>

@@ -150,11 +150,11 @@ public sealed class HybridSearch
         token.ThrowIfCancellationRequested();
 
         // 2. Exact words in the text: all words first; any word only when that finds too little.
-        List<FullTextHit> words = _store.FullText(terms, anyWord: false, ListDepth);
+        List<FullTextHit> words = _store.FullText(terms, anyWord: false, ListDepth, scope);
         bool allWords = true;
         if (words.Count < 10 && terms.Count > 1)
         {
-            words = _store.FullText(terms, anyWord: true, ListDepth);
+            words = _store.FullText(terms, anyWord: true, ListDepth, scope);
             allWords = false;
         }
         int wordRank = 0;
@@ -174,13 +174,17 @@ public sealed class HybridSearch
         if (lease is not null)
         {
             float[] queryVector = lease.Embedder.Embed(["query: " + query], token)[0];
-            var scores = new float[vectors.Count];
-            for (int i = 0; i < vectors.Count; i++) scores[i] = VectorMath.Similarity(queryVector, vectors.Vector(i));
+            // Scope before limiting and before measuring the background: unrelated folders cannot crowd out
+            // the selected folder's matches or raise its relevance threshold.
+            int[] scoped = Enumerable.Range(0, vectors.Count).Where(i => InScope(vectors.FileIds[i])).ToArray();
+            var scores = new float[scoped.Length];
+            for (int i = 0; i < scoped.Length; i++) scores[i] = VectorMath.Similarity(queryVector, vectors.Vector(scoped[i]));
             List<(int Index, float Score)> best = VectorMath.Top(scores, ListDepth * 2);
             float floor = MeaningFloor(scores, best.Count > 0 ? best[0].Score : 0);
             int meaningRank = 0;
-            foreach (var (index, score) in best)
+            foreach (var (scopedIndex, score) in best)
             {
+                int index = scoped[scopedIndex];
                 long fileId = vectors.FileIds[index];
                 if (!InScope(fileId)) continue;
                 Candidate candidate = Get(fileId);

@@ -75,9 +75,15 @@ public static class TextSniffer
         return false;
     }
 
-    /// <summary>Opens a file for reading without stopping other programs from writing, renaming or deleting it.</summary>
-    public static FileStream OpenShared(string path, int bufferSize = 64 * 1024) =>
-        new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize, FileOptions.SequentialScan);
+    /// <summary>
+    /// Opens a local file for reading without stopping other programs from writing, renaming or deleting it.
+    /// Checks its current attributes here as well as at listing time, since a queued file may have become online-only.
+    /// </summary>
+    public static FileStream OpenShared(string path, int bufferSize = 64 * 1024)
+    {
+        if (CloudFiles.IsOnlineOnly(File.GetAttributes(path))) throw new IOException("The file content is only available online.");
+        return new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize, FileOptions.SequentialScan);
+    }
 
     /// <summary>
     /// Reads the start of a text file for the preview. Returns null for binary files. <paramref name="truncated"/> tells

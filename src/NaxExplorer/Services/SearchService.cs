@@ -22,11 +22,24 @@ internal enum Coverage
 internal sealed class SearchService : IDisposable
 {
     private readonly Lock _gate = new();
+    private readonly TaskScheduler _startupScheduler;
     private IndexStore? _store;
     private EmbedderHost? _host;
     private Indexer? _indexer;
     private HybridSearch? _search;
     private IReadOnlyList<string> _roots = [];
+    private long _generation;
+    private readonly HashSet<Task> _searches = [];
+    private Task _shutdown = Task.CompletedTask;
+
+    /// <summary>Wait for all retired workers before deleting or rebuilding the index.</summary>
+    public Task ShutdownCompletion
+    {
+        get { lock (_gate) return _shutdown; }
+    }
+
+    internal SearchService(TaskScheduler? startupScheduler = null) =>
+        _startupScheduler = startupScheduler ?? TaskScheduler.Default;
 
     /// <summary>Raised on a background thread whenever the indexer reports progress.</summary>
     public event Action<IndexerStatus>? StatusChanged;
@@ -70,13 +83,20 @@ internal sealed class SearchService : IDisposable
         bool useGpu = settings.UseGpu;
         List<string> roots = settings.IndexedFolders.ToList();
         bool fullScreen = settings.PauseIndexingInFullScreen, battery = settings.PauseIndexingOnBattery;
-        Task.Run(() =>
+        long generation;
+        lock (_gate)
+        {
+            if (_search is not null) return;
+            generation = ++_generation;
+        }
+        Task.Factory.StartNew(() =>
         {
             try
             {
                 lock (_gate)
                 {
-                    if (_search is not null) return;
+                    // Stop or a later settings change may have overtaken this queued startup.
+                    if (generation != _generation || _search is not null) return;
                     _store = IndexStore.Open(IndexPath, EmbeddingModel.Id);
                     _host = new EmbedderHost(() => new OnnxEmbedder(EmbeddingModel.ModelPath, EmbeddingModel.TokenizerPath, useGpu));
                     _indexer = new Indexer(_store, _host) { PauseInFullScreen = fullScreen, PauseOnBattery = battery };
@@ -84,16 +104,20 @@ internal sealed class SearchService : IDisposable
                     _search = new HybridSearch(_store, _host);
                     _roots = roots;
                     _indexer.Start(roots);
+                    LastError = null;
                 }
                 AvailabilityChanged?.Invoke();
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
                 CrashLog.Write(ex);
-                LastError = ex.Message;
-                Stop();
+                lock (_gate)
+                {
+                    if (generation == _generation) LastError = ex.Message;
+                }
+                Stop(generation);
             }
-        });
+        }, CancellationToken.None, TaskCreationOptions.DenyChildAttach, _startupScheduler);
     }
 
     /// <summary>Applies changed settings: folders, pause rules, and a restart when the GPU choice changed.</summary>
@@ -159,10 +183,15 @@ internal sealed class SearchService : IDisposable
     /// </summary>
     public Task<List<SmartHit>> SearchAsync(string query, string? scope, CancellationToken token, bool meaning = true)
     {
-        HybridSearch? search;
-        lock (_gate) search = _search;
-        if (search is null) return Task.FromResult(new List<SmartHit>());
-        return Task.Run(() => search.Search(query, scope is null || PathTools.IsThisPc(scope) ? null : scope, 500, token, meaning), token);
+        lock (_gate)
+        {
+            HybridSearch? search = _search;
+            if (search is null) return Task.FromResult(new List<SmartHit>());
+            Task<List<SmartHit>> task = Task.Run(() => search.Search(query, scope is null || PathTools.IsThisPc(scope) ? null : scope, 500, token, meaning), token);
+            _searches.Add(task);
+            _ = task.ContinueWith(completed => { lock (_gate) _searches.Remove(completed); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return task;
+        }
     }
 
     /// <summary>True when the model is in memory, so a search by meaning answers without loading it first.</summary>
@@ -193,24 +222,45 @@ internal sealed class SearchService : IDisposable
         });
     }
 
-    public void Stop()
+    public void Stop() => Stop(null);
+
+    private void Stop(long? expectedGeneration)
     {
         Indexer? indexer;
         EmbedderHost? host;
         IndexStore? store;
+        Task[] searches;
         lock (_gate)
         {
+            if (expectedGeneration is { } expected && expected != _generation) return;
+            _generation++;
             indexer = _indexer;
             host = _host;
             store = _store;
+            searches = _searches.ToArray();
+            _searches.Clear();
             _indexer = null;
             _host = null;
             _store = null;
             _search = null;
         }
         indexer?.Dispose();
-        host?.Dispose();
-        store?.Dispose();
+        // A native inference call may outlive the bounded indexer shutdown. Searches may also still hold the
+        // old snapshot. Retain their resources until every old worker has finished, without blocking the UI.
+        Task finished = Task.WhenAll(searches.Append(indexer?.Completion ?? Task.CompletedTask));
+        void Release()
+        {
+            host?.Dispose();
+            store?.Dispose();
+        }
+        Task released;
+        if (finished.IsCompleted)
+        {
+            Release();
+            released = Task.CompletedTask;
+        }
+        else released = finished.ContinueWith(_ => Release(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        lock (_gate) _shutdown = Task.WhenAll(_shutdown, released);
         AvailabilityChanged?.Invoke();
     }
 

@@ -204,6 +204,11 @@ public sealed class EmbedderHost : IDisposable
         {
             _leases--;
             _lastUse = DateTime.UtcNow;
+            if (_disposed && _leases == 0)
+            {
+                _embedder?.Dispose();
+                _embedder = null;
+            }
         }
     }
 
@@ -271,6 +276,8 @@ public sealed class Indexer : IDisposable
     private readonly EmbedderHost _host;
     private readonly Thread _thread;
     private readonly AutoResetEvent _wake = new(false);
+    private readonly CancellationTokenSource _stop = new();
+    private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<string, DateTime> _changed = new(StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<WorkItem> _queue = new();
     private readonly HashSet<string> _queued = new(StringComparer.OrdinalIgnoreCase);
@@ -279,8 +286,15 @@ public sealed class Indexer : IDisposable
     private volatile bool _stopping;
     private volatile bool _rescan;
     private IReadOnlyList<string> _roots = [];
+    private long _rootsVersion;
+
+    /// <summary>Completes only after the worker has stopped using its database and model.</summary>
+    public Task Completion => _completed.Task;
     private IndexerStatus _status = new(IndexerPhase.Starting, 0, 0, 0, null, null, null);
     private DateTime _lastReport;
+    private long _nextActivityCheck;
+    private SystemActivity.Reason _activityReason;
+    private bool _checkedFullScreen, _checkedBattery;
 
     public bool PauseInFullScreen { get; set; } = true;
 
@@ -317,24 +331,42 @@ public sealed class Indexer : IDisposable
     /// <summary>Changes the indexed folders. Files outside the new folders leave the index at the next scan.</summary>
     public void SetRoots(IReadOnlyList<string> roots)
     {
-        lock (_gate) _roots = roots.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var existing = roots.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        lock (_gate)
+        {
+            if (_stopping) return;
+            _roots = existing;
+            _rootsVersion++;
+            _queue.Clear();
+            _queued.Clear();
+            _changed.Clear();
+            _rescan = true;
+        }
         RestartWatchers();
         Rescan();
     }
 
     public void Rescan()
     {
-        _rescan = true;
-        _wake.Set();
+        lock (_gate)
+        {
+            if (_stopping) return;
+            _rescan = true;
+            _wake.Set();
+        }
     }
 
     /// <summary>Lets the indexer check its pause conditions and queue again at once.</summary>
-    public void Nudge() => _wake.Set();
+    public void Nudge()
+    {
+        lock (_gate) { if (!_stopping) _wake.Set(); }
+    }
 
     private void RestartWatchers()
     {
         lock (_gate)
         {
+            if (_stopping) return;
             foreach (FileSystemWatcher watcher in _watchers) watcher.Dispose();
             _watchers.Clear();
             foreach (string root in _roots)
@@ -378,20 +410,37 @@ public sealed class Indexer : IDisposable
 
     private void Changed(string path)
     {
-        _changed[path] = DateTime.UtcNow;
-        _wake.Set();
+        lock (_gate)
+        {
+            if (_stopping) return;
+            _changed[path] = DateTime.UtcNow;
+            _wake.Set();
+        }
     }
 
     private void Run()
+    {
+        try { RunUntilStopped(); }
+        finally
+        {
+            _wake.Dispose();
+            _stop.Dispose();
+            _completed.TrySetResult();
+        }
+    }
+
+    private void RunUntilStopped()
     {
         SystemActivity.EnterBackgroundMode();
         while (!_stopping)
         {
             try
             {
-                if (_rescan)
+                if (!WaitForResume()) break;
+                bool rescan;
+                lock (_gate) { rescan = _rescan; _rescan = false; }
+                if (rescan)
                 {
-                    _rescan = false;
                     Scan();
                 }
                 TakeSettledChanges();
@@ -401,21 +450,44 @@ public sealed class Indexer : IDisposable
                     _wake.WaitOne(TimeSpan.FromSeconds(_changed.IsEmpty ? 30 : 1));
                     continue;
                 }
-                SystemActivity.Reason reason = UserPaused ? SystemActivity.Reason.None : SystemActivity.ShouldPause(PauseInFullScreen, PauseOnBattery);
-                if (UserPaused || reason != SystemActivity.Reason.None)
-                {
-                    Report(IndexerPhase.Paused, null, UserPaused ? "user" : reason == SystemActivity.Reason.FullScreen ? "fullscreen" : "battery", force: _status.Phase != IndexerPhase.Paused);
-                    _wake.WaitOne(TimeSpan.FromSeconds(5));
-                    continue;
-                }
                 IndexBatch();
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
+                if (_stopping) break;
                 Report(IndexerPhase.Failed, null, ex.Message, force: true);
                 _wake.WaitOne(TimeSpan.FromSeconds(30));
             }
         }
+    }
+
+    /// <summary>Pauses scanning and watcher processing too, before either can read folders or change the index.</summary>
+    private bool WaitForResume()
+    {
+        while (!_stopping)
+        {
+            bool userPaused = UserPaused;
+            SystemActivity.Reason reason = userPaused ? SystemActivity.Reason.None : ActivityReason();
+            if (!userPaused && reason == SystemActivity.Reason.None) return true;
+            Report(IndexerPhase.Paused, null, userPaused ? "user" : reason == SystemActivity.Reason.FullScreen ? "fullscreen" : "battery", force: _status.Phase != IndexerPhase.Paused);
+            _wake.WaitOne(TimeSpan.FromSeconds(5));
+        }
+        return false;
+    }
+
+    private SystemActivity.Reason ActivityReason()
+    {
+        // Check between files without asking Windows about the foreground window for every entry of a large scan.
+        long now = Environment.TickCount64;
+        bool fullScreen = PauseInFullScreen, battery = PauseOnBattery;
+        if (now >= _nextActivityCheck || fullScreen != _checkedFullScreen || battery != _checkedBattery)
+        {
+            _activityReason = SystemActivity.ShouldPause(fullScreen, battery);
+            _checkedFullScreen = fullScreen;
+            _checkedBattery = battery;
+            _nextActivityCheck = now + 250;
+        }
+        return _activityReason;
     }
 
     private int QueueCount
@@ -451,7 +523,8 @@ public sealed class Indexer : IDisposable
     private void Scan()
     {
         IReadOnlyList<string> roots;
-        lock (_gate) roots = _roots;
+        long generation;
+        lock (_gate) { roots = _roots; generation = _rootsVersion; }
         Report(IndexerPhase.Scanning, null, null, force: true);
         Dictionary<string, KnownFile> known = _store.KnownFiles();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -461,21 +534,30 @@ public sealed class Indexer : IDisposable
         {
             foreach (FileEntry entry in Walk(root))
             {
-                if (_stopping || _rescan) return;
+                if (!WaitForResume() || _rescan) return;
+                lock (_gate) { if (_stopping || generation != _rootsVersion) return; }
                 seen.Add(entry.FullPath);
                 Consider(entry, known.GetValueOrDefault(entry.FullPath), work, names);
                 if (names.Count >= 2000)
                 {
-                    _store.SaveNamesOnly(names);
+                    lock (_gate)
+                    {
+                        if (_stopping || generation != _rootsVersion) return;
+                        _store.SaveNamesOnly(names);
+                    }
                     names.Clear();
                 }
                 if (seen.Count % 500 == 0) Report(IndexerPhase.Scanning, null, null);
             }
         }
-        _store.SaveNamesOnly(names);
-        _store.Remove(known.Where(k => !seen.Contains(k.Key)).Select(k => k.Value.Id).ToList());
-        // The most recently changed documents are read first, since they are the ones most likely to be searched for.
-        foreach (WorkItem item in work.OrderByDescending(w => w.Modified)) Enqueue(item, first: false);
+        lock (_gate)
+        {
+            if (_stopping || generation != _rootsVersion) return;
+            _store.SaveNamesOnly(names);
+            _store.Remove(known.Where(k => !seen.Contains(k.Key)).Select(k => k.Value.Id).ToList());
+            // The most recently changed documents are read first.
+            foreach (WorkItem item in work.OrderByDescending(w => w.Modified)) Enqueue(item, first: false);
+        }
         Report(IndexerPhase.Scanning, null, null, force: true);
     }
 
@@ -528,20 +610,35 @@ public sealed class Indexer : IDisposable
         if (_changed.IsEmpty) return;
         DateTime now = DateTime.UtcNow;
         IReadOnlyList<string> roots;
-        lock (_gate) roots = _roots;
+        long generation;
+        lock (_gate) { roots = _roots; generation = _rootsVersion; }
         foreach (var (path, time) in _changed)
         {
+            if (!WaitForResume()) return;
+            lock (_gate) { if (_stopping || generation != _rootsVersion) return; }
             if (now - time < Settle) continue;
             if (!_changed.TryRemove(new KeyValuePair<string, DateTime>(path, time))) continue;
-            if (!roots.Any(root => PathTools.IsSameOrInside(path, root))) continue;
+            if (!Included(path, roots))
+            {
+                _store.RemoveUnder(path);
+                continue;
+            }
             if (Directory.Exists(path))
             {
                 // A new or renamed folder: everything in it is looked at.
                 var names = new List<(string, long, long)>();
                 var work = new List<WorkItem>();
-                foreach (FileEntry entry in Walk(path)) Consider(entry, _store.Find(entry.FullPath), work, names);
-                _store.SaveNamesOnly(names);
-                foreach (WorkItem item in work) Enqueue(item, first: true);
+                foreach (FileEntry entry in Walk(path))
+                {
+                    if (!WaitForResume()) return;
+                    Consider(entry, _store.Find(entry.FullPath), work, names);
+                }
+                lock (_gate)
+                {
+                    if (_stopping || generation != _rootsVersion) return;
+                    _store.SaveNamesOnly(names);
+                    foreach (WorkItem item in work) Enqueue(item, first: true);
+                }
                 continue;
             }
             FileEntry? file = DirectoryReader.ReadOne(path);
@@ -555,23 +652,33 @@ public sealed class Indexer : IDisposable
             var fileWork = new List<WorkItem>();
             var fileNames = new List<(string, long, long)>();
             Consider(file, _store.Find(file.FullPath), fileWork, fileNames);
-            _store.SaveNamesOnly(fileNames);
-            foreach (WorkItem item in fileWork) Enqueue(item, first: true);
+            lock (_gate)
+            {
+                if (_stopping || generation != _rootsVersion) return;
+                _store.SaveNamesOnly(fileNames);
+                foreach (WorkItem item in fileWork) Enqueue(item, first: true);
+            }
         }
     }
 
     /// <summary>Reads a few documents, computes the vectors of all their pieces in one go and saves each document.</summary>
     private void IndexBatch()
     {
+        long generation;
+        lock (_gate) generation = _rootsVersion;
         var prepared = new List<(WorkItem Item, List<string> Chunks, string Title)>();
         int pieces = 0;
-        while (pieces < BatchChunks && Dequeue() is { } item)
+        while (pieces < BatchChunks && WaitForResume() && Dequeue() is { } item)
         {
+            if (!Current(item.Path, generation)) continue;
             Report(IndexerPhase.Indexing, item.Path, null);
             string? text = TextExtractor.Extract(item.Path, IndexRules.MaxChars);
             if (text is null || string.IsNullOrWhiteSpace(text))
             {
-                _store.Save(item.Path, item.Size, item.Modified, text is null ? FileState.Failed : FileState.NameOnly, []);
+                lock (_gate)
+                {
+                    if (Current(item.Path, generation)) _store.Save(item.Path, item.Size, item.Modified, text is null ? FileState.Failed : FileState.NameOnly, []);
+                }
                 continue;
             }
             List<string> chunks = Chunker.Split(text);
@@ -579,7 +686,8 @@ public sealed class Indexer : IDisposable
             prepared.Add((item, chunks, title));
             pieces += chunks.Count;
         }
-        if (prepared.Count == 0) return;
+        if (prepared.Count == 0 || !WaitForResume()) return;
+        lock (_gate) { if (_stopping || generation != _rootsVersion) return; }
 
         var inputs = new List<string>(pieces);
         foreach (var (_, chunks, title) in prepared)
@@ -589,11 +697,12 @@ public sealed class Indexer : IDisposable
         float[][] vectors;
         using (EmbedderHost.Lease lease = _host.Acquire())
         {
-            vectors = lease.Embedder.Embed(inputs);
+            vectors = lease.Embedder.Embed(inputs, _stop.Token);
         }
         int next = 0;
         foreach (var (item, chunks, title) in prepared)
         {
+            if (_stopping) return;
             var stored = new List<StoredChunk>(chunks.Count);
             for (int i = 0; i < chunks.Count; i++)
             {
@@ -601,13 +710,17 @@ public sealed class Indexer : IDisposable
                 string body = i == 0 ? title + "\n" + chunks[i] : chunks[i];
                 stored.Add(new StoredChunk(body, VectorMath.Quantize(vectors[next++])));
             }
-            _store.Save(item.Path, item.Size, item.Modified, FileState.Indexed, stored);
+            lock (_gate)
+            {
+                if (Current(item.Path, generation)) _store.Save(item.Path, item.Size, item.Modified, FileState.Indexed, stored);
+            }
         }
         Report(IndexerPhase.Indexing, prepared[^1].Item.Path, null, force: QueueCount == 0);
     }
 
     private void Report(IndexerPhase phase, string? current, string? detail, bool force = false)
     {
+        if (_stopping) return;
         DateTime now = DateTime.UtcNow;
         if (!force && now - _lastReport < TimeSpan.FromMilliseconds(500)) return;
         _lastReport = now;
@@ -619,15 +732,57 @@ public sealed class Indexer : IDisposable
 
     public void Dispose()
     {
-        _stopping = true;
-        _wake.Set();
-        if (_thread.IsAlive) _thread.Join(TimeSpan.FromSeconds(10));
         lock (_gate)
         {
+            if (_stopping) return;
+            _stopping = true;
+            _stop.Cancel();
+            _wake.Set();
             foreach (FileSystemWatcher watcher in _watchers) watcher.Dispose();
             _watchers.Clear();
         }
-        _wake.Dispose();
+        if (_thread.IsAlive && Thread.CurrentThread != _thread) _thread.Join(TimeSpan.FromSeconds(10));
+        else if ((_thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
+        {
+            _wake.Dispose();
+            _stop.Dispose();
+            _completed.TrySetResult();
+        }
+    }
+
+    private bool Current(string path, long generation)
+    {
+        lock (_gate)
+        {
+            if (_stopping || generation != _rootsVersion || !Included(path, _roots)) return false;
+            try
+            {
+                FileAttributes attributes = File.GetAttributes(path);
+                return (attributes & FileAttributes.Directory) == 0 && !IndexRules.SkipFile(attributes);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+        }
+    }
+
+    /// <summary>Watcher events obey the same ancestor exclusions as a full scan.</summary>
+    private static bool Included(string path, IReadOnlyList<string> roots)
+    {
+        foreach (string root in roots)
+        {
+            if (!PathTools.IsSameOrInside(path, root)) continue;
+            try
+            {
+                string? folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+                while (folder is not null && !PathTools.SameLocation(folder, root))
+                {
+                    if (IndexRules.SkipFolder(Path.GetFileName(folder), File.GetAttributes(folder))) break;
+                    folder = Path.GetDirectoryName(folder);
+                }
+                if (folder is not null && PathTools.SameLocation(folder, root)) return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return false;
     }
 
     private sealed record WorkItem(string Path, long Size, long Modified);

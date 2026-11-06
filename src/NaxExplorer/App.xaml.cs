@@ -20,6 +20,9 @@ public partial class App : Application
     public App()
     {
         Instance = this;
+        // Closing the last XAML window must not terminate an active copy or the folder watcher in the background.
+        // RequestQuit decides when it is safe to exit, including when Explorer replacement is turned off.
+        DispatcherShutdownMode = DispatcherShutdownMode.OnExplicitShutdown;
         Settings = AppSettings.Load();
         Loc.Apply(Settings.Language);
         try
@@ -54,9 +57,12 @@ public partial class App : Application
         _dispatcher = DispatcherQueue.GetForCurrentThread();
         try
         {
-            OpenWindow(Program.StartPath);
+            // Started at sign-in only to catch Explorer windows: no window until one is needed.
+            if (!Program.Background) OpenWindow(Program.StartPath);
             Search.Start(Settings);
             Shell.ExplorerIntegration.Repair(Settings);
+            // Without the setting a start at sign-in has nothing to do, and the app ends again at once.
+            UpdateBackground();
         }
         catch (Exception exception)
         {
@@ -74,10 +80,102 @@ public partial class App : Application
         window.Closed += (_, _) =>
         {
             _windows.Remove(window);
-            if (_windows.Count == 0) Search.Dispose();
+            // While the app stands in for Explorer it stays in the background to catch Explorer windows; otherwise
+            // the last window ends it, as before.
+            if (_windows.Count == 0 && !Settings.ReplaceExplorer) RequestQuit();
         };
         window.Activate();
         return window;
+    }
+
+    private Shell.ExplorerWindowCatcher? _catcher;
+    private Shell.BackgroundWindow? _background;
+    private bool _quitting;
+
+    /// <summary>
+    /// Follows the "open folders in Nax Explorer" setting: while it is on, the app starts at sign-in, keeps running
+    /// without a window and catches Explorer windows other programs open; when it is off, all of that stops.
+    /// </summary>
+    internal void UpdateBackground()
+    {
+        bool on = Settings.ReplaceExplorer;
+        // The app decides itself when to end, so a copy that still runs is never cut off by the last window closing.
+        Shell.StartAtSignIn.Apply(on);
+        if (on)
+        {
+            if (_dispatcher is null) return;
+            _background ??= new Shell.BackgroundWindow(() => RequestQuit(forced: true));
+            if (_catcher is null)
+            {
+                _catcher = new Shell.ExplorerWindowCatcher(_dispatcher, OpenCaught);
+                _catcher.Start();
+            }
+            return;
+        }
+        _catcher?.Dispose();
+        _catcher = null;
+        _background?.Dispose();
+        _background = null;
+        if (_windows.Count == 0) RequestQuit();
+    }
+
+    /// <summary>Opens the places of an Explorer window that was caught, in the last window or a new one.</summary>
+    private void OpenCaught(IReadOnlyList<Shell.CaughtPlace> places)
+    {
+        MainWindow? window = _windows.LastOrDefault();
+        foreach (Shell.CaughtPlace place in places)
+        {
+            if (window is null) window = OpenWindow(place.Location);
+            else if (place.Location is not null) window.OpenInNewTab(place.Location);
+            if (place.Selection.Count > 0) window.SelectInActivePane(place.Selection);
+        }
+        window?.BringToFront();
+    }
+
+    private int _operations;
+    private bool _quitWhenIdle;
+    private bool _quitForced;
+
+    /// <summary>A copy, move or delete started; the app does not end while one runs.</summary>
+    internal void OperationStarted() => _operations++;
+
+    /// <summary>A copy, move or delete ended; an end asked for meanwhile happens now, if it still applies.</summary>
+    internal void OperationEnded()
+    {
+        if (--_operations > 0 || !_quitWhenIdle) return;
+        _quitWhenIdle = false;
+        // Setup's request always stands; an end because the last window closed only if no window was opened since.
+        if (_quitForced || _windows.Count == 0 && !Settings.ReplaceExplorer) Quit();
+    }
+
+    /// <summary>
+    /// Ends the app, but never in the middle of a copy, move or delete, whose file would be left half-written: then the
+    /// end waits until the last one is done. Setup meanwhile keeps waiting for the app, which still holds its mutex.
+    /// <paramref name="forced"/> is set when setup or Windows asks the app to end, rather than the last window closing.
+    /// </summary>
+    internal void RequestQuit(bool forced = false)
+    {
+        if (_operations > 0)
+        {
+            _quitWhenIdle = true;
+            _quitForced |= forced;
+            return;
+        }
+        Quit();
+    }
+
+    /// <summary>Ends the app: every window closes, so each saves its state, and then the process ends.</summary>
+    private void Quit()
+    {
+        if (_quitting) return;
+        _quitting = true;
+        _catcher?.Dispose();
+        _catcher = null;
+        _background?.Dispose();
+        _background = null;
+        foreach (MainWindow window in _windows.ToList()) window.Close();
+        Search.Dispose();
+        Exit();
     }
 
     /// <summary>Another start of the app: its folder opens in a new tab of the last window, or a new window opens.</summary>
@@ -86,7 +184,10 @@ public partial class App : Application
         string? path = null;
         if (activation.Data is Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs launch)
         {
-            path = StartArguments.LocationFrom(StartArguments.Split(launch.Arguments ?? ""));
+            List<string> args = StartArguments.Split(launch.Arguments ?? "");
+            // A start at sign-in while the app already runs in the background has nothing to add.
+            if (args.Any(StartArguments.IsBackgroundSwitch)) return;
+            path = StartArguments.LocationFrom(args);
         }
         _dispatcher?.SafeEnqueue(() =>
         {
@@ -118,25 +219,6 @@ public partial class App : Application
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             CrashLog.Write(ex);
-        }
-    }
-}
-
-/// <summary>Appends unexpected exceptions to crash.log in the app's data folder.</summary>
-internal static class CrashLog
-{
-    public static void Write(Exception exception)
-    {
-        try
-        {
-            Directory.CreateDirectory(DataFolders.Root);
-            File.AppendAllText(DataFolders.CrashLog, $"{DateTime.Now:O} {exception}{Environment.NewLine}{Environment.NewLine}");
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
         }
     }
 }

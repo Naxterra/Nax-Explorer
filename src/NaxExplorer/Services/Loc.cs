@@ -1,16 +1,6 @@
 using System.Globalization;
-using Microsoft.UI.Xaml.Markup;
 
 namespace NaxExplorer;
-
-/// <summary>A text in the interface language, for XAML: {local:T Key=Open}.</summary>
-[MarkupExtensionReturnType(ReturnType = typeof(string))]
-public sealed partial class T : MarkupExtension
-{
-    public string Key { get; set; } = "";
-
-    protected override object ProvideValue() => Loc.T(Key);
-}
 
 /// <summary>
 /// Interface texts in English and German. German is used when it is chosen in the settings or, with no choice, when
@@ -73,6 +63,36 @@ internal static class Loc
         ["NewWindow"] = ("New window", "Neues Fenster"),
         ["NewFolderName"] = ("New folder", "Neuer Ordner"),
         ["NewTextFileName"] = ("New text document", "Neues Textdokument"),
+        ["CopyingTitle"] = ("Copying {0} to {1}", "{0} wird nach {1} kopiert"),
+        ["MovingTitle"] = ("Moving {0} to {1}", "{0} wird nach {1} verschoben"),
+        ["DeletingTitle"] = ("Moving {0} to the Recycle Bin", "{0} wird in den Papierkorb verschoben"),
+        ["DeletingForGoodTitle"] = ("Deleting {0} for good", "{0} wird endgültig gelöscht"),
+        ["OperationPreparing"] = ("Preparing…", "Wird vorbereitet …"),
+        ["OperationCancelling"] = ("Cancelling…", "Wird abgebrochen …"),
+        ["OperationCancelled"] = ("Cancelled. What was already done stays.", "Abgebrochen. Was schon erledigt war, bleibt."),
+        ["OperationDone"] = ("Done", "Fertig"),
+        ["OperationFailedItems"] = ("{0:N0} items could not be processed:", "{0:N0} Elemente konnten nicht verarbeitet werden:"),
+        ["ConflictTitle"] = ("{0:N0} items already exist in {1}", "{0:N0} Elemente sind in {1} schon vorhanden"),
+        ["ConflictMore"] = ("and {0:N0} more", "und {0:N0} weitere"),
+        ["ConflictReplace"] = ("Replace", "Ersetzen"),
+        ["ConflictReplaceMove"] = ("Replace", "Ersetzen"),
+        ["ConflictReplaceDetail"] = ("{0:N0} existing files are overwritten, also inside folders of the same name.", "{0:N0} vorhandene Dateien werden überschrieben, auch in gleichnamigen Ordnern."),
+        ["ConflictReplaceDetailAtLeast"] = ("At least {0:N0} existing files are overwritten, also inside folders of the same name.", "Mindestens {0:N0} vorhandene Dateien werden überschrieben, auch in gleichnamigen Ordnern."),
+        ["ConflictReplaceDetailNone"] = ("Folders of the same name are merged; no file is overwritten.", "Gleichnamige Ordner werden zusammengeführt, keine Datei wird überschrieben."),
+        ["ConflictSkip"] = ("Skip", "Überspringen"),
+        ["ConflictSkipDetail"] = ("Existing files stay as they are; folders of the same name only get what they are missing.", "Vorhandene Dateien bleiben, wie sie sind. Gleichnamige Ordner bekommen nur, was ihnen fehlt."),
+        ["ConflictKeepBoth"] = ("Keep both", "Beide behalten"),
+        ["ConflictKeepBothDetail"] = ("The new items get a free name such as \"Name (2)\".", "Die neuen Elemente bekommen einen freien Namen wie „Name (2)“."),
+        ["DeleteForGoodTitle"] = ("Delete for good?", "Endgültig löschen?"),
+        ["DeleteForGoodText"] = ("{0} will be deleted for good and cannot be restored from the Recycle Bin.", "{0} wird endgültig gelöscht und kann nicht aus dem Papierkorb wiederhergestellt werden."),
+        ["DeleteNoRecycleBin"] = ("{0} cannot go to the Recycle Bin here, for example on a network drive. It would be deleted for good.", "{0} kann hier nicht in den Papierkorb, zum Beispiel auf einem Netzlaufwerk. Es würde endgültig gelöscht."),
+        ["DeleteForGoodButton"] = ("Delete for good", "Endgültig löschen"),
+        ["ShellItemsNoCopy"] = ("These items cannot be copied or moved from here. Use their right-click menu, for example \"Restore\" in the Recycle Bin.", "Diese Elemente lassen sich von hier aus nicht kopieren oder verschieben. Nutzen Sie ihr Kontextmenü, im Papierkorb zum Beispiel „Wiederherstellen“."),
+        ["DropToRecycleBin"] = ("Move to the Recycle Bin", "In den Papierkorb verschieben"),
+        ["EmptyRecycleBin"] =("Empty Recycle Bin", "Papierkorb leeren"),
+        ["Network"] = ("Network", "Netzwerk"),
+        ["OperationNotStarted"] = ("Windows could not start the operation. An item may no longer exist or the folder cannot be reached.", "Windows konnte den Vorgang nicht starten. Ein Element existiert vielleicht nicht mehr, oder der Ordner ist nicht erreichbar."),
+        ["NewFolderTip"] =("New folder (Ctrl+Shift+N)", "Neuer Ordner (Strg+Umschalt+N)"),
         ["CutTip"] = ("Cut (Ctrl+X)", "Ausschneiden (Strg+X)"),
         ["CopyTip"] = ("Copy (Ctrl+C)", "Kopieren (Strg+C)"),
         ["PasteTip"] = ("Paste (Ctrl+V)", "Einfügen (Strg+V)"),
