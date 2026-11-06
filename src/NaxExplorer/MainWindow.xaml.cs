@@ -2,6 +2,7 @@ using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -310,8 +311,9 @@ public sealed partial class MainWindow : Window
         UpdateTitle();
         _shellWindow?.Navigated(pane.Location);
         // Another tab or folder in the active pane: the details panel shows that folder now. The address bar reports
-        // the same folder again when its names arrive, which leaves the panel as it is.
-        if (!string.Equals(pane.Folder ?? pane.FolderOrSearchRoot, _previewFolder, StringComparison.OrdinalIgnoreCase)) _previewTimer.Restart();
+        // the same folder again when its names arrive. Shell names can arrive after the first preview, so refresh
+        // those too rather than leaving a parsing GUID in the heading.
+        if (PathTools.IsShellPlace(pane.Location) || !string.Equals(pane.PreviewLocation, _previewFolder, StringComparison.OrdinalIgnoreCase)) _previewTimer.Restart();
     }
 
     /// <summary>The folder the details panel was last filled for.</summary>
@@ -353,7 +355,7 @@ public sealed partial class MainWindow : Window
     private void UpdatePreview()
     {
         if (!Settings.ShowPreview) return;
-        _previewFolder = _active.Folder ?? _active.FolderOrSearchRoot;
+        _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }
 
@@ -631,6 +633,7 @@ public sealed partial class MainWindow : Window
         AiPauseButton.Visibility = Visibility.Visible;
         AiPauseGlyph.Glyph = search.UserPaused ? "" : "";
         ToolTipService.SetToolTip(AiPauseButton, Loc.T(search.UserPaused ? "ResumeIndexing" : "PauseIndexing"));
+        AutomationProperties.SetName(AiPauseButton, Loc.T(search.UserPaused ? "ResumeIndexing" : "PauseIndexing"));
         string documents = Loc.F("AiDocuments", status.Documents.ToString("N0"), status.Files.ToString("N0"));
         string device = search.Device is { } d ? "  ·  " + d : "";
         switch (status.Phase)

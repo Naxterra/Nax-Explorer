@@ -109,6 +109,9 @@ public sealed partial class FilePane : UserControl
 
     internal bool IsSearchOpen => _tab.Search is not null;
 
+    /// <summary>The place described by the preview, including virtual folders which cannot receive file operations.</summary>
+    internal string? PreviewLocation => _tab.Search is null ? _tab.Location : FolderOrSearchRoot;
+
     internal IReadOnlyList<FileItem> SelectedItems => CurrentList.SelectedItems.OfType<FileItem>().ToList();
 
     internal IReadOnlyList<string> SelectedPaths => SelectedItems.Where(i => i.Entry.Kind != EntryKind.Drive).Select(i => i.Entry.FullPath).ToList();

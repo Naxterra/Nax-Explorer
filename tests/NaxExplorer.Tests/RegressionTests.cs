@@ -9,6 +9,36 @@ internal static class RegressionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("icon_commands_have_localized_accessible_names", "Every icon command in the main toolbar, file pane and image viewer exposes a localized name in English and German, including buttons hidden until search or image navigation.", () =>
+        {
+            var assembly = typeof(RegressionTests).Assembly;
+            foreach (string resource in new[] { "Ui.MainWindow.xaml", "Ui.FilePane.xaml", "Ui.ImageViewer.xaml" })
+            {
+                using Stream stream = assembly.GetManifestResourceStream(resource)!;
+                var document = System.Xml.Linq.XDocument.Load(stream);
+                var commands = document.Descendants().Where(e => e.Name.LocalName is "Button" or "ToggleButton" or "DropDownButton")
+                    .Where(e => e.Elements().Any(child => child.Name.LocalName is "FontIcon" or "StackPanel"));
+                foreach (var command in commands)
+                {
+                    // The indexing pause button gets a changing name from code, matching its current action.
+                    if (command.Attribute(System.Xml.Linq.XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml"))?.Value == "AiPauseButton") continue;
+                    string name = command.Attribute("AutomationProperties.Name")?.Value ?? "";
+                    Check.That(name.StartsWith("{local:T Key=") && name.EndsWith('}'), $"{resource}: unnamed {command.Attribute("Click")?.Value}");
+                    string key = name[13..^1];
+                    bool translated = false;
+                    foreach (string language in new[] { "en-US", "de-DE" })
+                    {
+                        Loc.Apply(language);
+                        string localized = Loc.T(key);
+                        Check.That(!string.IsNullOrWhiteSpace(localized), $"{resource}: empty {language} name for {key}");
+                        translated |= localized != key;
+                    }
+                    Check.That(translated, $"{resource}: missing translation for {key}");
+                }
+            }
+            Loc.Apply("en-US");
+        });
+
         yield return ("replace_only_applies_to_conflicts_shown_to_the_user", "Choosing Replace for one conflict cannot silently authorize replacing another file that appears after the question.", () =>
         {
             string root = Fixtures.TempFolder("late-conflict");

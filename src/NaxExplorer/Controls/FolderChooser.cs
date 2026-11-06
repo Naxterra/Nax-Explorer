@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -54,6 +55,8 @@ internal sealed partial class FolderChooser : ContentDialog
 
         ToolTipService.SetToolTip(_up, Loc.T("UpTip"));
         ToolTipService.SetToolTip(_newFolder, Loc.T("NewFolderName"));
+        AutomationProperties.SetName(_up, Loc.T("UpTip"));
+        AutomationProperties.SetName(_newFolder, Loc.T("NewFolderName"));
         _up.Click += (_, _) => GoUp();
         _newFolder.Flyout = NewFolderFlyout();
         _address.KeyDown += Address_KeyDown;

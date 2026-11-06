@@ -12,6 +12,9 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../src/NaxExplorer/MainWindow.xaml" LogicalName="Ui.MainWindow.xaml" />
+    <EmbeddedResource Include="../../src/NaxExplorer/Controls/FilePane.xaml" LogicalName="Ui.FilePane.xaml" />
+    <EmbeddedResource Include="../../src/NaxExplorer/Controls/ImageViewer.xaml" LogicalName="Ui.ImageViewer.xaml" />
     <!-- Exercise the UI-independent service itself without loading WinUI in the console runner. -->
     <Compile Include="../../src/NaxExplorer/Services/SearchService.cs" Link="Services/SearchService.cs" />
     <Compile Include="../../src/NaxExplorer/Services/CrashLog.cs" Link="Services/CrashLog.cs" />

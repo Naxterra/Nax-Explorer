@@ -71,13 +71,20 @@ public sealed partial class PreviewPanel : UserControl
                     await ShowTotalsAsync(selected.Select(i => i.Entry.FullPath).ToList(), version, cts.Token, selection: true);
                 }
             }
-            else if (folder is null)
+            else if (folder is null || PathTools.IsThisPc(folder))
             {
                 NameText.Text = Loc.T("ThisPC");
             }
             else
             {
                 NameText.Text = FilePane.PlaceName(folder);
+                if (PathTools.IsShellPlace(folder))
+                {
+                    // Virtual folders have a shell picture and name, but no filesystem tree to measure.
+                    PictureArea.Visibility = Visibility.Visible;
+                    ShowShellThumbnail(folder, 256, version);
+                    return;
+                }
                 // A whole drive would take minutes to count and keep the disk busy; its used and free space say the same at once.
                 if (PathTools.Parent(folder) is { } parent && PathTools.IsThisPc(parent)) await ShowDriveSpaceAsync(folder, version);
                 else await ShowTotalsAsync(new[] { folder }, version, cts.Token);

@@ -22,19 +22,19 @@
                 <TextBlock x:Name="InfoText" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="ZoomOut_Click" ToolTipService.ToolTip="{local:T Key=ZoomOutTip}"><FontIcon Glyph="&#xE71F;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="ZoomOut_Click" AutomationProperties.Name="{local:T Key=ZoomOutTip}" ToolTipService.ToolTip="{local:T Key=ZoomOutTip}"><FontIcon Glyph="&#xE71F;" FontSize="15" /></Button>
                 <TextBlock x:Name="ZoomText" Width="52" TextAlignment="Center" VerticalAlignment="Center" FontSize="12" />
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="ZoomIn_Click" ToolTipService.ToolTip="{local:T Key=ZoomInTip}"><FontIcon Glyph="&#xE8A3;" FontSize="15" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Fit_Click" ToolTipService.ToolTip="{local:T Key=FitTip}"><FontIcon Glyph="&#xE9A6;" FontSize="15" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Actual_Click" ToolTipService.ToolTip="{local:T Key=ActualSizeTip}"><FontIcon Glyph="&#xE71E;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="ZoomIn_Click" AutomationProperties.Name="{local:T Key=ZoomInTip}" ToolTipService.ToolTip="{local:T Key=ZoomInTip}"><FontIcon Glyph="&#xE8A3;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Fit_Click" AutomationProperties.Name="{local:T Key=FitTip}" ToolTipService.ToolTip="{local:T Key=FitTip}"><FontIcon Glyph="&#xE9A6;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Actual_Click" AutomationProperties.Name="{local:T Key=ActualSizeTip}" ToolTipService.ToolTip="{local:T Key=ActualSizeTip}"><FontIcon Glyph="&#xE71E;" FontSize="15" /></Button>
                 <AppBarSeparator />
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="RotateLeft_Click" ToolTipService.ToolTip="{local:T Key=RotateLeftTip}"><FontIcon Glyph="&#xE7AD;" FontSize="15" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="RotateRight_Click" ToolTipService.ToolTip="{local:T Key=RotateRightTip}"><FontIcon Glyph="&#xE7AD;" FontSize="15" RenderTransformOrigin="0.5,0.5"><FontIcon.RenderTransform><ScaleTransform ScaleX="-1" /></FontIcon.RenderTransform></FontIcon></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="RotateLeft_Click" AutomationProperties.Name="{local:T Key=RotateLeftTip}" ToolTipService.ToolTip="{local:T Key=RotateLeftTip}"><FontIcon Glyph="&#xE7AD;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="RotateRight_Click" AutomationProperties.Name="{local:T Key=RotateRightTip}" ToolTipService.ToolTip="{local:T Key=RotateRightTip}"><FontIcon Glyph="&#xE7AD;" FontSize="15" RenderTransformOrigin="0.5,0.5"><FontIcon.RenderTransform><ScaleTransform ScaleX="-1" /></FontIcon.RenderTransform></FontIcon></Button>
                 <AppBarSeparator />
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="FullScreen_Click" ToolTipService.ToolTip="{local:T Key=FullScreenTip}"><FontIcon x:Name="FullScreenGlyph" Glyph="&#xE740;" FontSize="15" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="OpenExternal_Click" ToolTipService.ToolTip="{local:T Key=OpenExternalTip}"><FontIcon Glyph="&#xE8A7;" FontSize="15" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Delete_Click" ToolTipService.ToolTip="{local:T Key=DeleteTip}"><FontIcon Glyph="&#xE74D;" FontSize="15" Foreground="#EF4444" /></Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Close_Click" ToolTipService.ToolTip="{local:T Key=CloseViewerTip}"><FontIcon Glyph="&#xE711;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="FullScreen_Click" AutomationProperties.Name="{local:T Key=FullScreenTip}" ToolTipService.ToolTip="{local:T Key=FullScreenTip}"><FontIcon x:Name="FullScreenGlyph" Glyph="&#xE740;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="OpenExternal_Click" AutomationProperties.Name="{local:T Key=OpenExternalTip}" ToolTipService.ToolTip="{local:T Key=OpenExternalTip}"><FontIcon Glyph="&#xE8A7;" FontSize="15" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Delete_Click" AutomationProperties.Name="{local:T Key=DeleteTip}" ToolTipService.ToolTip="{local:T Key=DeleteTip}"><FontIcon Glyph="&#xE74D;" FontSize="15" Foreground="#EF4444" /></Button>
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Close_Click" AutomationProperties.Name="{local:T Key=CloseViewerTip}" ToolTipService.ToolTip="{local:T Key=CloseViewerTip}"><FontIcon Glyph="&#xE711;" FontSize="15" /></Button>
             </StackPanel>
         </Grid>
 
@@ -52,11 +52,11 @@
             <TextBlock x:Name="ErrorText" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="520" TextAlignment="Center"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" Visibility="Collapsed" />
             <Button x:Name="PreviousButton" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="16,0,0,0" Width="44" Height="44" CornerRadius="22" Padding="0"
-                    Click="Previous_Click" Opacity="0.85" ToolTipService.ToolTip="{local:T Key=PreviousTip}">
+                    Click="Previous_Click" Opacity="0.85" AutomationProperties.Name="{local:T Key=PreviousTip}" ToolTipService.ToolTip="{local:T Key=PreviousTip}">
                 <FontIcon Glyph="&#xE76B;" FontSize="16" />
             </Button>
             <Button x:Name="NextButton" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,16,0" Width="44" Height="44" CornerRadius="22" Padding="0"
-                    Click="Next_Click" Opacity="0.85" ToolTipService.ToolTip="{local:T Key=NextTip}">
+                    Click="Next_Click" Opacity="0.85" AutomationProperties.Name="{local:T Key=NextTip}" ToolTipService.ToolTip="{local:T Key=NextTip}">
                 <FontIcon Glyph="&#xE76C;" FontSize="16" />
             </Button>
         </Grid>

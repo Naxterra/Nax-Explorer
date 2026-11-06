@@ -162,16 +162,16 @@
                 <ColumnDefinition Width="2*" MinWidth="80" />
                 <ColumnDefinition Width="*" MaxWidth="250" MinWidth="110" />
             </Grid.ColumnDefinitions>
-            <Button x:Name="BackButton" Style="{StaticResource ToolbarButtonStyle}" Click="Back_Click" ToolTipService.ToolTip="{local:T Key=BackTip}">
+            <Button x:Name="BackButton" Style="{StaticResource ToolbarButtonStyle}" Click="Back_Click" AutomationProperties.Name="{local:T Key=BackTip}" ToolTipService.ToolTip="{local:T Key=BackTip}">
                 <FontIcon Glyph="&#xE72B;" FontSize="14" />
             </Button>
-            <Button x:Name="ForwardButton" Grid.Column="1" Style="{StaticResource ToolbarButtonStyle}" Click="Forward_Click" ToolTipService.ToolTip="{local:T Key=ForwardTip}">
+            <Button x:Name="ForwardButton" Grid.Column="1" Style="{StaticResource ToolbarButtonStyle}" Click="Forward_Click" AutomationProperties.Name="{local:T Key=ForwardTip}" ToolTipService.ToolTip="{local:T Key=ForwardTip}">
                 <FontIcon Glyph="&#xE72A;" FontSize="14" />
             </Button>
-            <Button x:Name="UpButton" Grid.Column="2" Style="{StaticResource ToolbarButtonStyle}" Click="Up_Click" ToolTipService.ToolTip="{local:T Key=UpTip}">
+            <Button x:Name="UpButton" Grid.Column="2" Style="{StaticResource ToolbarButtonStyle}" Click="Up_Click" AutomationProperties.Name="{local:T Key=UpTip}" ToolTipService.ToolTip="{local:T Key=UpTip}">
                 <FontIcon Glyph="&#xE74A;" FontSize="14" />
             </Button>
-            <Button Grid.Column="3" Style="{StaticResource ToolbarButtonStyle}" Click="Refresh_Click" ToolTipService.ToolTip="{local:T Key=RefreshTip}">
+            <Button Grid.Column="3" Style="{StaticResource ToolbarButtonStyle}" Click="Refresh_Click" AutomationProperties.Name="{local:T Key=RefreshTip}" ToolTipService.ToolTip="{local:T Key=RefreshTip}">
                 <FontIcon Glyph="&#xE72C;" FontSize="14" />
             </Button>
 
@@ -200,13 +200,13 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Orientation="Horizontal" Spacing="4">
-                <ToggleButton x:Name="SmartToggle" Click="SmartToggle_Click" Padding="10,4" CornerRadius="14">
+                <ToggleButton x:Name="SmartToggle" AutomationProperties.Name="{local:T Key=SmartSearch}" Click="SmartToggle_Click" Padding="10,4" CornerRadius="14">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE945;" FontSize="13" Foreground="#A78BFA" />
                         <TextBlock Text="{local:T Key=SmartSearch}" FontSize="12" />
                     </StackPanel>
                 </ToggleButton>
-                <ToggleButton x:Name="ExactToggle" Click="ExactToggle_Click" Padding="10,4" CornerRadius="14">
+                <ToggleButton x:Name="ExactToggle" AutomationProperties.Name="{local:T Key=ExactSearch}" Click="ExactToggle_Click" Padding="10,4" CornerRadius="14">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE721;" FontSize="13" />
                         <TextBlock Text="{local:T Key=ExactSearch}" FontSize="12" />
@@ -222,10 +222,10 @@
                 <ProgressRing x:Name="SearchRing" Width="16" Height="16" IsActive="False" />
                 <TextBlock x:Name="SearchStatus" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
             </StackPanel>
-            <Button x:Name="StopSearchButton" Grid.Column="3" Style="{StaticResource ToolbarButtonStyle}" Click="StopSearch_Click" ToolTipService.ToolTip="{local:T Key=StopSearch}">
+            <Button x:Name="StopSearchButton" Grid.Column="3" Style="{StaticResource ToolbarButtonStyle}" Click="StopSearch_Click" AutomationProperties.Name="{local:T Key=StopSearch}" ToolTipService.ToolTip="{local:T Key=StopSearch}">
                 <FontIcon Glyph="&#xE71A;" FontSize="12" />
             </Button>
-            <Button Grid.Column="4" Style="{StaticResource ToolbarButtonStyle}" Click="CloseSearch_Click" ToolTipService.ToolTip="{local:T Key=CloseSearch}">
+            <Button Grid.Column="4" Style="{StaticResource ToolbarButtonStyle}" Click="CloseSearch_Click" AutomationProperties.Name="{local:T Key=CloseSearch}" ToolTipService.ToolTip="{local:T Key=CloseSearch}">
                 <FontIcon Glyph="&#xE711;" FontSize="12" />
             </Button>
         </Grid>
@@ -282,10 +282,10 @@
                 <TextBlock x:Name="EngineText" FontSize="11" Foreground="White" />
             </Border>
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="0">
-                <ToggleButton x:Name="DetailsToggle" Padding="6,3" Click="DetailsToggle_Click" ToolTipService.ToolTip="{local:T Key=ViewDetails}" Background="Transparent" BorderThickness="0">
+                <ToggleButton x:Name="DetailsToggle" Padding="6,3" Click="DetailsToggle_Click" AutomationProperties.Name="{local:T Key=ViewDetails}" ToolTipService.ToolTip="{local:T Key=ViewDetails}" Background="Transparent" BorderThickness="0">
                     <FontIcon Glyph="&#xE8FD;" FontSize="13" />
                 </ToggleButton>
-                <ToggleButton x:Name="ThumbsToggle" Padding="6,3" Click="ThumbsToggle_Click" ToolTipService.ToolTip="{local:T Key=ViewThumbnails}" Background="Transparent" BorderThickness="0">
+                <ToggleButton x:Name="ThumbsToggle" Padding="6,3" Click="ThumbsToggle_Click" AutomationProperties.Name="{local:T Key=ViewThumbnails}" ToolTipService.ToolTip="{local:T Key=ViewThumbnails}" Background="Transparent" BorderThickness="0">
                     <FontIcon Glyph="&#xE8B9;" FontSize="13" />
                 </ToggleButton>
             </StackPanel>

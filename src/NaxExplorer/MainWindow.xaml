@@ -52,7 +52,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Orientation="Horizontal" Spacing="2">
-                <DropDownButton Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
+                <DropDownButton AutomationProperties.Name="{local:T Key=New}" Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE710;" FontSize="15" Foreground="#3B82F6" />
                         <TextBlock Text="{local:T Key=New}" />
@@ -72,43 +72,43 @@
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="NewFolder_Click" ToolTipService.ToolTip="{local:T Key=NewFolderTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="NewFolder_Click" AutomationProperties.Name="{local:T Key=NewFolderTip}" ToolTipService.ToolTip="{local:T Key=NewFolderTip}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE8F4;" FontSize="15" Foreground="#F59E0B" />
                         <TextBlock Text="{local:T Key=NewFolderName}" />
                     </StackPanel>
                 </Button>
                 <AppBarSeparator />
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Cut_Click" ToolTipService.ToolTip="{local:T Key=CutTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Cut_Click" AutomationProperties.Name="{local:T Key=CutTip}" ToolTipService.ToolTip="{local:T Key=CutTip}">
                     <FontIcon Glyph="&#xE8C6;" FontSize="15" />
                 </Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Copy_Click" ToolTipService.ToolTip="{local:T Key=CopyTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Copy_Click" AutomationProperties.Name="{local:T Key=CopyTip}" ToolTipService.ToolTip="{local:T Key=CopyTip}">
                     <FontIcon Glyph="&#xE8C8;" FontSize="15" />
                 </Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Paste_Click" ToolTipService.ToolTip="{local:T Key=PasteTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Paste_Click" AutomationProperties.Name="{local:T Key=PasteTip}" ToolTipService.ToolTip="{local:T Key=PasteTip}">
                     <FontIcon Glyph="&#xE77F;" FontSize="15" />
                 </Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Rename_Click" ToolTipService.ToolTip="{local:T Key=RenameTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Rename_Click" AutomationProperties.Name="{local:T Key=RenameTip}" ToolTipService.ToolTip="{local:T Key=RenameTip}">
                     <FontIcon Glyph="&#xE8AC;" FontSize="15" />
                 </Button>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Delete_Click" ToolTipService.ToolTip="{local:T Key=DeleteTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Delete_Click" AutomationProperties.Name="{local:T Key=DeleteTip}" ToolTipService.ToolTip="{local:T Key=DeleteTip}">
                     <FontIcon Glyph="&#xE74D;" FontSize="15" Foreground="#EF4444" />
                 </Button>
                 <AppBarSeparator />
-                <Button x:Name="CopyOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="CopyOther_Click" ToolTipService.ToolTip="{local:T Key=CopyToOtherTip}">
+                <Button x:Name="CopyOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="CopyOther_Click" AutomationProperties.Name="{local:T Key=CopyToOtherTip}" ToolTipService.ToolTip="{local:T Key=CopyToOtherTip}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xF413;" FontSize="15" Foreground="#10B981" />
                         <TextBlock Text="{local:T Key=CopyToOtherShort}" />
                     </StackPanel>
                 </Button>
-                <Button x:Name="MoveOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="MoveOther_Click" ToolTipService.ToolTip="{local:T Key=MoveToOtherTip}">
+                <Button x:Name="MoveOtherButton" Style="{StaticResource ToolbarButtonStyle}" Click="MoveOther_Click" AutomationProperties.Name="{local:T Key=MoveToOtherTip}" ToolTipService.ToolTip="{local:T Key=MoveToOtherTip}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE8DE;" FontSize="15" Foreground="#F59E0B" />
                         <TextBlock Text="{local:T Key=MoveToOtherShort}" />
                     </StackPanel>
                 </Button>
                 <AppBarSeparator />
-                <DropDownButton Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
+                <DropDownButton AutomationProperties.Name="{local:T Key=View}" Style="{StaticResource DefaultButtonStyle}" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE890;" FontSize="15" Foreground="#8B5CF6" />
                         <TextBlock Text="{local:T Key=View}" />
@@ -126,19 +126,19 @@
                 </DropDownButton>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
-                <ToggleButton x:Name="DualToggle" Click="DualToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" ToolTipService.ToolTip="{local:T Key=DualPaneTip}">
+                <ToggleButton x:Name="DualToggle" Click="DualToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" AutomationProperties.Name="{local:T Key=DualPaneTip}" ToolTipService.ToolTip="{local:T Key=DualPaneTip}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE89F;" FontSize="15" />
                         <TextBlock Text="{local:T Key=DualPane}" />
                     </StackPanel>
                 </ToggleButton>
-                <ToggleButton x:Name="PreviewToggle" Click="PreviewToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" ToolTipService.ToolTip="{local:T Key=PreviewTip}">
+                <ToggleButton x:Name="PreviewToggle" Click="PreviewToggle_Click" Background="Transparent" BorderThickness="0" Padding="10,6" CornerRadius="6" AutomationProperties.Name="{local:T Key=PreviewTip}" ToolTipService.ToolTip="{local:T Key=PreviewTip}">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon Glyph="&#xE8A1;" FontSize="15" />
                         <TextBlock Text="{local:T Key=Preview}" />
                     </StackPanel>
                 </ToggleButton>
-                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Settings_Click" ToolTipService.ToolTip="{local:T Key=SettingsTip}">
+                <Button Style="{StaticResource ToolbarButtonStyle}" Click="Settings_Click" AutomationProperties.Name="{local:T Key=SettingsTip}" ToolTipService.ToolTip="{local:T Key=SettingsTip}">
                     <FontIcon Glyph="&#xE713;" FontSize="15" />
                 </Button>
             </StackPanel>
