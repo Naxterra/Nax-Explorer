@@ -65,11 +65,16 @@ public sealed partial class FilePane : UserControl
     private string _freeSpace = "";
     private bool _switchingTabs;
     private bool _closed;
+    private static readonly SemaphoreSlim FolderSizeSlots = new(2);
+    private readonly Dictionary<FileItem, CancellationTokenSource> _folderSizeRequests = [];
+    private (int First, int Last) _folderSizeRange = (-1, -1);
+    private double _headerRowWidth = -1, _headerPaneWidth = -1;
 
     /// <summary>Closed windows release their watchers and searches while the app continues in the background.</summary>
     internal void StopBackgroundWork()
     {
         _closed = true;
+        CancelFolderSizes();
         _loadCts?.Cancel();
         CancelSearch();
         StopWatcher();
@@ -79,6 +84,12 @@ public sealed partial class FilePane : UserControl
     public FilePane()
     {
         InitializeComponent();
+        ContentArea.LayoutUpdated += (_, _) =>
+        {
+            if (_closed || _tab is null) return;
+            AlignColumnHeader();
+            UpdateVisibleFolderSizes();
+        };
         _refreshTimer = DispatcherQueue.CreateTimer();
         _refreshTimer.Interval = TimeSpan.FromMilliseconds(250);
         _refreshTimer.IsRepeating = false;
@@ -517,6 +528,7 @@ public sealed partial class FilePane : UserControl
     private async Task LoadAsync()
     {
         if (_closed) return;
+        CancelFolderSizes();
         _loadCts?.Cancel();
         var cts = new CancellationTokenSource();
         _loadCts = cts;
@@ -617,6 +629,8 @@ public sealed partial class FilePane : UserControl
     private void BindList()
     {
         EndMarquee();
+        CancelFolderSizes();
+        _headerRowWidth = -1;
         bool thisPc = PathTools.IsThisPc(_tab.Location) && _tab.Search is null;
         bool thumbs = CurrentList == Thumbs;
         List.ItemTemplate = (DataTemplate)Resources[_tab.Search is not null ? "ResultTemplate" : thisPc ? "DriveTemplate" : "DetailsTemplate"];
@@ -831,6 +845,7 @@ public sealed partial class FilePane : UserControl
         // A watcher update can shift every subsequent item index. Finish the gesture
         // before applying it so queued pointer input cannot select different files.
         EndMarquee();
+        CancelFolderSizes();
         var byPath = new Dictionary<string, FileItem>(StringComparer.OrdinalIgnoreCase);
         foreach (FileItem item in _all) byPath[item.Entry.FullPath] = item;
         foreach (FileEntry removed in changes.Removed)
@@ -950,6 +965,80 @@ public sealed partial class FilePane : UserControl
     }
 
     // ---------------------------------------------------------------- column widths
+
+    private void AlignColumnHeader()
+    {
+        if (ColumnHeader.Visibility != Visibility.Visible || List.ItemsPanelRoot is not ItemsStackPanel panel) return;
+        if (List.ContainerFromIndex(Math.Max(0, panel.FirstVisibleIndex)) is not SelectorItem { ContentTemplateRoot: Grid row } || row.ActualWidth <= 0) return;
+        if (_headerRowWidth == row.ActualWidth && _headerPaneWidth == ContentArea.ActualWidth) return;
+        double left = row.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
+        ColumnHeader.Margin = new Thickness(left, 0, Math.Max(0, ContentArea.ActualWidth - left - row.ActualWidth), 0);
+        _headerRowWidth = row.ActualWidth;
+        _headerPaneWidth = ContentArea.ActualWidth;
+    }
+
+    // Only on-screen folders are counted; scrolling/navigation cancels obsolete work.
+    // Two workers are shared by all panes so a folder full of folders cannot flood the disk.
+    private void UpdateVisibleFolderSizes()
+    {
+        if (_closed || IsSelectingWithMouse || _tab.Search is not null || Folder is null) return;
+        var range = CurrentList.ItemsPanelRoot switch
+        {
+            ItemsStackPanel panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            ItemsWrapGrid panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            _ => (-1, -1),
+        };
+        if (range == _folderSizeRange) return;
+        _folderSizeRange = range;
+        var visible = new HashSet<FileItem>();
+        for (int i = Math.Max(0, range.Item1); i <= Math.Min(_items.Count - 1, range.Item2); i++)
+            if (_items[i].Entry.Kind == EntryKind.Folder) visible.Add(_items[i]);
+        foreach (var item in _folderSizeRequests.Keys.Where(item => !visible.Contains(item)).ToArray())
+        {
+            _folderSizeRequests[item].Cancel();
+            _folderSizeRequests.Remove(item);
+        }
+        foreach (FileItem item in visible)
+        {
+            if (item.HasFolderSize || _folderSizeRequests.ContainsKey(item)) continue;
+            var request = new CancellationTokenSource();
+            _folderSizeRequests.Add(item, request);
+            _ = ReadFolderSizeAsync(item, request);
+        }
+    }
+
+    private void CancelFolderSizes()
+    {
+        foreach (var request in _folderSizeRequests.Values) request.Cancel();
+        _folderSizeRequests.Clear();
+        _folderSizeRange = (-1, -1);
+    }
+
+    private async Task ReadFolderSizeAsync(FileItem item, CancellationTokenSource request)
+    {
+        FolderSizeResult? size = null;
+        bool entered = false;
+        try
+        {
+            await FolderSizeSlots.WaitAsync(request.Token);
+            entered = true;
+            size = await Task.Run(() => FolderSizeReader.Measure(item.Entry.FullPath, request.Token), request.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OverflowException) { }
+        finally
+        {
+            if (entered) FolderSizeSlots.Release();
+            // This continuation is back on the UI thread. A late count cannot update a
+            // recycled row or replace a newer request for the same item.
+            if (_folderSizeRequests.TryGetValue(item, out var active) && ReferenceEquals(active, request))
+            {
+                _folderSizeRequests.Remove(item);
+                if (!request.IsCancellationRequested && !_closed) item.SetFolderSize(size);
+            }
+            request.Dispose();
+        }
+    }
 
     private (double Date, double Type, double Size) _columns = (130, 130, 90);
 
@@ -1190,6 +1279,7 @@ public sealed partial class FilePane : UserControl
         bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
         _marqueeSelection = new(keep ? list.SelectedRanges.Select(range => (range.FirstIndex, range.Length)) : []);
         _owner.OnPaneMouseSelectionStarted(this);
+        CancelFolderSizes();
         if (!keep) list.SelectedItems.Clear();
         list.Focus(FocusState.Pointer);
         // Own the empty-space gesture so the list cannot compete with the box for
@@ -1431,6 +1521,7 @@ public sealed partial class FilePane : UserControl
         if (_marqueeVisual is not null) _marqueeVisual.Opacity = 0;
         ContentArea.ReleasePointerCaptures();
         if (!_closed) NotifySelectionChanged();
+        if (!_closed) UpdateVisibleFolderSizes();
     }
 
     /// <summary>True when a press landed on a row or on a scroll bar, where it keeps its usual meaning.</summary>
