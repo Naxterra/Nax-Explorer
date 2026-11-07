@@ -20,6 +20,8 @@ public sealed partial class FileItem : INotifyPropertyChanged
     private bool _isCut;
     private bool _isRenaming;
     private ItemStyle _style;
+    private FolderSizeResult? _folderSize;
+    internal bool HasFolderSize { get; private set; }
 
     internal FileItem(FileEntry entry, ItemStyle style)
     {
@@ -65,11 +67,22 @@ public sealed partial class FileItem : INotifyPropertyChanged
     public string SizeText => Entry.Kind switch
     {
         EntryKind.File => SizeFormat.Format(Entry.Size),
+        EntryKind.Folder => !HasFolderSize ? "…" : _folderSize is { } total
+            ? (total.IsPartial ? "≥ " : "") + SizeFormat.Format(total.Bytes) : "–",
         EntryKind.Drive when Entry.Size > 0 => Loc.F("DriveFree", SizeFormat.Format(Entry.FreeBytes), SizeFormat.Format(Entry.Size)),
         _ => "",
     };
 
     public Brush NameBrush => Palette.NameBrush(Category, _style.Dark, _style.Colorful);
+
+    public string SizeTip => Entry.Kind == EntryKind.Folder ? Loc.T("FolderSizeHint") : SizeText;
+
+    internal void SetFolderSize(FolderSizeResult? size)
+    {
+        _folderSize = size;
+        HasFolderSize = true;
+        Notify(nameof(SizeText));
+    }
 
     public double Opacity => _isCut ? 0.45 : Entry.IsHidden ? 0.65 : 1;
 
@@ -185,6 +198,7 @@ public sealed partial class FileItem : INotifyPropertyChanged
     public void Update(FileEntry entry)
     {
         bool modified = entry.ModifiedUtc != Entry.ModifiedUtc;
+        if (entry.Kind == EntryKind.Folder && !Entry.SameState(entry)) HasFolderSize = false;
         Entry = entry;
         Category = FileTypes.Categorize(entry);
         if (modified) _thumbnail = null;

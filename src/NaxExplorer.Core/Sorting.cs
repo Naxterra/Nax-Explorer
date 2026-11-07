@@ -68,6 +68,9 @@ public static class EntrySorter
     {
         return (x, y) =>
         {
+            // This PC has no sort headers; keep letter order even after a folder used another sort.
+            if (x.Kind == EntryKind.Drive && y.Kind == EntryKind.Drive)
+                return StringComparer.OrdinalIgnoreCase.Compare(x.FullPath, y.FullPath);
             int group = (x.IsContainer ? 0 : 1).CompareTo(y.IsContainer ? 0 : 1);
             if (group != 0) return group;
             int result = column switch

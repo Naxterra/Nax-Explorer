@@ -264,6 +264,7 @@ internal static class Loc
         ["UnfetchedNote"] = ("; the contents of {0:N0} cloud folders are not loaded yet and not counted", "; der Inhalt von {0:N0} noch nicht geladenen Cloud-Ordnern ist nicht mitgezählt"),
         ["CloudFolderNotFetched"] = ("The list of this cloud folder is not on this device yet. Open the folder to load it.", "Die Liste dieses Cloud-Ordners ist noch nicht auf diesem Gerät. Öffnen Sie den Ordner, um sie zu laden."),
         ["CountNow"] = ("Count folders, files and size", "Ordner, Dateien und Größe zählen"),
+        ["FolderSizeHint"] = ("Folder size. ≥ marks a partial count; – means unavailable. Press F5 to recount.", "Ordnergröße. ≥ kennzeichnet eine Teilgröße; – bedeutet nicht verfügbar. F5 zählt neu."),
         ["CloudHeader"] = ("CLOUD", "CLOUD"),
         ["DetailCloud"] = ("Cloud", "Cloud"),
         ["DetailOnlineOnly"] = ("Only online", "Nur online"),
