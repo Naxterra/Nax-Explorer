@@ -124,6 +124,7 @@ internal static class PreviewTests
             Check.That(!Request(Entry(cloud.FullPath, EntryKind.Folder)).CanReuseTotals(Request(cloud)), "cloud-state transition reused stale rows");
             var other = Entry(@"C:\Docs\other.txt");
             Check.That(Request(file, other).Matches(Request(other, file)), "selection order caused a rebuild");
+            Check.That(!new PreviewRequest([], "shell:place", 600, 1, "Parsing name").Matches(new([], "shell:place", 600, 1, "Localized name")), "late shell display name was suppressed");
             var state = new PreviewRefreshState();
             state.Complete(state.Begin(original)!.Value);
             state.Invalidate();

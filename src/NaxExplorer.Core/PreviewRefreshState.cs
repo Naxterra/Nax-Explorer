@@ -10,19 +10,21 @@ public sealed class PreviewRequest
     public string? Folder { get; }
     public int ImagePixels { get; }
     public double Scale { get; }
+    public string? ContextName { get; }
     public bool CountsContent => _entries.Length > 1
         ? _entries.All(e => e.Entry.Kind != EntryKind.Drive && !PathTools.IsShellPlace(e.Entry.FullPath))
         : _entries.Length == 1 ? _entries[0].Entry.Kind == EntryKind.Folder && !PathTools.IsShellPlace(_entries[0].Entry.FullPath)
         : Folder is not null && !PathTools.IsThisPc(Folder) && !PathTools.IsShellPlace(Folder)
             && !PathTools.IsThisPc(PathTools.Parent(Folder) ?? "");
 
-    public PreviewRequest(IEnumerable<PreviewEntry> entries, string? folder, int imagePixels, double scale)
+    public PreviewRequest(IEnumerable<PreviewEntry> entries, string? folder, int imagePixels, double scale, string? contextName = null)
     {
         _entries = entries.OrderBy(e => e.Entry.FullPath, StringComparer.OrdinalIgnoreCase).ToArray();
         _paths = _entries.Select(e => e.Entry.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
         Folder = folder;
         ImagePixels = imagePixels;
         Scale = scale;
+        ContextName = contextName;
     }
 
     public bool SameSelection(IEnumerable<string> paths, int count, string? folder) =>
@@ -30,7 +32,7 @@ public sealed class PreviewRequest
 
     private bool SameTargets(PreviewRequest other)
     {
-        if (!StringComparer.OrdinalIgnoreCase.Equals(Folder, other.Folder) || ImagePixels != other.ImagePixels || Scale != other.Scale || _entries.Length != other._entries.Length) return false;
+        if (!StringComparer.OrdinalIgnoreCase.Equals(Folder, other.Folder) || ContextName != other.ContextName || ImagePixels != other.ImagePixels || Scale != other.Scale || _entries.Length != other._entries.Length) return false;
         for (int i = 0; i < _entries.Length; i++)
         {
             var a = _entries[i];

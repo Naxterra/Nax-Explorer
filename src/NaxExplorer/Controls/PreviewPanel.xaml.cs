@@ -59,7 +59,8 @@ public sealed partial class PreviewPanel : UserControl
     internal async void Show(IReadOnlyList<FileItem> selected, string? folder)
     {
         int side = (int)Math.Min(1200, Math.Max(200, ActualWidth - 24) * (XamlRoot?.RasterizationScale ?? 1));
-        var request = new PreviewRequest(selected.Select(i => new PreviewEntry(i.Entry, i.DisplayName, i.FolderText)), folder, side, XamlRoot?.RasterizationScale ?? 1);
+        var request = new PreviewRequest(selected.Select(i => new PreviewEntry(i.Entry, i.DisplayName, i.FolderText)), folder, side, XamlRoot?.RasterizationScale ?? 1,
+            selected.Count == 0 && folder is not null ? FilePane.PlaceName(folder) : null);
         bool reuseTotals = !_forceFullRender && _refresh.Current?.CanReuseTotals(request) == true && _detailValues.ContainsKey("DetailTotal");
         _item = selected.Count == 1 ? selected[0] : null;
         if (_refresh.Begin(request) is not { } generation) return;
