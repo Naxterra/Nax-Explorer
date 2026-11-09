@@ -102,7 +102,6 @@ public sealed partial class FilePane : UserControl
         foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
         {
             list.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
-            list.AddHandler(PointerPressedEvent, new PointerEventHandler(List_PointerPressedAny), handledEventsToo: true);
             list.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
         }
         ContentArea.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
@@ -203,6 +202,7 @@ public sealed partial class FilePane : UserControl
 
     internal void FocusList()
     {
+        if (_owner?.IsViewerOpen == true) return;
         ListViewBase list = CurrentList;
         // Right after the list was filled its rows do not exist yet; a layout pass creates them, so one can take focus.
         list.UpdateLayout();
@@ -795,6 +795,7 @@ public sealed partial class FilePane : UserControl
     private async Task RefreshAsync()
     {
         if (_closed || _tab.Search is not null) return;
+        if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         PaneTab tab = _tab;
         string location = tab.Location;
         ListingOptions listing = Listing;
@@ -815,6 +816,7 @@ public sealed partial class FilePane : UserControl
             return;
         }
         if (_closed || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         FolderChanges changes = FolderChanges.Compute(_entries, fresh);
         _entries = fresh;
         if (!changes.IsEmpty)
@@ -1160,7 +1162,6 @@ public sealed partial class FilePane : UserControl
         // Correcting a click or updating a selection box can raise this once per row.
         // Recalculate the status and preview once after that batch, not for every item.
         if (_adjustingSelection) return;
-        if (sender is ListViewBase list) KeepClickSelection(list, e);
         NotifySelectionChanged();
     }
 
@@ -1170,61 +1171,15 @@ public sealed partial class FilePane : UserControl
         _owner.OnPaneSelectionChanged(this);
     }
 
-    /// <summary>When the last mouse press on the list happened, so a selection change can be told to come from a click.</summary>
-    private long _listPressedAt;
-
-    /// <summary>The row a Shift+click selects from: the row of the last click without Shift.</summary>
-    private FileItem? _selectionAnchor;
-
     private bool _adjustingSelection;
-
-    private void List_PointerPressedAny(object sender, PointerRoutedEventArgs e)
-    {
-        if (e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse) _listPressedAt = Environment.TickCount64;
-    }
-
-    /// <summary>
-    /// Ctrl+click adds a row to the selection and Shift+click selects the rows from the last clicked one, as in Explorer.
-    /// The list does this itself only when it sees the modifier keys, which it does not always do; when a click with
-    /// Ctrl or Shift held replaced the selection instead, the selection is put right here.
-    /// </summary>
-    private void KeepClickSelection(ListViewBase list, SelectionChangedEventArgs e)
-    {
-        if (_adjustingSelection || Environment.TickCount64 - _listPressedAt > 1500) return;
-        bool ctrl = Native.IsKeyDown(0x11), shift = Native.IsKeyDown(0x10);
-        FileItem? clicked = e.AddedItems.Count == 1 ? e.AddedItems[0] as FileItem : null;
-        _adjustingSelection = true;
-        try
-        {
-            if (shift && clicked is not null && _selectionAnchor is { } anchor && _items.IndexOf(anchor) is var from and >= 0)
-            {
-                int to = _items.IndexOf(clicked);
-                if (to >= 0 && list.SelectedItems.Count != Math.Abs(to - from) + 1)
-                {
-                    if (!ctrl) list.SelectedItems.Clear();
-                    list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(Math.Min(from, to), (uint)(Math.Abs(to - from) + 1)));
-                }
-                return;
-            }
-            if (ctrl && !shift && clicked is not null && e.RemovedItems.Count > 0)
-            {
-                foreach (object removed in e.RemovedItems)
-                {
-                    if (!list.SelectedItems.Contains(removed)) list.SelectedItems.Add(removed);
-                }
-            }
-            if (!shift && clicked is not null) _selectionAnchor = clicked;
-        }
-        finally
-        {
-            _adjustingSelection = false;
-        }
-    }
 
     // ---------------------------------------------------------------- selection box
 
     private Windows.Foundation.Point? _marqueeStart;
     private bool _marqueeShown;
+    private bool _marqueeKeep;
+    private FileItem? _marqueePressedItem;
+    private bool _refreshAfterSelection;
     private RangeSelection? _marqueeSelection;
     private readonly FrameInput<Windows.Foundation.Point> _marqueeInput = new();
     private ListViewBase? _marqueeList;
@@ -1277,10 +1232,13 @@ public sealed partial class FilePane : UserControl
         }
         _marqueeShown = false;
         bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
+        _marqueeKeep = keep;
+        _marqueePressedItem = null;
+        for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+            if (node is SelectorItem { Content: FileItem pressed }) { _marqueePressedItem = pressed; break; }
         _marqueeSelection = new(keep ? list.SelectedRanges.Select(range => (range.FirstIndex, range.Length)) : []);
         _owner.OnPaneMouseSelectionStarted(this);
         CancelFolderSizes();
-        if (!keep) list.SelectedItems.Clear();
         list.Focus(FocusState.Pointer);
         // Own the empty-space gesture so the list cannot compete with the box for
         // pointer moves or clear its result when the mouse button is released.
@@ -1332,6 +1290,12 @@ public sealed partial class FilePane : UserControl
         double left = Math.Min(start.X, now.X), top = Math.Min(start.Y, now.Y);
         double width = Math.Abs(now.X - start.X), height = Math.Abs(now.Y - start.Y);
         if (!_marqueeShown && width < 4 && height < 4) return;
+        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
+        {
+            _adjustingSelection = true;
+            try { list.SelectedItems.Clear(); }
+            finally { _adjustingSelection = false; }
+        }
         _marqueeShown = true;
         if (_marqueeVisual is null)
         {
@@ -1493,6 +1457,18 @@ public sealed partial class FilePane : UserControl
         if (_marqueeStart is null) return;
         QueueMarquee(e.GetCurrentPoint(ContentArea).Position);
         ApplyPendingMarquee();
+        // A click in unused row space still selects that row. Only a real drag
+        // replaces the native click selection with the rectangle's result.
+        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
+        {
+            _adjustingSelection = true;
+            try
+            {
+                list.SelectedItems.Clear();
+                if (_marqueePressedItem is { } pressed) list.SelectedItem = pressed;
+            }
+            finally { _adjustingSelection = false; }
+        }
         EndMarquee();
         e.Handled = true;
     }
@@ -1518,10 +1494,16 @@ public sealed partial class FilePane : UserControl
         _marqueeBounds.Clear();
         _marqueeShown = false;
         _marqueeSelection = null;
+        _marqueePressedItem = null;
         if (_marqueeVisual is not null) _marqueeVisual.Opacity = 0;
         ContentArea.ReleasePointerCaptures();
         if (!_closed) NotifySelectionChanged();
         if (!_closed) UpdateVisibleFolderSizes();
+        if (_refreshAfterSelection)
+        {
+            _refreshAfterSelection = false;
+            if (!_closed) ScheduleRefresh();
+        }
     }
 
     /// <summary>True when a press landed on a row or on a scroll bar, where it keeps its usual meaning.</summary>
@@ -1550,6 +1532,7 @@ public sealed partial class FilePane : UserControl
 
     private void List_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Handled || _owner.IsViewerOpen) return;
         // Preview routing reaches us before ListView consumes Enter as its own
         // activation key. Embedded editors must retain their normal commit keys.
         if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
@@ -1586,6 +1569,7 @@ public sealed partial class FilePane : UserControl
     /// <summary>Space opens the selected picture in the viewer, before the list uses Space for selection.</summary>
     private void List_PreviewSpace(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Handled || _owner.IsViewerOpen) return;
         if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         if (e.Key != VirtualKey.Space || Native.IsKeyDown(0x11) || _typed.Length > 0 && DateTime.UtcNow - _typedAt < TimeSpan.FromSeconds(1)) return;
         if (SelectedItems is [{ Entry.Kind: EntryKind.File } item] && FileTypes.IsViewerImage(item.Entry.Extension))
@@ -1605,6 +1589,7 @@ public sealed partial class FilePane : UserControl
     /// <summary>Typing letters jumps to the first name that starts with them.</summary>
     private void List_CharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs args)
     {
+        if (_owner.IsViewerOpen) return;
         char c = args.Character;
         if (char.IsControl(c)) return;
         DateTime now = DateTime.UtcNow;

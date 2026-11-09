@@ -136,7 +136,12 @@ internal static class ImageCache
     /// <summary>A large thumbnail for the preview pane, not cached.</summary>
     public static void RequestLarge(string path, int pixels, DispatcherQueue ui, Func<bool> stillWanted, Action<ImageSource?> done)
     {
-        ShellImages.Enqueue(path, pixels, thumbnail: true, stillWanted, pixels2 => ui.SafeEnqueue(() => done(pixels2 is null ? null : ToBitmap(pixels2))));
+        ShellImages.Enqueue(path, pixels, thumbnail: true, stillWanted, pixels2 => ui.SafeEnqueue(() =>
+        {
+            // A slow shell handler may finish after the next mouse click. Reject it
+            // before allocating/copying a large XAML bitmap on the input thread.
+            if (stillWanted()) done(pixels2 is null ? null : ToBitmap(pixels2));
+        }));
     }
 
     private static void Load(string key, string path, int pixels, bool thumbnail, Func<bool> stillWanted, DispatcherQueue ui, Action<ImageSource?> done)

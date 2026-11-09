@@ -27,7 +27,10 @@ internal static class ImageLoader
     public static async Task<LoadedImage> LoadAsync(string path, int maxSide, CancellationToken token, int quarterTurns = 0)
     {
         quarterTurns = ((quarterTurns % 4) + 4) % 4;
-        await using FileStream file = TextSniffer.OpenShared(path, 1 << 16);
+        // Opening a network or cold local file can block even when later reads are
+        // asynchronous. A selection must never wait for that open on the UI thread.
+        await using FileStream file = await Task.Run(() => TextSniffer.OpenShared(path, 1 << 16), token);
+        token.ThrowIfCancellationRequested();
         if (string.Equals(Path.GetExtension(path), ".gif", StringComparison.OrdinalIgnoreCase) && maxSide == 0 && quarterTurns == 0)
         {
             // An animation reads its frames while it plays, so it gets a copy in memory that lives as long as the image.

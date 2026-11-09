@@ -424,14 +424,25 @@ public sealed partial class MainWindow : Window
 
     private void UpdatePreview()
     {
-        if (!Settings.ShowPreview || _active.IsSelectingWithMouse) return;
+        if (!Settings.ShowPreview || _active.IsSelectingWithMouse || IsViewerOpen) return;
         _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }
 
     internal void ShowViewer(IReadOnlyList<string> pictures, int index, FilePane source)
     {
+        _previewTimer.Stop();
+        Preview.StopBackgroundWork();
+        LeftPane.IsEnabled = RightPane.IsEnabled = false;
         Viewer.Open(pictures, index, source);
+    }
+
+    internal bool IsViewerOpen => Viewer.Visibility == Visibility.Visible;
+
+    internal void OnViewerClosed()
+    {
+        LeftPane.IsEnabled = RightPane.IsEnabled = true;
+        _previewTimer.Restart();
     }
 
     // ---------------------------------------------------------------- messages
@@ -1001,7 +1012,12 @@ public sealed partial class MainWindow : Window
     /// <summary>F8 moves the selection to the other pane. F7 (copy) comes through the keyboard hook instead.</summary>
     private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != VirtualKey.F8 || Viewer.Visibility == Visibility.Visible) return;
+        if (IsViewerOpen)
+        {
+            Viewer.HandleKey(e);
+            return;
+        }
+        if (e.Key != VirtualKey.F8) return;
         if (e.OriginalSource is TextBox or AutoSuggestBox or PasswordBox) return;
         _active.TransferToOtherPane(move: true);
         e.Handled = true;
