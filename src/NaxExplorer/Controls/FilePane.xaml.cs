@@ -435,6 +435,8 @@ public sealed partial class FilePane : UserControl
         }
         _tab.Selection = SelectedPaths.Take(500).ToList();
         ImageCache.ClearThumbnails();
+        // F5 recounts the folder sizes too, for changes deeper down that no watcher saw.
+        if (Folder is { } shown) FolderSizeCache.Shared.ForgetWithContents(shown);
         await LoadAsync();
     }
 
@@ -862,9 +864,18 @@ public sealed partial class FilePane : UserControl
             _all.Remove(item);
             _items.Remove(item);
         }
+        // Any change here makes the kept sizes of this folder and the folders above it wrong, but not those of the
+        // folders inside it. A changed or removed folder, which may have been replaced, takes the sizes kept for
+        // everything inside it along.
+        FolderSizeCache.Shared.Forget(_tab.Location);
         foreach (FileEntry changed in changes.Changed)
         {
+            if (changed.Kind == EntryKind.Folder) FolderSizeCache.Shared.ForgetWithContents(changed.FullPath);
             if (byPath.TryGetValue(changed.FullPath, out FileItem? item)) item.Update(changed);
+        }
+        foreach (FileEntry removed in changes.Removed)
+        {
+            if (removed.Kind == EntryKind.Folder) FolderSizeCache.Shared.ForgetWithContents(removed.FullPath);
         }
         Comparison<FileEntry> order = EntrySorter.Comparison(_tab.Sort, _tab.Descending);
         ItemStyle style = RowStyle;
@@ -989,7 +1000,7 @@ public sealed partial class FilePane : UserControl
     // Two workers are shared by all panes so a folder full of folders cannot flood the disk.
     private void UpdateVisibleFolderSizes()
     {
-        if (_closed || IsSelectingWithMouse || _tab.Search is not null || Folder is null) return;
+        if (_closed || IsSelectingWithMouse || _tab.Search is not null || Folder is not { } shown || !FolderSizeCache.CountsIn(shown)) return;
         var range = CurrentList.ItemsPanelRoot switch
         {
             ItemsStackPanel panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
@@ -1005,24 +1016,38 @@ public sealed partial class FilePane : UserControl
         {
             _folderSizeRequests[item].Cancel();
             _folderSizeRequests.Remove(item);
+            item.SetCountingSize(false);
         }
         foreach (FileItem item in visible)
         {
             if (item.HasFolderSize || _folderSizeRequests.ContainsKey(item)) continue;
+            // A folder counted a few minutes ago is not counted again.
+            if (FolderSizeCache.Shared.TryGet(item.Entry.FullPath, DateTime.UtcNow, out FolderSizeResult? known))
+            {
+                item.SetFolderSize(known);
+                continue;
+            }
+            item.SetCountingSize(true);
             var request = new CancellationTokenSource();
             _folderSizeRequests.Add(item, request);
-            _ = ReadFolderSizeAsync(item, request);
+            _ = ReadFolderSizeAsync(item, request, FolderSizeCache.Shared.Stamp);
         }
     }
 
     private void CancelFolderSizes()
     {
-        foreach (var request in _folderSizeRequests.Values) request.Cancel();
+        foreach (var (item, request) in _folderSizeRequests)
+        {
+            request.Cancel();
+            item.SetCountingSize(false);
+        }
         _folderSizeRequests.Clear();
         _folderSizeRange = (-1, -1);
     }
 
-    private async Task ReadFolderSizeAsync(FileItem item, CancellationTokenSource request)
+    /// <param name="startedAt">The cache's stamp before the count started, so a count overtaken by a change, such as a
+    /// copy into the folder that was still running, is shown but not kept.</param>
+    private async Task ReadFolderSizeAsync(FileItem item, CancellationTokenSource request, long startedAt)
     {
         FolderSizeResult? size = null;
         bool entered = false;
@@ -1042,7 +1067,12 @@ public sealed partial class FilePane : UserControl
             if (_folderSizeRequests.TryGetValue(item, out var active) && ReferenceEquals(active, request))
             {
                 _folderSizeRequests.Remove(item);
-                if (!request.IsCancellationRequested && !_closed) item.SetFolderSize(size);
+                if (!request.IsCancellationRequested && !_closed)
+                {
+                    item.SetFolderSize(size);
+                    FolderSizeCache.Shared.Remember(item.Entry.FullPath, size, DateTime.UtcNow, startedAt);
+                }
+                else item.SetCountingSize(false);
             }
             request.Dispose();
         }
@@ -1168,8 +1198,15 @@ public sealed partial class FilePane : UserControl
         // Correcting a click or updating a selection box can raise this once per row.
         // Recalculate the status and preview once after that batch, not for every item.
         if (_adjustingSelection) return;
+        // A click that selects one row, or a Ctrl+click that removes one, makes it the start of a later Shift+click
+        // range, as in Explorer. A range the list selected itself leaves the start where it was.
+        if (e.AddedItems is [FileItem added]) _clickAnchor = added;
+        else if (e.AddedItems.Count == 0 && e.RemovedItems is [FileItem removed] && Native.IsKeyDown(0x11)) _clickAnchor = removed;
         NotifySelectionChanged();
     }
+
+    /// <summary>The row a Shift+click selects from: the row last clicked or selected on its own.</summary>
+    private FileItem? _clickAnchor;
 
     private void NotifySelectionChanged()
     {
@@ -1474,9 +1511,40 @@ public sealed partial class FilePane : UserControl
                 if (_marqueePressedItem is { } pressed) list.SelectedItem = pressed;
             }
             finally { _adjustingSelection = false; }
+            if (_marqueePressedItem is { } clicked) _clickAnchor = clicked;
+        }
+        else if (!_marqueeShown && _marqueeKeep && _marqueeList is { } modified && _marqueePressedItem is { } target)
+        {
+            // The box took the press from the row, so a Ctrl or Shift click beside a row's name is applied here:
+            // Ctrl adds or removes the row, Shift selects the rows from the last clicked one to it.
+            ApplyModifiedClick(modified, target, shift: Native.IsKeyDown(0x10), control: Native.IsKeyDown(0x11));
         }
         EndMarquee();
         e.Handled = true;
+    }
+
+    private void ApplyModifiedClick(ListViewBase list, FileItem target, bool shift, bool control)
+    {
+        _adjustingSelection = true;
+        try
+        {
+            int to = _items.IndexOf(target);
+            // The anchor may belong to a list shown earlier; then the selected row stands in, as in the list itself.
+            FileItem? anchor = _clickAnchor is { } known && _items.Contains(known) ? known : list.SelectedItem as FileItem;
+            if (shift && anchor is not null && _items.IndexOf(anchor) is var from and >= 0 && to >= 0)
+            {
+                if (!control) list.SelectedItems.Clear();
+                list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(Math.Min(from, to), (uint)(Math.Abs(to - from) + 1)));
+                return;
+            }
+            if (list.SelectedItems.Contains(target)) list.SelectedItems.Remove(target);
+            else list.SelectedItems.Add(target);
+            _clickAnchor = target;
+        }
+        finally
+        {
+            _adjustingSelection = false;
+        }
     }
 
     private void EndMarquee()
@@ -1888,14 +1956,13 @@ public sealed partial class FilePane : UserControl
             return;
         }
         string originalPath = item.Entry.FullPath;
-        string renamedPath = Path.Combine(folder, name);
         PaneTab tab = _tab;
         _renaming = true;
         _refreshVersion++;
         try
         {
             await ShellActions.RenameAsync(originalPath, name, _owner.Hwnd);
-            FileEntry? renamed = await Task.Run(() => !caseOnly && Path.Exists(originalPath) ? null : DirectoryReader.ReadOne(renamedPath));
+            FileEntry? renamed = await Task.Run(() => !caseOnly && Path.Exists(originalPath) ? null : ReadAsOnDisk(folder, name));
             if (renamed is not null && !_closed && tab == _tab && PathTools.SameLocation(folder, _tab.Location))
                 ApplyRenamedRow(item, renamed);
         }
@@ -1937,6 +2004,25 @@ public sealed partial class FilePane : UserControl
         NotifySelectionChanged();
         _folderSizeRange = (-1, -1);
         UpdateVisibleFolderSizes();
+    }
+
+    /// <summary>
+    /// The item named <paramref name="name"/> in <paramref name="folder"/>, with its name spelled as on disk. After a
+    /// rename that only changes the case, the path alone cannot tell whether the rename happened, because Windows finds
+    /// the item under either spelling; the folder listing gives the spelling it really has.
+    /// </summary>
+    private static FileEntry? ReadAsOnDisk(string folder, string name)
+    {
+        try
+        {
+            // Asked of the one entry by its exact path, so even a folder with very many items is not listed.
+            string? actual = Native.NameOnDisk(Path.Combine(folder, name));
+            return actual is null ? null : DirectoryReader.ReadOne(Path.Combine(folder, actual));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
     }
 
     internal async void NewFolder()
@@ -2332,7 +2418,9 @@ public sealed partial class FilePane : UserControl
                 IReadOnlyList<IStorageItem> items = await e.DataView.GetStorageItemsAsync();
                 paths = items.Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
             }
-            bool move = DropPolicy.Moves(control, shift, paths, target);
+            // Decided from the same input as the pointer during the drag: the app's own paths. A drag from another
+            // program has none there, so it copies unless Shift was held, exactly as the pointer said.
+            bool move = DropPolicy.Moves(control, shift, internalPaths, target);
             if (paths.Count > 0) await CheckedTransfer(paths, target, move);
         }
         finally

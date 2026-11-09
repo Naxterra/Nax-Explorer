@@ -196,6 +196,42 @@ internal static class CoreTests
             Check.That(!ShellPlaces.OnlyExplorerShows("::{645FF040-5081-101B-9F08-00AA002F954E}"), "the Recycle Bin would be left to Explorer");
         });
 
+        yield return ("a_drag_from_another_program_copies_unless_shift_is_held", "A drop whose items the app did not start dragging itself is decided without their paths, as the pointer was, so it copies unless Shift is held; the app's own drag on one drive moves.", () =>
+        {
+            Check.That(!DropPolicy.Moves(control: false, shift: false, sources: null, @"C:\Target"), "a drag from another program moves without Shift");
+            Check.That(DropPolicy.Moves(control: false, shift: true, sources: null, @"C:\Target"), "Shift does not move a drag from another program");
+            Check.That(DropPolicy.Moves(control: false, shift: false, sources: [@"C:\Source\a.txt"], @"C:\Target"), "the app's own drag on the same drive copies");
+            Check.That(!DropPolicy.Moves(control: true, shift: false, sources: [@"C:\Source\a.txt"], @"C:\Target"), "Ctrl does not copy");
+        });
+
+        yield return ("folder_sizes_are_kept_for_a_while_forgotten_on_change_and_skipped_below_a_drive_root", "A counted folder size is reused within its lifetime and not after it, a change forgets the folder and the folders above it but keeps the folders inside it, a removed folder takes its contents along, a count overtaken by a change is not kept, and the folders right below a drive root are not counted automatically.", () =>
+        {
+            var cache = new FolderSizeCache(TimeSpan.FromMinutes(10));
+            var start = new DateTime(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc);
+            cache.Remember(@"C:\Data\Photos", new FolderSizeResult(1234, false), start, cache.Stamp);
+            cache.Remember(@"C:\Data", new FolderSizeResult(9999, false), start, cache.Stamp);
+            Check.That(cache.TryGet(@"c:\data\photos", start.AddMinutes(5), out FolderSizeResult? kept) && kept?.Bytes == 1234, "a size counted five minutes ago is counted again");
+            Check.That(!cache.TryGet(@"C:\Data\Photos", start.AddMinutes(11), out _), "a size older than its lifetime is still used");
+            cache.Remember(@"C:\Data\Photos\2026\Trip", new FolderSizeResult(50, false), start, cache.Stamp);
+            cache.Forget(@"C:\Data\Photos\2026");
+            Check.That(!cache.TryGet(@"C:\Data\Photos", start, out _) && !cache.TryGet(@"C:\Data", start, out _), "a folder above a change keeps its old size");
+            Check.That(cache.TryGet(@"C:\Data\Photos\2026\Trip", start, out _), "a file changing in a folder throws away the sizes of the folders inside it");
+            cache.Remember(@"C:\Old\A", new FolderSizeResult(5, false), start, cache.Stamp);
+            cache.ForgetWithContents(@"C:\Old");
+            Check.That(!cache.TryGet(@"C:\Old\A", start, out _), "a folder inside a removed folder keeps its old size");
+            long before = cache.Stamp;
+            cache.Forget(@"C:\Busy\Sub");
+            cache.Remember(@"C:\Busy\Sub", new FolderSizeResult(3, false), start, before);
+            cache.Remember(@"C:\Elsewhere", new FolderSizeResult(4, false), start, before);
+            Check.That(!cache.TryGet(@"C:\Busy\Sub", start, out _), "a count that a copy into the folder overtook is kept");
+            Check.That(cache.TryGet(@"C:\Elsewhere", start, out _), "a change in another folder drops an unrelated count");
+            cache.Remember(@"C:\Locked", null, start, cache.Stamp);
+            cache.Remember(@"C:\Partly", new FolderSizeResult(7, true), start, cache.Stamp);
+            Check.That(!cache.TryGet(@"C:\Locked", start, out _) && !cache.TryGet(@"C:\Partly", start, out _), "a failed or partial count is kept");
+            Check.That(!FolderSizeCache.CountsIn(@"C:\"), "the folders of a whole drive are counted automatically");
+            Check.That(FolderSizeCache.CountsIn(@"C:\Users"), "the folders of an ordinary folder are not counted");
+        });
+
         yield return ("a_conflict_that_appears_after_the_check_is_never_replaced_without_asking", "When no conflict was found and the user was not asked, an item whose name became taken in the meantime runs without 'replace', so Windows asks.", () =>
         {
             string from = Fixtures.TempFolder("late-from"), to = Fixtures.TempFolder("late-to");

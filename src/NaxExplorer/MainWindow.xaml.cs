@@ -667,7 +667,8 @@ public sealed partial class MainWindow : Window
         bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
         try
         {
-            List<string> paths = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) && value is string[] own ? [.. own] : [];
+            string[]? own = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) ? value as string[] : null;
+            List<string> paths = own is not null ? [.. own] : [];
             if (paths.Count == 0 && e.DataView.Contains(StandardDataFormats.StorageItems))
             {
                 paths = (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
@@ -679,7 +680,9 @@ public sealed partial class MainWindow : Window
                 if (files.Count > 0) await DeleteAsync(files, permanently: false);
                 return;
             }
-            bool move = DropPolicy.Moves(control, shift, paths, entry.Location);
+            // Decided from the same input as the pointer during the drag: the app's own paths. A drag from another
+            // program has none there, so it copies unless Shift was held, exactly as the pointer said.
+            bool move = DropPolicy.Moves(control, shift, own, entry.Location);
             if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None) return;
             await TransferAsync(paths, entry.Location, move);
         }
@@ -799,6 +802,11 @@ public sealed partial class MainWindow : Window
         if (batches.Count == 0) return true;
         string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
         bool completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
+        // The target and the folders above it grew, and an item of the same name there may have been replaced. Moved
+        // items are gone from where they were, with everything inside them. The target's other folders are unchanged.
+        ForgetFolderSizes(new[] { target }, withContents: false);
+        ForgetFolderSizes(paths.Select(p => Path.GetFileName(p.TrimEnd('\\'))).Where(n => n.Length > 0).Select(n => Path.Combine(target, n)), withContents: true);
+        if (move) ForgetFolderSizes(paths, withContents: true);
         RefreshPanesShowing(target);
         if (move)
         {
@@ -825,8 +833,22 @@ public sealed partial class MainWindow : Window
         }
         string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
         await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what), progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress));
+        ForgetFolderSizes(paths, withContents: true);
         foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
         return true;
+    }
+
+    /// <summary>
+    /// Drops the kept folder sizes a copy, move or delete at these places made wrong: each place and the folders above
+    /// it, and with <paramref name="withContents"/> also everything inside it.
+    /// </summary>
+    private static void ForgetFolderSizes(IEnumerable<string> places, bool withContents)
+    {
+        foreach (string place in places.Where(p => !PathTools.IsShellPlace(p)))
+        {
+            if (withContents) FolderSizeCache.Shared.ForgetWithContents(place);
+            else FolderSizeCache.Shared.Forget(place);
+        }
     }
 
     /// <summary>Runs one operation with its progress card; a failure ends up on the card instead of being thrown.</summary>

@@ -67,7 +67,9 @@ public sealed partial class FileItem : INotifyPropertyChanged
     public string SizeText => Entry.Kind switch
     {
         EntryKind.File => SizeFormat.Format(Entry.Size),
-        EntryKind.Folder => !HasFolderSize ? "…" : _folderSize is { } total
+        // "…" only while a count is really waiting or running; a folder that is never counted here, as in search
+        // results, a shell place or at a drive root, shows nothing instead of a count that never comes.
+        EntryKind.Folder => !HasFolderSize ? (_countingSize ? "…" : "") : _folderSize is { } total
             ? (total.IsPartial ? "≥ " : "") + SizeFormat.Format(total.Bytes) : "–",
         EntryKind.Drive when Entry.Size > 0 => Loc.F("DriveFree", SizeFormat.Format(Entry.FreeBytes), SizeFormat.Format(Entry.Size)),
         _ => "",
@@ -81,7 +83,18 @@ public sealed partial class FileItem : INotifyPropertyChanged
     {
         _folderSize = size;
         HasFolderSize = true;
+        _countingSize = false;
         Notify(nameof(SizeText));
+    }
+
+    private bool _countingSize;
+
+    /// <summary>Marks that the folder's size is being counted, so its size cell shows "…" until the count arrives.</summary>
+    internal void SetCountingSize(bool counting)
+    {
+        if (_countingSize == counting) return;
+        _countingSize = counting;
+        if (!HasFolderSize) Notify(nameof(SizeText));
     }
 
     public double Opacity => _isCut ? 0.45 : Entry.IsHidden ? 0.65 : 1;

@@ -377,6 +377,44 @@ internal static partial class Native
     [DllImport("shell32.dll")]
     public static extern void ILFree(IntPtr pidl);
 
+    /// <summary>The name of a file or folder spelled as on disk, found by its path alone; null when it does not exist.</summary>
+    public static string? NameOnDisk(string path)
+    {
+        // Without the long-path setting in the registry, Windows refuses paths over MAX_PATH unless they carry the
+        // \\?\ prefix, which .NET adds by itself for its own file calls but not for a direct call like this one.
+        string asked = path;
+        if (path.Length >= 260 && !path.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            string full = Path.GetFullPath(path);
+            asked = full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
+        }
+        IntPtr find = FindFirstFileEx(asked, 1 /* FindExInfoBasic */, out WIN32_FIND_DATA data, 0, IntPtr.Zero, 0);
+        if (find == new IntPtr(-1)) return null;
+        FindClose(find);
+        return data.cFileName;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WIN32_FIND_DATA
+    {
+        public uint dwFileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+        public uint dwReserved0;
+        public uint dwReserved1;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string cFileName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string cAlternateFileName;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindFirstFileExW")]
+    private static extern IntPtr FindFirstFileEx(string fileName, int infoLevel, out WIN32_FIND_DATA data, int searchOp, IntPtr filter, int flags);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool FindClose(IntPtr find);
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool ShellExecuteEx(ref SHELLEXECUTEINFO info);
 
