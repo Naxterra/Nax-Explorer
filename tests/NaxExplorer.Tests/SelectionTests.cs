@@ -1,4 +1,6 @@
 using NaxExplorer.Core;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 
 namespace NaxExplorer.Tests;
 
@@ -6,6 +8,59 @@ internal static class SelectionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("rename_repositions_one_row_without_resetting_large_list", "A rename that changes sort position preserves all 10,000 row instances and sends one Move notification instead of clearing or replacing the file list.", () =>
+        {
+            var rows = new ObservableCollection<RenameRow>(Enumerable.Range(0, 10_000).Select(i => new RenameRow(i.ToString("D5"))));
+            var before = rows.ToArray();
+            var notifications = new List<NotifyCollectionChangedAction>();
+            rows.CollectionChanged += (_, change) => notifications.Add(change.Action);
+            var renamed = rows[5];
+            renamed.Name = "99999";
+            int comparisons = 0;
+            ListingOrder.Reposition(rows, renamed, (a, b) => { comparisons++; return StringComparer.Ordinal.Compare(a.Name, b.Name); });
+            Check.That(ReferenceEquals(rows[^1], renamed), "renamed row did not move to its new sorted position");
+            Check.Sequence(before.Where(row => !ReferenceEquals(row, renamed)), rows.Take(rows.Count - 1));
+            Check.Sequence(new[] { NotifyCollectionChangedAction.Move }, notifications);
+            Check.That(comparisons < 20, "reordering scanned the full listing");
+            notifications.Clear();
+            ListingOrder.Reposition(rows, renamed, (a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
+            Check.Equal(0, notifications.Count);
+            renamed.Name = "-first";
+            ListingOrder.Reposition(rows, renamed, (a, b) => StringComparer.Ordinal.Compare(a.Name, b.Name));
+            Check.That(ReferenceEquals(rows[0], renamed), "rename towards the start failed");
+            Check.Sequence(new[] { NotifyCollectionChangedAction.Move }, notifications);
+        });
+
+        yield return ("rename_order_handles_reverse_sort_single_rows_and_missing_items", "Renamed rows respect descending order, and an empty list, single row or vanished row cannot reset the listing.", () =>
+        {
+            var first = new RenameRow("z");
+            var middle = new RenameRow("m");
+            var last = new RenameRow("a");
+            var rows = new ObservableCollection<RenameRow>([first, middle, last]);
+            middle.Name = "zz";
+            ListingOrder.Reposition(rows, middle, (a, b) => StringComparer.Ordinal.Compare(b.Name, a.Name));
+            Check.Sequence(new[] { middle, first, last }, rows);
+            ListingOrder.Reposition(rows, new RenameRow("missing"), (a, b) => 0);
+            var single = new ObservableCollection<RenameRow>([first]);
+            single.CollectionChanged += (_, _) => throw new Exception("single row changed");
+            ListingOrder.Reposition(single, first, (a, b) => 0);
+            ListingOrder.Reposition(new List<RenameRow>(), first, (a, b) => 0);
+        });
+
+        yield return ("drop_modifiers_override_drive_defaults_for_every_source", "Ctrl copies and Shift moves on the same or another drive; mixed-drive unmodified drops copy, and UNC roots compare without case sensitivity.", () =>
+        {
+            Check.That(DropPolicy.Moves(false, false, [@"C:\source\a"], @"C:\target"), "same-drive default should move");
+            Check.That(!DropPolicy.Moves(false, false, [@"C:\a", @"D:\b"], @"C:\target"), "mixed-drive sources should copy");
+            foreach (string target in new[] { @"C:\target", @"D:\target" })
+            {
+                Check.That(!DropPolicy.Moves(true, false, [@"C:\a"], target), "Ctrl did not force copy");
+                Check.That(DropPolicy.Moves(false, true, [@"C:\a"], target), "Shift did not force move");
+            }
+            Check.That(!DropPolicy.Moves(false, false, null, @"C:\target"), "unknown source should copy");
+            Check.That(DropPolicy.Moves(false, true, null, @"D:\target"), "external Shift drag lost its move choice");
+            Check.That(DropPolicy.Moves(false, false, [@"\\server\share\a"], @"\\SERVER\SHARE\b"), "same UNC share should move");
+            Check.That(!DropPolicy.Moves(false, false, [@"\\server\share\a"], @"\\server\other\b"), "different shares should copy");
+        });
         yield return ("marquee_input_coalesces_and_release_flushes_latest", "A burst of mouse messages produces one update at the newest point; cancellation discards pending work.", () =>
         {
             var input = new FrameInput<int>();
@@ -138,6 +193,8 @@ internal static class SelectionTests
             Check.That(CountedItem.HashCalls < 30_000, $"mouse movement scanned the large selection ({CountedItem.HashCalls} lookups)");
         });
     }
+
+    private sealed class RenameRow(string name) { public string Name { get; set; } = name; }
 
     private sealed record CountedItem(int Id)
     {

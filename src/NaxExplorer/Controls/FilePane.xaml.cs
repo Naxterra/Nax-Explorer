@@ -84,6 +84,9 @@ public sealed partial class FilePane : UserControl
     public FilePane()
     {
         InitializeComponent();
+        // Incremental rename/reorder updates must not animate the other rows out.
+        List.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+        Thumbs.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
         ContentArea.LayoutUpdated += (_, _) =>
         {
             if (_closed || _tab is null) return;
@@ -528,6 +531,7 @@ public sealed partial class FilePane : UserControl
     private async Task LoadAsync()
     {
         if (_closed) return;
+        _refreshVersion++;
         CancelFolderSizes();
         _loadCts?.Cancel();
         var cts = new CancellationTokenSource();
@@ -795,7 +799,9 @@ public sealed partial class FilePane : UserControl
     private async Task RefreshAsync()
     {
         if (_closed || _tab.Search is not null) return;
+        if (_renaming) return;
         if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
+        int refreshVersion = ++_refreshVersion;
         PaneTab tab = _tab;
         string location = tab.Location;
         ListingOptions listing = Listing;
@@ -815,7 +821,7 @@ public sealed partial class FilePane : UserControl
             if (tab == _tab && up is not null && !PathTools.SameLocation(up, location)) await NavigateAsync(up);
             return;
         }
-        if (_closed || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (_closed || refreshVersion != _refreshVersion || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
         if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         FolderChanges changes = FolderChanges.Compute(_entries, fresh);
         _entries = fresh;
@@ -1778,6 +1784,7 @@ public sealed partial class FilePane : UserControl
 
     internal void BeginRename()
     {
+        if (_renaming) return;
         if (SelectedItems is not [var item, ..] || item.Entry.Kind == EntryKind.Drive) return;
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
@@ -1792,6 +1799,8 @@ public sealed partial class FilePane : UserControl
     /// new folder would keep its default name before the user could type one.
     /// </summary>
     private long _renameStarted;
+    private bool _renaming;
+    private int _refreshVersion;
 
     private static readonly TimeSpan RenameSettleTime = TimeSpan.FromMilliseconds(1000);
 
@@ -1858,7 +1867,9 @@ public sealed partial class FilePane : UserControl
         if (!item.IsRenaming) return;
         item.IsRenaming = false;
         string name = text.Trim();
-        FocusList();
+        // Let x:Load remove the editor after its key/focus event has unwound.
+        // Forcing UpdateLayout here can recycle rows during the rename event.
+        FocusListSoon();
         if (name.Length == 0 || name == item.Entry.Name) return;
         NameProblem problem = NameRules.Check(name);
         if (problem != NameProblem.None)
@@ -1876,16 +1887,56 @@ public sealed partial class FilePane : UserControl
             _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
             return;
         }
-        _selectAfterRefresh = Path.Combine(folder, name);
+        string originalPath = item.Entry.FullPath;
+        string renamedPath = Path.Combine(folder, name);
+        PaneTab tab = _tab;
+        _renaming = true;
+        _refreshVersion++;
         try
         {
-            await ShellActions.RenameAsync(item.Entry.FullPath, name, _owner.Hwnd);
+            await ShellActions.RenameAsync(originalPath, name, _owner.Hwnd);
+            FileEntry? renamed = await Task.Run(() => !caseOnly && Path.Exists(originalPath) ? null : DirectoryReader.ReadOne(renamedPath));
+            if (renamed is not null && !_closed && tab == _tab && PathTools.SameLocation(folder, _tab.Location))
+                ApplyRenamedRow(item, renamed);
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
         {
             _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
+        finally
+        {
+            _renaming = false;
+        }
         await RefreshAsync();
+    }
+
+    private void ApplyRenamedRow(FileItem item, FileEntry renamed)
+    {
+        FileEntry previous = item.Entry;
+        int entryIndex = _entries.FindIndex(entry => PathTools.SameLocation(entry.FullPath, previous.FullPath));
+        if (entryIndex < 0 || !_all.Contains(item)) return;
+        _entries[entryIndex] = renamed;
+        if (_folderSizeRequests.Remove(item, out var folderSize)) folderSize.Cancel();
+        item.Update(renamed);
+        Comparison<FileEntry> order = EntrySorter.Comparison(_tab.Sort, _tab.Descending);
+        Comparison<FileItem> rows = (left, right) => order(left.Entry, right.Entry);
+        ListingOrder.Reposition(_all, item, rows);
+        if (_filter.Length == 0 || Matches(renamed))
+        {
+            if (_items.Contains(item)) ListingOrder.Reposition(_items, item, rows);
+            else _items.Insert(SortedIndex(_items, renamed, order), item);
+            CurrentList.SelectedItem = item;
+        }
+        else _items.Remove(item);
+        if (item.IsRealized)
+        {
+            ImageCache.RequestIcon(item, IconPixels, DispatcherQueue);
+            if (CurrentList == Thumbs) ImageCache.RequestThumbnail(item, ThumbnailPixels, DispatcherQueue);
+        }
+        _owner.OnPaneContentsChanged(_tab.Location, new FolderChanges([previous], [renamed], []));
+        NotifySelectionChanged();
+        _folderSizeRange = (-1, -1);
+        UpdateVisibleFolderSizes();
     }
 
     internal async void NewFolder()
@@ -2260,10 +2311,8 @@ public sealed partial class FilePane : UserControl
     /// <summary>Explorer's rule: Shift moves, Ctrl copies, otherwise items on the same drive move and others copy.</summary>
     private static bool DropMoves(DragEventArgs e, string[]? sources, string target)
     {
-        if (e.Modifiers.HasFlag(DragDropModifiers.Shift)) return true;
-        if (e.Modifiers.HasFlag(DragDropModifiers.Control)) return false;
-        if (sources is not { Length: > 0 }) return false;
-        return string.Equals(Path.GetPathRoot(sources[0]), Path.GetPathRoot(target), StringComparison.OrdinalIgnoreCase);
+        return DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
+            e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, target);
     }
 
     private async void Content_Drop(object sender, DragEventArgs e)
@@ -2271,6 +2320,9 @@ public sealed partial class FilePane : UserControl
         string? target = DropTarget(e);
         if (target is null) return;
         DragOperationDeferral deferral = e.GetDeferral();
+        // Capture the user's choice before awaiting external storage-item resolution.
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
         try
         {
             string[]? internalPaths = e.DataView.Properties.TryGetValue(InternalDragFormat, out object? value) ? value as string[] : null;
@@ -2280,7 +2332,7 @@ public sealed partial class FilePane : UserControl
                 IReadOnlyList<IStorageItem> items = await e.DataView.GetStorageItemsAsync();
                 paths = items.Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
             }
-            bool move = DropMoves(e, internalPaths ?? [.. paths], target);
+            bool move = DropPolicy.Moves(control, shift, paths, target);
             if (paths.Count > 0) await CheckedTransfer(paths, target, move);
         }
         finally

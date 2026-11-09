@@ -9,6 +9,22 @@ internal static class ShellTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("native_rename_preserves_payload_and_unrelated_siblings", "Renaming a generated file and folder through the Windows shell changes their names while sibling contents and modification times remain intact.", () =>
+        {
+            string root = Fixtures.TempFolder("native-rename");
+            string source = Fixtures.Write(root, "before.txt", "rename payload");
+            string sibling = Fixtures.Write(root, "sibling.txt", "unrelated payload");
+            DateTime stamp = File.GetLastWriteTimeUtc(sibling);
+            ShellActions.RenameAsync(source, "after.txt", IntPtr.Zero).GetAwaiter().GetResult();
+            Check.That(!File.Exists(source), "old file name remained");
+            Check.Equal("rename payload", File.ReadAllText(Path.Combine(root, "after.txt")));
+            Fixtures.Write(root, @"old-folder\nested.txt", "nested payload");
+            ShellActions.RenameAsync(Path.Combine(root, "old-folder"), "new-folder", IntPtr.Zero).GetAwaiter().GetResult();
+            Check.Equal("nested payload", File.ReadAllText(Path.Combine(root, @"new-folder\nested.txt")));
+            Check.Equal("unrelated payload", File.ReadAllText(sibling));
+            Check.Equal(stamp, File.GetLastWriteTimeUtc(sibling));
+        });
+
         yield return ("virtual_navigation_revokes_the_previous_folder_registration", "After a registered folder window navigates to This PC, Show in folder cannot find it under its old filesystem path.", () => OnSta(() =>
         {
             IntPtr window = Native.CreateWindowEx(0, "STATIC", "Folder registration test", 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);

@@ -649,7 +649,9 @@ public sealed partial class MainWindow : Window
         }
         if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
         {
-            bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
+            string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+            bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
+                e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, entry.Location);
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", entry.Label);
             return;
@@ -661,6 +663,8 @@ public sealed partial class MainWindow : Window
     {
         if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry)) return;
         DragOperationDeferral deferral = e.GetDeferral();
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
         try
         {
             List<string> paths = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) && value is string[] own ? [.. own] : [];
@@ -675,7 +679,7 @@ public sealed partial class MainWindow : Window
                 if (files.Count > 0) await DeleteAsync(files, permanently: false);
                 return;
             }
-            bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
+            bool move = DropPolicy.Moves(control, shift, paths, entry.Location);
             if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None) return;
             await TransferAsync(paths, entry.Location, move);
         }
