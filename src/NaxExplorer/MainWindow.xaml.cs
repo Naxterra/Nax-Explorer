@@ -275,6 +275,34 @@ public sealed partial class MainWindow : Window
 
     // ---------------------------------------------------------------- panes
 
+    private FilePane? _mouseDragSource;
+
+    internal Windows.Foundation.Point MouseDragPoint(PointerRoutedEventArgs e) => e.GetCurrentPoint(Root).Position;
+
+    internal bool UpdateMouseFileDrag(FilePane source, FileDragSession drag, Windows.Foundation.Point point, bool modifiersOnly = false)
+    {
+        _mouseDragSource = source;
+        bool outside = point.X < 0 || point.Y < 0 || point.X > Root.ActualWidth || point.Y > Root.ActualHeight;
+        string? target = modifiersOnly ? drag.Target
+            : LeftPane.MouseDropTarget(point, Root) ?? RightPane.MouseDropTarget(point, Root);
+        drag.Hover(outside ? null : target, Native.IsPhysicalKeyDown(0x11), Native.IsPhysicalKeyDown(0x10));
+        string caption = drag.Choice is { } choice
+            ? Loc.F(choice.Move ? "DropMove" : "DropCopy", FilePane.PlaceName(choice.Target)) + "  ·  " + Loc.F("ItemCount", drag.Sources.Count)
+            : "×  " + Loc.F("ItemCount", drag.Sources.Count);
+        if (MouseDragText.Text != caption) MouseDragText.Text = caption;
+        MouseDragTransform.X = Math.Clamp(point.X + 14, 0, Math.Max(0, Root.ActualWidth - Math.Max(160, MouseDragBadge.ActualWidth)));
+        MouseDragTransform.Y = Math.Clamp(point.Y + 18, 0, Math.Max(0, Root.ActualHeight - 45));
+        MouseDragBadge.Visibility = outside ? Visibility.Collapsed : Visibility.Visible;
+        return outside;
+    }
+
+    internal void EndMouseFileDrag(FilePane source)
+    {
+        if (_mouseDragSource != source) return;
+        _mouseDragSource = null;
+        MouseDragBadge.Visibility = Visibility.Collapsed;
+    }
+
     internal void SetActivePane(FilePane pane)
     {
         if (pane.Visibility != Visibility.Visible) return;
@@ -358,7 +386,7 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneSelectionChanged(FilePane pane)
     {
-        if (pane != _active || pane.IsSelectingWithMouse) return;
+        if (pane != _active || pane.IsSelectingWithMouse || LeftPane.IsDraggingItems || RightPane.IsDraggingItems) return;
         // Retire the old read now, before the debounce timer can fire. Its text or
         // bitmap must not land during the user's next click and block that paint.
         Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
@@ -424,7 +452,7 @@ public sealed partial class MainWindow : Window
 
     private void UpdatePreview()
     {
-        if (!Settings.ShowPreview || _active.IsSelectingWithMouse || IsViewerOpen) return;
+        if (!Settings.ShowPreview || _active.IsSelectingWithMouse || LeftPane.IsDraggingItems || RightPane.IsDraggingItems || IsViewerOpen) return;
         _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }
@@ -650,8 +678,8 @@ public sealed partial class MainWindow : Window
         if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
         {
             string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
-            bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
-                e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, entry.Location);
+            bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11),
+                e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10), sources, entry.Location);
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", entry.Label);
             return;
@@ -663,8 +691,8 @@ public sealed partial class MainWindow : Window
     {
         if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry)) return;
         DragOperationDeferral deferral = e.GetDeferral();
-        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
-        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
         try
         {
             string[]? own = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) ? value as string[] : null;
@@ -1038,6 +1066,12 @@ public sealed partial class MainWindow : Window
     /// <summary>F8 moves the selection to the other pane. F7 (copy) comes through the keyboard hook instead.</summary>
     private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Key == VirtualKey.Escape && _mouseDragSource is { } dragging)
+        {
+            dragging.CancelMouseFileDrag();
+            e.Handled = true;
+            return;
+        }
         if (IsViewerOpen)
         {
             Viewer.HandleKey(e);

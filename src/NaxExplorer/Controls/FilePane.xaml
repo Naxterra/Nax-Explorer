@@ -30,7 +30,7 @@
             </ResourceDictionary.ThemeDictionaries>
         <!-- One row of the details view. Column widths are set from code, so the header and the rows line up. -->
         <DataTemplate x:Key="DetailsTemplate" x:DataType="m:FileItem">
-            <Grid Height="30" Opacity="{x:Bind Opacity, Mode=OneWay}">
+            <Grid Height="30" Background="Transparent" Opacity="{x:Bind Opacity, Mode=OneWay}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="28" />
                     <ColumnDefinition Width="*" />
@@ -80,7 +80,7 @@
 
         <!-- A search result: name with the ways it matched, the text around the match, and its folder. -->
         <DataTemplate x:Key="ResultTemplate" x:DataType="m:FileItem">
-            <Grid MinHeight="46" Padding="0,5" Opacity="{x:Bind Opacity, Mode=OneWay}">
+            <Grid MinHeight="46" Padding="0,5" Background="Transparent" Opacity="{x:Bind Opacity, Mode=OneWay}">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="28" />
                     <ColumnDefinition Width="*" />
@@ -256,11 +256,13 @@
             <ListView x:Name="List" SelectionMode="Extended" IsItemClickEnabled="False" ItemTemplate="{StaticResource DetailsTemplate}"
                       ItemContainerStyle="{StaticResource CompactListViewItemStyle}" Padding="4,2,4,8"
                       CanDragItems="True" DragItemsStarting="List_DragItemsStarting" DragItemsCompleted="List_DragItemsCompleted"
+                      AllowDrop="True" DragOver="Content_DragOver" Drop="Content_Drop"
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
                       DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived"
                       PreviewKeyDown="List_KeyDown" />
             <GridView x:Name="Thumbs" Visibility="Collapsed" SelectionMode="Extended" IsItemClickEnabled="False" ItemTemplate="{StaticResource ThumbnailTemplate}"
                       Padding="8,4,8,8" CanDragItems="True" DragItemsStarting="List_DragItemsStarting" DragItemsCompleted="List_DragItemsCompleted"
+                      AllowDrop="True" DragOver="Content_DragOver" Drop="Content_Drop"
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
                       DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived" PreviewKeyDown="List_KeyDown" />
             <!-- The selection box drawn while the mouse is dragged over the empty part of the list. -->
