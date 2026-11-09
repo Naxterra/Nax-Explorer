@@ -99,9 +99,9 @@ public sealed partial class FilePane : UserControl
         _flushTimer.SafeTick(FlushHits);
         // The list marks pointer presses as handled, so the pane listens to handled ones too, to know it is active.
         Root.AddHandler(PointerPressedEvent, new PointerEventHandler(Root_PointerPressed), handledEventsToo: true);
-        List.AddHandler(KeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
         foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
         {
+            list.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
             list.AddHandler(PointerPressedEvent, new PointerEventHandler(List_PointerPressedAny), handledEventsToo: true);
             list.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
         }
@@ -569,7 +569,7 @@ public sealed partial class FilePane : UserControl
         }
         if (cts.IsCancellationRequested || tab != _tab || !ReferenceEquals(location, tab.Location)) return;
         _entries = entries;
-        _owner.OnPaneContentsChanged();
+        _owner.OnPaneReloaded(this);
         ShowEntries(tab.Selection);
         if (error is not null) ShowEmpty("", error);
         StartWatcher(location);
@@ -819,7 +819,7 @@ public sealed partial class FilePane : UserControl
         _entries = fresh;
         if (!changes.IsEmpty)
         {
-            _owner.OnPaneContentsChanged();
+            _owner.OnPaneContentsChanged(location, changes);
             if (changes.Added.Count + changes.Removed.Count > 400)
             {
                 ShowEntries(SelectedPaths.ToList());
@@ -1550,6 +1550,9 @@ public sealed partial class FilePane : UserControl
 
     private void List_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // Preview routing reaches us before ListView consumes Enter as its own
+        // activation key. Embedded editors must retain their normal commit keys.
+        if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         bool shift = Native.IsKeyDown(0x10), ctrl = Native.IsKeyDown(0x11), alt = Native.IsKeyDown(0x12);
         switch (e.Key)
         {
@@ -1583,12 +1586,20 @@ public sealed partial class FilePane : UserControl
     /// <summary>Space opens the selected picture in the viewer, before the list uses Space for selection.</summary>
     private void List_PreviewSpace(object sender, KeyRoutedEventArgs e)
     {
+        if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         if (e.Key != VirtualKey.Space || Native.IsKeyDown(0x11) || _typed.Length > 0 && DateTime.UtcNow - _typedAt < TimeSpan.FromSeconds(1)) return;
         if (SelectedItems is [{ Entry.Kind: EntryKind.File } item] && FileTypes.IsViewerImage(item.Entry.Extension))
         {
             ShowInViewer(item);
             e.Handled = true;
         }
+    }
+
+    private static bool KeyIsInsideEditor(DependencyObject? source, DependencyObject? list)
+    {
+        for (var node = source; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+            if (node is TextBox or AutoSuggestBox or PasswordBox or RichEditBox or ButtonBase) return true;
+        return false;
     }
 
     /// <summary>Typing letters jumps to the first name that starts with them.</summary>

@@ -286,7 +286,11 @@ public sealed partial class MainWindow : Window
         {
             UpdateTitle();
             if (pane.IsSelectingWithMouse) OnPaneMouseSelectionStarted(pane);
-            else _previewTimer.Restart();
+            else
+            {
+                Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
+                _previewTimer.Restart();
+            }
             _shellWindow?.Navigated(pane.Location);
         }
     }
@@ -340,6 +344,7 @@ public sealed partial class MainWindow : Window
     internal void OnPaneLocationChanged(FilePane pane)
     {
         if (pane != _active) return;
+        Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
         UpdateTitle();
         _shellWindow?.Navigated(pane.Location);
         // Another tab or folder in the active pane: the details panel shows that folder now. The address bar reports
@@ -353,7 +358,11 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneSelectionChanged(FilePane pane)
     {
-        if (pane == _active && !pane.IsSelectingWithMouse) _previewTimer.Restart();
+        if (pane != _active || pane.IsSelectingWithMouse) return;
+        // Retire the old read now, before the debounce timer can fire. Its text or
+        // bitmap must not land during the user's next click and block that paint.
+        Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
+        _previewTimer.Restart();
     }
 
     internal void OnPaneMouseSelectionStarted(FilePane pane)
@@ -377,7 +386,7 @@ public sealed partial class MainWindow : Window
     {
         foreach (MainWindow window in App.Instance!.Windows)
         {
-            window.InvalidatePreviewTotals();
+            window.InvalidatePreviewTotals(folder);
             foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
             {
                 if (pane.Folder is { } shown && PathTools.SameLocation(shown, folder)) pane.ScheduleRefresh();
@@ -385,17 +394,26 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    internal void OnPaneContentsChanged()
+    internal void OnPaneContentsChanged(string folder, FolderChanges changes)
     {
         // Recursive totals can describe an ancestor of the changed folder, including in another window.
-        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals();
+        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals(folder, changes);
     }
 
-    private void InvalidatePreviewTotals()
+    internal void OnPaneReloaded(FilePane pane)
     {
-        Preview.InvalidateTotals();
+        // Opening or reloading another pane is not a change to this window's selected file.
+        if (pane != _active) return;
+        Preview.Reload();
         _previewTimer.Restart();
     }
+
+    private void InvalidatePreviewTotals(string folder, FolderChanges? changes = null)
+    {
+        if (Preview.InvalidateTotals(folder, changes)) _previewTimer.Restart();
+    }
+
+    internal void RefreshPreviewSoon() => _previewTimer.Restart();
 
     internal void SetCutPaths(IReadOnlyList<string> paths)
     {
