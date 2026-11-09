@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:NaxExplorer">
 
-    <Grid x:Name="Root" Background="{ThemeResource ViewerBackgroundBrush}" KeyDown="Root_KeyDown" IsTabStop="True" TabFocusNavigation="Cycle">
+    <Grid x:Name="Root" Background="{ThemeResource ViewerBackgroundBrush}" IsTabStop="True" TabFocusNavigation="Cycle">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />

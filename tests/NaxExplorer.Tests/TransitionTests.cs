@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using NaxExplorer.Core;
 using NaxExplorer.Search;
+using Windows.System;
 
 namespace NaxExplorer.Tests;
 
@@ -8,6 +9,34 @@ internal static class TransitionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("viewer_shortcuts_take_navigation_before_scroll_controls", "Arrow keys, page keys and Escape select viewer commands even when a toolbar control has focus; the closed viewer cannot intercept file-list keys.", () =>
+        {
+            foreach (bool button in new[] { false, true })
+            {
+                Check.Equal(ViewerCommand.Previous, ViewerKeyboard.Command(VirtualKey.Left, true, button));
+                Check.Equal(ViewerCommand.Next, ViewerKeyboard.Command(VirtualKey.Right, true, button));
+                Check.Equal(ViewerCommand.Previous, ViewerKeyboard.Command(VirtualKey.PageUp, true, button));
+                Check.Equal(ViewerCommand.Next, ViewerKeyboard.Command(VirtualKey.PageDown, true, button));
+                Check.Equal(ViewerCommand.Close, ViewerKeyboard.Command(VirtualKey.Escape, true, button));
+            }
+            foreach (VirtualKey key in new[] { VirtualKey.Left, VirtualKey.Right, VirtualKey.Escape, VirtualKey.Enter, VirtualKey.Delete })
+                Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(key, false));
+        });
+
+        yield return ("viewer_toolbar_activation_and_system_chords_keep_their_meaning", "Toolbar Enter and Space activate their focused command; Alt or Ctrl shortcuts and Tab are not mistaken for picture navigation.", () =>
+        {
+            Check.Equal(ViewerCommand.OpenExternal, ViewerKeyboard.Command(VirtualKey.Enter, true));
+            Check.Equal(ViewerCommand.Next, ViewerKeyboard.Command(VirtualKey.Space, true));
+            Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(VirtualKey.Enter, true, buttonFocused: true));
+            Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(VirtualKey.Space, true, buttonFocused: true));
+            foreach (VirtualKey key in new[] { VirtualKey.F4, VirtualKey.Left, VirtualKey.Right, VirtualKey.R, VirtualKey.Delete })
+            {
+                Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(key, true, control: true));
+                Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(key, true, alt: true));
+            }
+            Check.Equal(ViewerCommand.None, ViewerKeyboard.Command(VirtualKey.Tab, true));
+        });
+
         yield return ("viewer_reopen_waits_for_observed_zoom_and_offsets", "Reopening after custom zoom or a hidden DPI change retries an ignored reset until the actual zoom and pan settle; a user zoom cancels the pending reset.", () =>
         {
             var reset = new ViewResetState();

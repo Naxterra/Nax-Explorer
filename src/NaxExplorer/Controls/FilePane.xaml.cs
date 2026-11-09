@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Numerics;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Text;
@@ -9,6 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using NaxExplorer.Core;
 using NaxExplorer.Models;
@@ -62,12 +65,16 @@ public sealed partial class FilePane : UserControl
     private string _freeSpace = "";
     private bool _switchingTabs;
     private bool _closed;
-    private readonly Dictionary<ListViewBase, HashSet<SelectorItem>> _realizedRows = [];
+    private static readonly SemaphoreSlim FolderSizeSlots = new(2);
+    private readonly Dictionary<FileItem, CancellationTokenSource> _folderSizeRequests = [];
+    private (int First, int Last) _folderSizeRange = (-1, -1);
+    private double _headerRowWidth = -1, _headerPaneWidth = -1;
 
     /// <summary>Closed windows release their watchers and searches while the app continues in the background.</summary>
     internal void StopBackgroundWork()
     {
         _closed = true;
+        CancelFolderSizes();
         _loadCts?.Cancel();
         CancelSearch();
         StopWatcher();
@@ -77,6 +84,15 @@ public sealed partial class FilePane : UserControl
     public FilePane()
     {
         InitializeComponent();
+        // Incremental rename/reorder updates must not animate the other rows out.
+        List.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+        Thumbs.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+        ContentArea.LayoutUpdated += (_, _) =>
+        {
+            if (_closed || _tab is null) return;
+            AlignColumnHeader();
+            UpdateVisibleFolderSizes();
+        };
         _refreshTimer = DispatcherQueue.CreateTimer();
         _refreshTimer.Interval = TimeSpan.FromMilliseconds(250);
         _refreshTimer.IsRepeating = false;
@@ -86,14 +102,27 @@ public sealed partial class FilePane : UserControl
         _flushTimer.SafeTick(FlushHits);
         // The list marks pointer presses as handled, so the pane listens to handled ones too, to know it is active.
         Root.AddHandler(PointerPressedEvent, new PointerEventHandler(Root_PointerPressed), handledEventsToo: true);
-        List.AddHandler(KeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
         foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
         {
-            list.AddHandler(PointerPressedEvent, new PointerEventHandler(List_PointerPressedAny), handledEventsToo: true);
+            list.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
             list.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
-            list.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
-            list.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
         }
+        ContentArea.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
+        ContentArea.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
+        ContentArea.PointerCanceled += (_, e) =>
+        {
+            if (ReferenceEquals(e.OriginalSource, ContentArea)) EndMarquee();
+        };
+        ContentArea.PointerCaptureLost += (_, e) =>
+        {
+            // Taking capture from a child also raises its lost event through this parent.
+            // Only loss by the gesture's owner ends our selection.
+            if (ReferenceEquals(e.OriginalSource, ContentArea))
+            {
+                _selectionTrace?.Record("capture-lost", Stopwatch.GetTimestamp());
+                EndMarquee();
+            }
+        };
     }
 
     // ---------------------------------------------------------------- public surface
@@ -176,6 +205,7 @@ public sealed partial class FilePane : UserControl
 
     internal void FocusList()
     {
+        if (_owner?.IsViewerOpen == true) return;
         ListViewBase list = CurrentList;
         // Right after the list was filled its rows do not exist yet; a layout pass creates them, so one can take focus.
         list.UpdateLayout();
@@ -501,6 +531,8 @@ public sealed partial class FilePane : UserControl
     private async Task LoadAsync()
     {
         if (_closed) return;
+        _refreshVersion++;
+        CancelFolderSizes();
         _loadCts?.Cancel();
         var cts = new CancellationTokenSource();
         _loadCts = cts;
@@ -541,7 +573,7 @@ public sealed partial class FilePane : UserControl
         }
         if (cts.IsCancellationRequested || tab != _tab || !ReferenceEquals(location, tab.Location)) return;
         _entries = entries;
-        _owner.OnPaneContentsChanged();
+        _owner.OnPaneReloaded(this);
         ShowEntries(tab.Selection);
         if (error is not null) ShowEmpty("", error);
         StartWatcher(location);
@@ -600,6 +632,9 @@ public sealed partial class FilePane : UserControl
 
     private void BindList()
     {
+        EndMarquee();
+        CancelFolderSizes();
+        _headerRowWidth = -1;
         bool thisPc = PathTools.IsThisPc(_tab.Location) && _tab.Search is null;
         bool thumbs = CurrentList == Thumbs;
         List.ItemTemplate = (DataTemplate)Resources[_tab.Search is not null ? "ResultTemplate" : thisPc ? "DriveTemplate" : "DetailsTemplate"];
@@ -680,6 +715,14 @@ public sealed partial class FilePane : UserControl
         }
         EngineBadge.Visibility = Visibility.Collapsed;
         var parts = new List<string> { Loc.F("ItemCount", _items.Count) };
+        if (IsSelectingWithMouse)
+        {
+            long count = (_marqueeList?.SelectedRanges.Sum(range => (long)range.Length)) ?? 0;
+            if (count > 0) parts.Add(Loc.F("Selected", count));
+            if (_freeSpace.Length > 0) parts.Add(_freeSpace);
+            StatusText.Text = string.Join("   ·   ", parts);
+            return;
+        }
         IReadOnlyList<FileItem> selected = SelectedItems;
         if (selected.Count > 0)
         {
@@ -756,6 +799,9 @@ public sealed partial class FilePane : UserControl
     private async Task RefreshAsync()
     {
         if (_closed || _tab.Search is not null) return;
+        if (_renaming) return;
+        if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
+        int refreshVersion = ++_refreshVersion;
         PaneTab tab = _tab;
         string location = tab.Location;
         ListingOptions listing = Listing;
@@ -775,12 +821,13 @@ public sealed partial class FilePane : UserControl
             if (tab == _tab && up is not null && !PathTools.SameLocation(up, location)) await NavigateAsync(up);
             return;
         }
-        if (_closed || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (_closed || refreshVersion != _refreshVersion || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         FolderChanges changes = FolderChanges.Compute(_entries, fresh);
         _entries = fresh;
         if (!changes.IsEmpty)
         {
-            _owner.OnPaneContentsChanged();
+            _owner.OnPaneContentsChanged(location, changes);
             if (changes.Added.Count + changes.Removed.Count > 400)
             {
                 ShowEntries(SelectedPaths.ToList());
@@ -803,6 +850,10 @@ public sealed partial class FilePane : UserControl
 
     private void ApplyChanges(FolderChanges changes)
     {
+        // A watcher update can shift every subsequent item index. Finish the gesture
+        // before applying it so queued pointer input cannot select different files.
+        EndMarquee();
+        CancelFolderSizes();
         var byPath = new Dictionary<string, FileItem>(StringComparer.OrdinalIgnoreCase);
         foreach (FileItem item in _all) byPath[item.Entry.FullPath] = item;
         foreach (FileEntry removed in changes.Removed)
@@ -923,6 +974,80 @@ public sealed partial class FilePane : UserControl
 
     // ---------------------------------------------------------------- column widths
 
+    private void AlignColumnHeader()
+    {
+        if (ColumnHeader.Visibility != Visibility.Visible || List.ItemsPanelRoot is not ItemsStackPanel panel) return;
+        if (List.ContainerFromIndex(Math.Max(0, panel.FirstVisibleIndex)) is not SelectorItem { ContentTemplateRoot: Grid row } || row.ActualWidth <= 0) return;
+        if (_headerRowWidth == row.ActualWidth && _headerPaneWidth == ContentArea.ActualWidth) return;
+        double left = row.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
+        ColumnHeader.Margin = new Thickness(left, 0, Math.Max(0, ContentArea.ActualWidth - left - row.ActualWidth), 0);
+        _headerRowWidth = row.ActualWidth;
+        _headerPaneWidth = ContentArea.ActualWidth;
+    }
+
+    // Only on-screen folders are counted; scrolling/navigation cancels obsolete work.
+    // Two workers are shared by all panes so a folder full of folders cannot flood the disk.
+    private void UpdateVisibleFolderSizes()
+    {
+        if (_closed || IsSelectingWithMouse || _tab.Search is not null || Folder is null) return;
+        var range = CurrentList.ItemsPanelRoot switch
+        {
+            ItemsStackPanel panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            ItemsWrapGrid panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            _ => (-1, -1),
+        };
+        if (range == _folderSizeRange) return;
+        _folderSizeRange = range;
+        var visible = new HashSet<FileItem>();
+        for (int i = Math.Max(0, range.Item1); i <= Math.Min(_items.Count - 1, range.Item2); i++)
+            if (_items[i].Entry.Kind == EntryKind.Folder) visible.Add(_items[i]);
+        foreach (var item in _folderSizeRequests.Keys.Where(item => !visible.Contains(item)).ToArray())
+        {
+            _folderSizeRequests[item].Cancel();
+            _folderSizeRequests.Remove(item);
+        }
+        foreach (FileItem item in visible)
+        {
+            if (item.HasFolderSize || _folderSizeRequests.ContainsKey(item)) continue;
+            var request = new CancellationTokenSource();
+            _folderSizeRequests.Add(item, request);
+            _ = ReadFolderSizeAsync(item, request);
+        }
+    }
+
+    private void CancelFolderSizes()
+    {
+        foreach (var request in _folderSizeRequests.Values) request.Cancel();
+        _folderSizeRequests.Clear();
+        _folderSizeRange = (-1, -1);
+    }
+
+    private async Task ReadFolderSizeAsync(FileItem item, CancellationTokenSource request)
+    {
+        FolderSizeResult? size = null;
+        bool entered = false;
+        try
+        {
+            await FolderSizeSlots.WaitAsync(request.Token);
+            entered = true;
+            size = await Task.Run(() => FolderSizeReader.Measure(item.Entry.FullPath, request.Token), request.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or OverflowException) { }
+        finally
+        {
+            if (entered) FolderSizeSlots.Release();
+            // This continuation is back on the UI thread. A late count cannot update a
+            // recycled row or replace a newer request for the same item.
+            if (_folderSizeRequests.TryGetValue(item, out var active) && ReferenceEquals(active, request))
+            {
+                _folderSizeRequests.Remove(item);
+                if (!request.IsCancellationRequested && !_closed) item.SetFolderSize(size);
+            }
+            request.Dispose();
+        }
+    }
+
     private (double Date, double Type, double Size) _columns = (130, 130, 90);
 
     /// <summary>
@@ -931,6 +1056,8 @@ public sealed partial class FilePane : UserControl
     /// </summary>
     private void ContentArea_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        EndMarquee();
+        _marqueeBoundsDirty = true;
         double available = e.NewSize.Width - 28 - 40;
         double date = 125, type = 130, size = 80;
         if (available - date - type - size < 220) type = 0;
@@ -1000,15 +1127,13 @@ public sealed partial class FilePane : UserControl
 
     private void List_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        if (!_realizedRows.TryGetValue(sender, out var rows)) _realizedRows[sender] = rows = [];
+        _marqueeBoundsDirty = true;
         if (args.InRecycleQueue)
         {
-            rows.Remove(args.ItemContainer);
             if (args.Item is FileItem recycled) recycled.IsRealized = false;
             return;
         }
         if (args.Item is not FileItem item) return;
-        rows.Add(args.ItemContainer);
         item.IsRealized = true;
         if (sender == List && !PathTools.IsThisPc(_tab.Location) && args.ItemContainer.ContentTemplateRoot is Grid row) ApplyColumns(row);
         ImageCache.RequestIcon(item, PathTools.IsThisPc(_tab.Location) ? IconPixels * 3 / 2 : IconPixels, DispatcherQueue);
@@ -1043,7 +1168,6 @@ public sealed partial class FilePane : UserControl
         // Correcting a click or updating a selection box can raise this once per row.
         // Recalculate the status and preview once after that batch, not for every item.
         if (_adjustingSelection) return;
-        if (sender is ListViewBase list) KeepClickSelection(list, e);
         NotifySelectionChanged();
     }
 
@@ -1053,62 +1177,38 @@ public sealed partial class FilePane : UserControl
         _owner.OnPaneSelectionChanged(this);
     }
 
-    /// <summary>When the last mouse press on the list happened, so a selection change can be told to come from a click.</summary>
-    private long _listPressedAt;
-
-    /// <summary>The row a Shift+click selects from: the row of the last click without Shift.</summary>
-    private FileItem? _selectionAnchor;
-
     private bool _adjustingSelection;
-
-    private void List_PointerPressedAny(object sender, PointerRoutedEventArgs e)
-    {
-        if (e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse) _listPressedAt = Environment.TickCount64;
-    }
-
-    /// <summary>
-    /// Ctrl+click adds a row to the selection and Shift+click selects the rows from the last clicked one, as in Explorer.
-    /// The list does this itself only when it sees the modifier keys, which it does not always do; when a click with
-    /// Ctrl or Shift held replaced the selection instead, the selection is put right here.
-    /// </summary>
-    private void KeepClickSelection(ListViewBase list, SelectionChangedEventArgs e)
-    {
-        if (_adjustingSelection || Environment.TickCount64 - _listPressedAt > 1500) return;
-        bool ctrl = Native.IsKeyDown(0x11), shift = Native.IsKeyDown(0x10);
-        FileItem? clicked = e.AddedItems.Count == 1 ? e.AddedItems[0] as FileItem : null;
-        _adjustingSelection = true;
-        try
-        {
-            if (shift && clicked is not null && _selectionAnchor is { } anchor && _items.IndexOf(anchor) is var from and >= 0)
-            {
-                int to = _items.IndexOf(clicked);
-                if (to >= 0 && list.SelectedItems.Count != Math.Abs(to - from) + 1)
-                {
-                    if (!ctrl) list.SelectedItems.Clear();
-                    list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(Math.Min(from, to), (uint)(Math.Abs(to - from) + 1)));
-                }
-                return;
-            }
-            if (ctrl && !shift && clicked is not null && e.RemovedItems.Count > 0)
-            {
-                foreach (object removed in e.RemovedItems)
-                {
-                    if (!list.SelectedItems.Contains(removed)) list.SelectedItems.Add(removed);
-                }
-            }
-            if (!shift && clicked is not null) _selectionAnchor = clicked;
-        }
-        finally
-        {
-            _adjustingSelection = false;
-        }
-    }
 
     // ---------------------------------------------------------------- selection box
 
     private Windows.Foundation.Point? _marqueeStart;
     private bool _marqueeShown;
-    private MarqueeSelection<FileItem>? _marqueeSelection;
+    private bool _marqueeKeep;
+    private FileItem? _marqueePressedItem;
+    private bool _refreshAfterSelection;
+    private RangeSelection? _marqueeSelection;
+    private readonly FrameInput<Windows.Foundation.Point> _marqueeInput = new();
+    private ListViewBase? _marqueeList;
+    private ShapeVisual? _marqueeVisual;
+    private CompositionRoundedRectangleGeometry? _marqueeGeometry;
+    private readonly List<(int Index, Windows.Foundation.Rect Bounds)> _marqueeBounds = [];
+    private bool _marqueeBoundsDirty = true;
+    private (int First, int Last, double X, double Y) _marqueeViewport;
+    private ScrollViewer? _marqueeScroller;
+    private SelectionTrace? _selectionTrace;
+    private Windows.Foundation.Point _marqueePointer;
+    private Windows.Foundation.Point _marqueeOrigin;
+    private DispatcherTimer? _marqueeScrollTimer;
+    private long _marqueeScrollTick;
+    private MarqueeGrid? _marqueeGrid;
+    private readonly Dictionary<int, Windows.Foundation.Rect> _marqueeVisited = [];
+
+    private void RenderMarquee(object? sender, object e)
+    {
+        _selectionTrace?.Frame();
+        ApplyPendingMarquee();
+    }
+    private void TraceSelectionLayout(object? sender, object e) => _selectionTrace?.Layout();
 
     internal bool IsSelectingWithMouse => _marqueeStart is not null;
 
@@ -1117,20 +1217,54 @@ public sealed partial class FilePane : UserControl
     {
         if (sender is not ListViewBase list || e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
         PointerPoint point = e.GetCurrentPoint(ContentArea);
-        if (!point.Properties.IsLeftButtonPressed || OnRowOrScrollBar(e.OriginalSource as DependencyObject, list)) return;
+        if (!point.Properties.IsLeftButtonPressed || OnRowOrScrollBar(e.OriginalSource as DependencyObject, list, point.Position)) return;
+        EndMarquee();
         _marqueeStart = point.Position;
+        _marqueeList = list;
+        _marqueeScroller = list.FindDescendant<ScrollViewer>();
+        _marqueeOrigin = new(point.Position.X + (_marqueeScroller?.HorizontalOffset ?? 0), point.Position.Y + (_marqueeScroller?.VerticalOffset ?? 0));
+        _marqueePointer = point.Position;
+        _marqueeGrid = null;
+        _marqueeVisited.Clear();
+        MarqueeLayer.Clip = new RectangleGeometry { Rect = new(0, 0, ContentArea.ActualWidth, ContentArea.ActualHeight) };
+        if (_marqueeScroller is not null) _marqueeScroller.ViewChanged += Marquee_ViewChanged;
+        _marqueeBoundsDirty = true;
+        _marqueeInput.Clear();
+        _selectionTrace = SelectionTrace.Start();
+        CompositionTarget.Rendering += RenderMarquee;
+        if (_selectionTrace is not null)
+        {
+            ContentArea.LayoutUpdated += TraceSelectionLayout;
+        }
         _marqueeShown = false;
         bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
-        _marqueeSelection = new(keep ? list.SelectedItems.OfType<FileItem>() : []);
+        _marqueeKeep = keep;
+        _marqueePressedItem = null;
+        for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+            if (node is SelectorItem { Content: FileItem pressed }) { _marqueePressedItem = pressed; break; }
+        _marqueeSelection = new(keep ? list.SelectedRanges.Select(range => (range.FirstIndex, range.Length)) : []);
         _owner.OnPaneMouseSelectionStarted(this);
-        if (!keep) list.SelectedItems.Clear();
-        // No pointer capture: the list takes the capture for itself, and losing it would end the box at once.
+        CancelFolderSizes();
         list.Focus(FocusState.Pointer);
+        // Own the empty-space gesture so the list cannot compete with the box for
+        // pointer moves or clear its result when the mouse button is released.
+        // A row or the list's scrolling host can capture in its class handler,
+        // before this handled-events listener runs. Release the original route's
+        // captures before transferring ownership to the parent.
+        for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
+            if (node is UIElement element) element.ReleasePointerCaptures();
+        _selectionTrace?.Record(e.Pointer.IsInContact ? "contact" : "no-contact", Stopwatch.GetTimestamp());
+        bool captured = ContentArea.CapturePointer(e.Pointer);
+        _selectionTrace?.Record(captured ? "captured" : "capture-failed", Stopwatch.GetTimestamp());
+        if (!captured) { EndMarquee(); return; }
+        e.Handled = true;
     }
 
     private void Marquee_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_marqueeStart is not { } start || sender is not ListViewBase list) return;
+        if (_marqueeStart is null || _marqueeList is null) return;
+        _selectionTrace?.Input();
+        long inputStart = Stopwatch.GetTimestamp();
         PointerPoint current = e.GetCurrentPoint(ContentArea);
         if (!current.Properties.IsLeftButtonPressed)
         {
@@ -1138,60 +1272,261 @@ public sealed partial class FilePane : UserControl
             EndMarquee();
             return;
         }
-        Windows.Foundation.Point now = current.Position;
+        QueueMarquee(current.Position);
+        _selectionTrace?.Record("pointer", inputStart);
+        e.Handled = true;
+    }
+
+    private void QueueMarquee(Windows.Foundation.Point point)
+    {
+        _marqueePointer = point;
+        bool pending = _marqueeInput.Pending;
+        _marqueeInput.Submit(point);
+        DrawMarquee(point);
+        UpdateMarqueeScroll();
+        // Request one XAML rendering opportunity; later mouse messages replace the
+        // pending point without scheduling more layout or selection work.
+        if (!pending) MarqueeLayer.InvalidateArrange();
+    }
+
+    private void DrawMarquee(Windows.Foundation.Point now)
+    {
+        if (_marqueeStart is null) return;
+        var start = MarqueeStartInViewport();
         double left = Math.Min(start.X, now.X), top = Math.Min(start.Y, now.Y);
         double width = Math.Abs(now.X - start.X), height = Math.Abs(now.Y - start.Y);
         if (!_marqueeShown && width < 4 && height < 4) return;
-        _marqueeShown = true;
-        Canvas.SetLeft(MarqueeRect, left);
-        Canvas.SetTop(MarqueeRect, top);
-        MarqueeRect.Width = width;
-        MarqueeRect.Height = height;
-        MarqueeRect.Visibility = Visibility.Visible;
-        var box = new Windows.Foundation.Rect(left, top, width, height);
-        var intersecting = new List<FileItem>();
-        // Virtualized folders can contain hundreds of thousands of items. Hit-test
-        // only their realized containers instead of querying every index per move.
-        foreach (SelectorItem row in _realizedRows.GetValueOrDefault(list) ?? [])
+        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
         {
-            if (row.Content is not FileItem item || row.ActualWidth <= 0 || row.ActualHeight <= 0) continue;
-            Windows.Foundation.Rect bounds = row.TransformToVisual(ContentArea).TransformBounds(new Windows.Foundation.Rect(0, 0, row.ActualWidth, row.ActualHeight));
-            bounds.Intersect(box);
-            if (!bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) intersecting.Add(item);
+            _adjustingSelection = true;
+            try { list.SelectedItems.Clear(); }
+            finally { _adjustingSelection = false; }
         }
-        var delta = _marqueeSelection!.Update(intersecting);
+        _marqueeShown = true;
+        if (_marqueeVisual is null)
+        {
+            var compositor = ElementCompositionPreview.GetElementVisual(MarqueeLayer).Compositor;
+            _marqueeGeometry = compositor.CreateRoundedRectangleGeometry();
+            _marqueeGeometry.CornerRadius = new Vector2(2);
+            _marqueeGeometry.Offset = new Vector2(0.5f);
+            var shape = compositor.CreateSpriteShape(_marqueeGeometry);
+            shape.FillBrush = compositor.CreateColorBrush(Windows.UI.Color.FromArgb(0x33, 0x3B, 0x82, 0xF6));
+            shape.StrokeBrush = compositor.CreateColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x3B, 0x82, 0xF6));
+            shape.StrokeThickness = 1;
+            _marqueeVisual = compositor.CreateShapeVisual();
+            _marqueeVisual.Shapes.Add(shape);
+            ElementCompositionPreview.SetElementChildVisual(MarqueeLayer, _marqueeVisual);
+        }
+        _marqueeVisual.Offset = new Vector3((float)left, (float)top, 0);
+        _marqueeVisual.Size = new Vector2((float)width, (float)height);
+        _marqueeGeometry!.Size = new Vector2((float)Math.Max(0, width - 1), (float)Math.Max(0, height - 1));
+        _marqueeVisual.Opacity = 1;
+    }
+
+    private void ApplyPendingMarquee()
+    {
+        if (_marqueeStart is null || _marqueeList is not { } list || !_marqueeInput.TryTake(out var now) || !_marqueeShown) return;
+        var start = MarqueeStartInViewport();
+        long traceStart = Stopwatch.GetTimestamp();
+        double left = Math.Min(start.X, now.X), top = Math.Min(start.Y, now.Y);
+        double width = Math.Abs(now.X - start.X), height = Math.Abs(now.Y - start.Y);
+        var box = new Windows.Foundation.Rect(left, top, width, height);
+        var visible = list.ItemsPanelRoot switch
+        {
+            ItemsStackPanel panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            ItemsWrapGrid panel => (panel.FirstVisibleIndex, panel.LastVisibleIndex),
+            _ => (-1, -1),
+        };
+        var viewport = (visible.Item1, visible.Item2, _marqueeScroller?.HorizontalOffset ?? 0, _marqueeScroller?.VerticalOffset ?? 0);
+        if (_marqueeBoundsDirty || _marqueeViewport != viewport)
+        {
+            _marqueeBounds.Clear();
+            int first = Math.Max(0, visible.Item1), last = Math.Min(_items.Count - 1, visible.Item2);
+            for (int i = first; i <= last; i++)
+            {
+                if (list.ContainerFromIndex(i) is not FrameworkElement row || row.ActualWidth <= 0 || row.ActualHeight <= 0) continue;
+                var bounds = row.TransformToVisual(ContentArea).TransformBounds(new Windows.Foundation.Rect(0, 0, row.ActualWidth, row.ActualHeight));
+                _marqueeBounds.Add((i, bounds));
+            }
+            _marqueeViewport = viewport;
+            _marqueeBoundsDirty = false;
+        }
+        var intersecting = new List<int>();
+        foreach (var (index, rowBounds) in _marqueeBounds)
+        {
+            var bounds = rowBounds;
+            bounds.Intersect(box);
+            if (!bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0) intersecting.Add(index);
+        }
+        double offsetX = _marqueeScroller?.HorizontalOffset ?? 0, offsetY = _marqueeScroller?.VerticalOffset ?? 0;
+        foreach (var (index, bounds) in _marqueeBounds)
+            _marqueeVisited[index] = new(bounds.X + offsetX, bounds.Y + offsetY, bounds.Width, bounds.Height);
+        if (_marqueeGrid is null && _marqueeBounds.Count > 0)
+        {
+            var first = _marqueeBounds[0];
+            if (list == List && _tab.Search is null)
+                _marqueeGrid = new(first.Bounds.X + offsetX, first.Bounds.Y + offsetY - first.Index * first.Bounds.Height,
+                    first.Bounds.Width, first.Bounds.Height, first.Bounds.Width, first.Bounds.Height, 1);
+            else if (list == Thumbs && list.ItemsPanelRoot is ItemsWrapGrid wrap && wrap.Orientation == Orientation.Horizontal)
+            {
+                // GridView lays out equally sized cells, with any gaps included in the pitch.
+                int columns = Math.Max(1, (int)Math.Floor((wrap.ActualWidth) / first.Bounds.Width));
+                double pitchX = first.Bounds.Width, pitchY = first.Bounds.Height;
+                var adjacent = _marqueeBounds.FirstOrDefault(b => b.Index == first.Index + 1);
+                if (adjacent.Bounds.X > first.Bounds.X) pitchX = adjacent.Bounds.X - first.Bounds.X;
+                var below = _marqueeBounds.FirstOrDefault(b => b.Bounds.Y > first.Bounds.Y + 1 && Math.Abs(b.Bounds.X - first.Bounds.X) < 1);
+                if (below.Bounds.Height > 0)
+                {
+                    columns = below.Index - first.Index;
+                    pitchY = below.Bounds.Y - first.Bounds.Y;
+                }
+                _marqueeGrid = new(first.Bounds.X + offsetX - first.Index % columns * pitchX,
+                    first.Bounds.Y + offsetY - first.Index / columns * pitchY,
+                    first.Bounds.Width, first.Bounds.Height, pitchX, pitchY, columns);
+            }
+        }
+        IEnumerable<(int Start, uint Length)> inside;
+        if (_marqueeGrid is { } grid)
+            inside = grid.Intersect(left + offsetX, top + offsetY, left + offsetX + width, top + offsetY + height, _items.Count);
+        else
+        {
+            var contentBox = new Windows.Foundation.Rect(left + offsetX, top + offsetY, width, height);
+            inside = SelectionRuns.FromIndices(_marqueeVisited.Where(pair =>
+            {
+                var bounds = pair.Value;
+                bounds.Intersect(contentBox);
+                return !bounds.IsEmpty && bounds.Width > 0 && bounds.Height > 0;
+            }).Select(pair => pair.Key));
+        }
+        var delta = _marqueeSelection!.Update(inside);
+        _selectionTrace?.Record("hit-test", traceStart, _marqueeBounds.Count);
+        long selectionStart = Stopwatch.GetTimestamp();
         _adjustingSelection = true;
         try
         {
-            foreach (FileItem item in delta.Removed) list.SelectedItems.Remove(item);
-            foreach (FileItem item in delta.Added) list.SelectedItems.Add(item);
+            foreach (var run in delta.Removed) list.DeselectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(run.Start, run.Length));
+            foreach (var run in delta.Added) list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(run.Start, run.Length));
         }
         finally
         {
             _adjustingSelection = false;
         }
-        if (delta.Added.Count > 0 || delta.Removed.Count > 0) NotifySelectionChanged();
-        e.Handled = true;
+        if (delta.Added.Length > 0 || delta.Removed.Length > 0) NotifySelectionChanged();
+        _selectionTrace?.Record("selection", selectionStart, intersecting.Count, (int)delta.Added.Sum(r => (long)r.Length), (int)delta.Removed.Sum(r => (long)r.Length), (int)list.SelectedRanges.Sum(r => (long)r.Length));
+        _selectionTrace?.Record("move-total", traceStart);
     }
 
-    private void Marquee_PointerReleased(object sender, PointerRoutedEventArgs e) => EndMarquee();
+    private Windows.Foundation.Point MarqueeStartInViewport() => new(
+        _marqueeOrigin.X - (_marqueeScroller?.HorizontalOffset ?? 0),
+        _marqueeOrigin.Y - (_marqueeScroller?.VerticalOffset ?? 0));
+
+    private void Marquee_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (_marqueeStart is not null) QueueMarquee(_marqueePointer);
+    }
+
+    private void UpdateMarqueeScroll()
+    {
+        if (_marqueeScroller is not { } scroll || !_marqueeShown) return;
+        double top = scroll.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).Y;
+        double speed = MarqueeScroll.Speed(_marqueePointer.Y - top, scroll.ViewportHeight);
+        _selectionTrace?.Scroll(_marqueePointer.Y - top, scroll.ViewportHeight, scroll.ScrollableHeight, scroll.VerticalOffset, speed, scroll.ActualHeight);
+        if (speed == 0) { _marqueeScrollTimer?.Stop(); return; }
+        if (_marqueeScrollTimer is null)
+        {
+            _marqueeScrollTimer = new DispatcherTimer();
+            _marqueeScrollTimer.Interval = TimeSpan.FromMilliseconds(16);
+            _marqueeScrollTimer.Tick += (_, _) => SafeDispatch.Run(() =>
+            {
+                if (_marqueeStart is null || _marqueeScroller is not { } viewer) return;
+                long now = Stopwatch.GetTimestamp();
+                double seconds = Math.Min(0.05, Stopwatch.GetElapsedTime(_marqueeScrollTick, now).TotalSeconds);
+                _marqueeScrollTick = now;
+                double origin = viewer.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).Y;
+                double velocity = MarqueeScroll.Speed(_marqueePointer.Y - origin, viewer.ViewportHeight);
+                double target = Math.Clamp(viewer.VerticalOffset + velocity * seconds, 0, viewer.ScrollableHeight);
+                if (velocity == 0 || Math.Abs(target - viewer.VerticalOffset) < 0.01) { _marqueeScrollTimer.Stop(); return; }
+                bool accepted = viewer.ChangeView(null, target, null, disableAnimation: true);
+                _selectionTrace?.Record(accepted ? "scroll-requested" : "scroll-rejected", Stopwatch.GetTimestamp());
+                QueueMarquee(_marqueePointer);
+            });
+        }
+        if (!_marqueeScrollTimer.IsEnabled)
+        {
+            _marqueeScrollTick = Stopwatch.GetTimestamp();
+            _marqueeScrollTimer.Start();
+        }
+    }
+
+    private void Marquee_PointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_marqueeStart is null) return;
+        QueueMarquee(e.GetCurrentPoint(ContentArea).Position);
+        ApplyPendingMarquee();
+        // A click in unused row space still selects that row. Only a real drag
+        // replaces the native click selection with the rectangle's result.
+        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
+        {
+            _adjustingSelection = true;
+            try
+            {
+                list.SelectedItems.Clear();
+                if (_marqueePressedItem is { } pressed) list.SelectedItem = pressed;
+            }
+            finally { _adjustingSelection = false; }
+        }
+        EndMarquee();
+        e.Handled = true;
+    }
 
     private void EndMarquee()
     {
         if (_marqueeStart is null) return;
+        CompositionTarget.Rendering -= RenderMarquee;
+        if (_selectionTrace is not null)
+        {
+            ContentArea.LayoutUpdated -= TraceSelectionLayout;
+            _selectionTrace.Finish();
+            _selectionTrace = null;
+        }
         _marqueeStart = null;
+        _marqueeList = null;
+        if (_marqueeScroller is not null) _marqueeScroller.ViewChanged -= Marquee_ViewChanged;
+        _marqueeScrollTimer?.Stop();
+        _marqueeScroller = null;
+        _marqueeVisited.Clear();
+        _marqueeGrid = null;
+        _marqueeInput.Clear();
+        _marqueeBounds.Clear();
         _marqueeShown = false;
         _marqueeSelection = null;
-        MarqueeRect.Visibility = Visibility.Collapsed;
-        if (!_closed) _owner.OnPaneSelectionChanged(this);
+        _marqueePressedItem = null;
+        if (_marqueeVisual is not null) _marqueeVisual.Opacity = 0;
+        ContentArea.ReleasePointerCaptures();
+        if (!_closed) NotifySelectionChanged();
+        if (!_closed) UpdateVisibleFolderSizes();
+        if (_refreshAfterSelection)
+        {
+            _refreshAfterSelection = false;
+            if (!_closed) ScheduleRefresh();
+        }
     }
 
     /// <summary>True when a press landed on a row or on a scroll bar, where it keeps its usual meaning.</summary>
-    private static bool OnRowOrScrollBar(DependencyObject? source, ListViewBase list)
+    private bool OnRowOrScrollBar(DependencyObject? source, ListViewBase list, Windows.Foundation.Point point)
     {
         for (DependencyObject? node = source; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
         {
-            if (node is SelectorItem or ScrollBar) return true;
+            if (node is ScrollBar or TextBox or ButtonBase) return true;
+            if (node is SelectorItem item)
+            {
+                if (list != List || item.ContentTemplateRoot is not Grid row) return true;
+                // Keep icons and names as file drag targets; unused row space starts a box.
+                var name = row.Children.OfType<TextBlock>().FirstOrDefault(child => Grid.GetColumn(child) == 1);
+                if (name is null) return true;
+                double textLeft = name.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
+                return point.X <= textLeft + Math.Min(name.ActualWidth, name.DesiredSize.Width) + 8;
+            }
         }
         return false;
     }
@@ -1203,6 +1538,10 @@ public sealed partial class FilePane : UserControl
 
     private void List_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Handled || _owner.IsViewerOpen) return;
+        // Preview routing reaches us before ListView consumes Enter as its own
+        // activation key. Embedded editors must retain their normal commit keys.
+        if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         bool shift = Native.IsKeyDown(0x10), ctrl = Native.IsKeyDown(0x11), alt = Native.IsKeyDown(0x12);
         switch (e.Key)
         {
@@ -1236,6 +1575,8 @@ public sealed partial class FilePane : UserControl
     /// <summary>Space opens the selected picture in the viewer, before the list uses Space for selection.</summary>
     private void List_PreviewSpace(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Handled || _owner.IsViewerOpen) return;
+        if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         if (e.Key != VirtualKey.Space || Native.IsKeyDown(0x11) || _typed.Length > 0 && DateTime.UtcNow - _typedAt < TimeSpan.FromSeconds(1)) return;
         if (SelectedItems is [{ Entry.Kind: EntryKind.File } item] && FileTypes.IsViewerImage(item.Entry.Extension))
         {
@@ -1244,9 +1585,17 @@ public sealed partial class FilePane : UserControl
         }
     }
 
+    private static bool KeyIsInsideEditor(DependencyObject? source, DependencyObject? list)
+    {
+        for (var node = source; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+            if (node is TextBox or AutoSuggestBox or PasswordBox or RichEditBox or ButtonBase) return true;
+        return false;
+    }
+
     /// <summary>Typing letters jumps to the first name that starts with them.</summary>
     private void List_CharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs args)
     {
+        if (_owner.IsViewerOpen) return;
         char c = args.Character;
         if (char.IsControl(c)) return;
         DateTime now = DateTime.UtcNow;
@@ -1435,6 +1784,7 @@ public sealed partial class FilePane : UserControl
 
     internal void BeginRename()
     {
+        if (_renaming) return;
         if (SelectedItems is not [var item, ..] || item.Entry.Kind == EntryKind.Drive) return;
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
@@ -1449,6 +1799,8 @@ public sealed partial class FilePane : UserControl
     /// new folder would keep its default name before the user could type one.
     /// </summary>
     private long _renameStarted;
+    private bool _renaming;
+    private int _refreshVersion;
 
     private static readonly TimeSpan RenameSettleTime = TimeSpan.FromMilliseconds(1000);
 
@@ -1515,7 +1867,9 @@ public sealed partial class FilePane : UserControl
         if (!item.IsRenaming) return;
         item.IsRenaming = false;
         string name = text.Trim();
-        FocusList();
+        // Let x:Load remove the editor after its key/focus event has unwound.
+        // Forcing UpdateLayout here can recycle rows during the rename event.
+        FocusListSoon();
         if (name.Length == 0 || name == item.Entry.Name) return;
         NameProblem problem = NameRules.Check(name);
         if (problem != NameProblem.None)
@@ -1533,16 +1887,56 @@ public sealed partial class FilePane : UserControl
             _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
             return;
         }
-        _selectAfterRefresh = Path.Combine(folder, name);
+        string originalPath = item.Entry.FullPath;
+        string renamedPath = Path.Combine(folder, name);
+        PaneTab tab = _tab;
+        _renaming = true;
+        _refreshVersion++;
         try
         {
-            await ShellActions.RenameAsync(item.Entry.FullPath, name, _owner.Hwnd);
+            await ShellActions.RenameAsync(originalPath, name, _owner.Hwnd);
+            FileEntry? renamed = await Task.Run(() => !caseOnly && Path.Exists(originalPath) ? null : DirectoryReader.ReadOne(renamedPath));
+            if (renamed is not null && !_closed && tab == _tab && PathTools.SameLocation(folder, _tab.Location))
+                ApplyRenamedRow(item, renamed);
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
         {
             _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
+        finally
+        {
+            _renaming = false;
+        }
         await RefreshAsync();
+    }
+
+    private void ApplyRenamedRow(FileItem item, FileEntry renamed)
+    {
+        FileEntry previous = item.Entry;
+        int entryIndex = _entries.FindIndex(entry => PathTools.SameLocation(entry.FullPath, previous.FullPath));
+        if (entryIndex < 0 || !_all.Contains(item)) return;
+        _entries[entryIndex] = renamed;
+        if (_folderSizeRequests.Remove(item, out var folderSize)) folderSize.Cancel();
+        item.Update(renamed);
+        Comparison<FileEntry> order = EntrySorter.Comparison(_tab.Sort, _tab.Descending);
+        Comparison<FileItem> rows = (left, right) => order(left.Entry, right.Entry);
+        ListingOrder.Reposition(_all, item, rows);
+        if (_filter.Length == 0 || Matches(renamed))
+        {
+            if (_items.Contains(item)) ListingOrder.Reposition(_items, item, rows);
+            else _items.Insert(SortedIndex(_items, renamed, order), item);
+            CurrentList.SelectedItem = item;
+        }
+        else _items.Remove(item);
+        if (item.IsRealized)
+        {
+            ImageCache.RequestIcon(item, IconPixels, DispatcherQueue);
+            if (CurrentList == Thumbs) ImageCache.RequestThumbnail(item, ThumbnailPixels, DispatcherQueue);
+        }
+        _owner.OnPaneContentsChanged(_tab.Location, new FolderChanges([previous], [renamed], []));
+        NotifySelectionChanged();
+        _folderSizeRange = (-1, -1);
+        UpdateVisibleFolderSizes();
     }
 
     internal async void NewFolder()
@@ -1917,10 +2311,8 @@ public sealed partial class FilePane : UserControl
     /// <summary>Explorer's rule: Shift moves, Ctrl copies, otherwise items on the same drive move and others copy.</summary>
     private static bool DropMoves(DragEventArgs e, string[]? sources, string target)
     {
-        if (e.Modifiers.HasFlag(DragDropModifiers.Shift)) return true;
-        if (e.Modifiers.HasFlag(DragDropModifiers.Control)) return false;
-        if (sources is not { Length: > 0 }) return false;
-        return string.Equals(Path.GetPathRoot(sources[0]), Path.GetPathRoot(target), StringComparison.OrdinalIgnoreCase);
+        return DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
+            e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, target);
     }
 
     private async void Content_Drop(object sender, DragEventArgs e)
@@ -1928,6 +2320,9 @@ public sealed partial class FilePane : UserControl
         string? target = DropTarget(e);
         if (target is null) return;
         DragOperationDeferral deferral = e.GetDeferral();
+        // Capture the user's choice before awaiting external storage-item resolution.
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
         try
         {
             string[]? internalPaths = e.DataView.Properties.TryGetValue(InternalDragFormat, out object? value) ? value as string[] : null;
@@ -1937,7 +2332,7 @@ public sealed partial class FilePane : UserControl
                 IReadOnlyList<IStorageItem> items = await e.DataView.GetStorageItemsAsync();
                 paths = items.Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
             }
-            bool move = DropMoves(e, internalPaths ?? [.. paths], target);
+            bool move = DropPolicy.Moves(control, shift, paths, target);
             if (paths.Count > 0) await CheckedTransfer(paths, target, move);
         }
         finally
@@ -2369,6 +2764,7 @@ public sealed partial class FilePane : UserControl
     /// <summary>Adds hits to the shown list: at the end in the order found, or each at its place in the chosen column's order.</summary>
     private void AddHits(List<FileItem> hits)
     {
+        if (hits.Count > 0) EndMarquee();
         _all.AddRange(hits);
         Comparison<FileEntry>? order = _tab.Search is { Sort: { } column } search ? EntrySorter.Comparison(column, search.Descending) : null;
         foreach (FileItem item in hits)

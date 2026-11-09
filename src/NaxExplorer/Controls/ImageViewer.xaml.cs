@@ -2,6 +2,7 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using NaxExplorer.Core;
@@ -76,6 +77,7 @@ public sealed partial class ImageViewer : UserControl
         FullScreenGlyph.Glyph = "";
         Picture.Source = null;
         Visibility = Visibility.Collapsed;
+        _owner.OnViewerClosed();
         if (_source is not null && _pictures.Count > 0)
         {
             _source.Reveal(_pictures[_index]);
@@ -436,64 +438,64 @@ public sealed partial class ImageViewer : UserControl
 
     private void Next_Click(object sender, RoutedEventArgs e) => Step(1);
 
-    private async void Root_KeyDown(object sender, KeyRoutedEventArgs e)
+    internal async void HandleKey(KeyRoutedEventArgs e)
     {
-        bool shift = Native.IsKeyDown(0x10);
-        switch (e.Key)
+        bool buttonFocused = false;
+        for (var node = e.OriginalSource as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
         {
-            case VirtualKey.Escape:
+            if (node is ContentDialog) return;
+            if (node is ButtonBase) buttonFocused = true;
+        }
+        var command = ViewerKeyboard.Command(e.Key, Visibility == Visibility.Visible, buttonFocused, Native.IsKeyDown(0x11), Native.IsKeyDown(0x12));
+        if (command == ViewerCommand.None) return;
+        // Mark handled before a delete dialog can yield or the covered list sees the key.
+        e.Handled = true;
+        bool shift = Native.IsKeyDown(0x10);
+        switch (command)
+        {
+            case ViewerCommand.Close:
                 if (_owner.AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen) ToggleFullScreen();
                 else Close();
                 break;
-            case VirtualKey.Left:
-            case VirtualKey.PageUp:
-            case VirtualKey.Back:
+            case ViewerCommand.Previous:
                 Step(-1);
                 break;
-            case VirtualKey.Right:
-            case VirtualKey.PageDown:
-            case VirtualKey.Space:
+            case ViewerCommand.Next:
                 Step(1);
                 break;
-            case VirtualKey.Home:
+            case ViewerCommand.First:
                 Step(-_index);
                 break;
-            case VirtualKey.End:
+            case ViewerCommand.Last:
                 Step(_pictures.Count - 1 - _index);
                 break;
-            case VirtualKey.Add:
-            case (VirtualKey)187:
+            case ViewerCommand.ZoomIn:
                 ZoomIn_Click(this, e);
                 break;
-            case VirtualKey.Subtract:
-            case (VirtualKey)189:
+            case ViewerCommand.ZoomOut:
                 ZoomOut_Click(this, e);
                 break;
-            case VirtualKey.Number0:
-            case VirtualKey.NumberPad0:
+            case ViewerCommand.Fit:
                 FitToWindow();
                 break;
-            case VirtualKey.Number1:
-            case VirtualKey.NumberPad1:
+            case ViewerCommand.ActualSize:
                 Actual_Click(this, e);
                 break;
-            case VirtualKey.R:
+            case ViewerCommand.Rotate:
                 Rotate(shift ? -1 : 1);
                 break;
-            case VirtualKey.F11:
-            case VirtualKey.F:
+            case ViewerCommand.FullScreen:
                 ToggleFullScreen();
                 break;
-            case VirtualKey.Delete:
+            case ViewerCommand.Delete:
                 await DeleteCurrentAsync(shift);
                 break;
-            case VirtualKey.Enter:
+            case ViewerCommand.OpenExternal:
                 OpenExternal_Click(this, e);
                 break;
             default:
                 return;
         }
-        e.Handled = true;
     }
 }
 

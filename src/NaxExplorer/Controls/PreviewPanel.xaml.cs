@@ -21,6 +21,10 @@ public sealed partial class PreviewPanel : UserControl
     private FileItem? _item;
     private int _version;
     private CancellationTokenSource? _cts;
+    private readonly PreviewRefreshState _refresh = new();
+    private readonly Dictionary<string, TextBlock> _detailValues = [];
+    private int _pictureVersion;
+    private bool _thumbnailPending, _forceFullRender;
 
     public PreviewPanel()
     {
@@ -31,10 +35,21 @@ public sealed partial class PreviewPanel : UserControl
 
     internal void Attach(MainWindow owner) => _owner = owner;
 
+    internal void PrepareSelection(IReadOnlyList<FileItem> selected, string? folder)
+    {
+        if (_refresh.Current is { } current && !current.SameSelection(selected.Select(i => i.Entry.FullPath), selected.Count, folder))
+            StopBackgroundWork();
+    }
+
     internal void StopBackgroundWork()
     {
         _version++;
+        _pictureVersion++;
+        _forceFullRender |= _thumbnailPending;
+        _refresh.Cancel(_thumbnailPending);
+        _thumbnailPending = false;
         _cts?.Cancel();
+        _cts = null;
     }
 
     /// <summary>
@@ -43,17 +58,57 @@ public sealed partial class PreviewPanel : UserControl
     /// </summary>
     internal async void Show(IReadOnlyList<FileItem> selected, string? folder)
     {
+        int side = (int)Math.Min(1200, Math.Max(200, ActualWidth - 24) * (XamlRoot?.RasterizationScale ?? 1));
+        var request = new PreviewRequest(selected.Select(i => new PreviewEntry(i.Entry, i.DisplayName, i.FolderText)), folder, side, XamlRoot?.RasterizationScale ?? 1,
+            selected.Count == 0 && folder is not null ? FilePane.PlaceName(folder) : null);
+        bool reuseTotals = !_forceFullRender && _refresh.Current?.CanReuseTotals(request) == true && _detailValues.ContainsKey("DetailTotal");
+        _item = selected.Count == 1 ? selected[0] : null;
+        if (_refresh.Begin(request) is not { } generation) return;
+        _forceFullRender = false;
         int version = ++_version;
         _cts?.Cancel();
         var cts = new CancellationTokenSource();
         _cts = cts;
-        FileItem? item = selected.Count == 1 ? selected[0] : null;
-        _item = item;
+        try
+        {
+            if (reuseTotals)
+            {
+                if (_item is { } sameFolder)
+                {
+                    if (sameFolder.Entry.ModifiedUtc != default && _detailValues.TryGetValue("DetailModified", out var modified))
+                        modified.Text = sameFolder.Entry.ModifiedUtc.ToLocalTime().ToString("f", CultureInfo.CurrentCulture);
+                    if (!await ShowFolderContentsAsync(sameFolder.Entry.FullPath, version, cts.Token)) return;
+                }
+                IReadOnlyList<string> paths = selected.Count > 0 ? selected.Select(i => i.Entry.FullPath).ToList() : [folder!];
+                await ShowTotalsAsync(paths, version, cts.Token, selection: selected.Count > 0);
+            }
+            else
+            {
+                _pictureVersion++;
+                _thumbnailPending = false;
+                await RenderAsync(selected, folder, _item, version, cts);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            if (version == _version)
+            {
+                _cts = null;
+                if (_refresh.Complete(generation)) _owner.RefreshPreviewSoon();
+            }
+            cts.Dispose();
+        }
+    }
+
+    private async Task RenderAsync(IReadOnlyList<FileItem> selected, string? folder, FileItem? item, int version, CancellationTokenSource cts)
+    {
         PreviewImage.Source = null;
         TextScroller.Visibility = Visibility.Collapsed;
         TextContent.Text = "";
         Details.Children.Clear();
         Details.RowDefinitions.Clear();
+        _detailValues.Clear();
         Busy.IsActive = false;
         if (item is null)
         {
@@ -82,7 +137,7 @@ public sealed partial class PreviewPanel : UserControl
                 {
                     // Virtual folders have a shell picture and name, but no filesystem tree to measure.
                     PictureArea.Visibility = Visibility.Visible;
-                    ShowShellThumbnail(folder, 256, version);
+                    ShowShellThumbnail(folder, 256);
                     return;
                 }
                 // A whole drive would take minutes to count and keep the disk busy; its used and free space say the same at once.
@@ -112,14 +167,14 @@ public sealed partial class PreviewPanel : UserControl
         if (PathTools.IsShellPlace(entry.FullPath))
         {
             // An item of the Recycle Bin, a phone or another shell place has no path to read; Windows draws its picture.
-            ShowShellThumbnail(entry.FullPath, entry.IsContainer ? 256 : side, version);
+            ShowShellThumbnail(entry.FullPath, entry.IsContainer ? 256 : side);
             return;
         }
         if (entry.Kind == EntryKind.File && entry.IsOnlineOnly)
         {
             // Reading the picture or text would download the file; it is downloaded only when the user opens it.
             AddDetail("DetailNote", Loc.T("OnlineOnlyNote"));
-            ShowShellThumbnail(entry.FullPath, side, version);
+            ShowShellThumbnail(entry.FullPath, side);
             return;
         }
         if (picture)
@@ -140,7 +195,7 @@ public sealed partial class PreviewPanel : UserControl
             {
                 if (version != _version) return;
                 AddDetail("DetailNote", ImageLoader.ErrorText(entry.FullPath, ex));
-                ShowShellThumbnail(entry.FullPath, side, version);
+                ShowShellThumbnail(entry.FullPath, side);
             }
             finally
             {
@@ -150,7 +205,7 @@ public sealed partial class PreviewPanel : UserControl
         }
         if (entry.Kind == EntryKind.File)
         {
-            ShowShellThumbnail(entry.FullPath, side, version);
+            ShowShellThumbnail(entry.FullPath, side);
             TextFormat format = TextExtractor.FormatOf(entry.Extension);
             if (format != TextFormat.None || entry.Size < 4 * 1024 * 1024)
             {
@@ -161,31 +216,50 @@ public sealed partial class PreviewPanel : UserControl
             }
             return;
         }
-        ShowShellThumbnail(entry.FullPath, 256, version);
+        ShowShellThumbnail(entry.FullPath, 256);
         if (entry.Kind == EntryKind.Folder)
         {
-            // Judged by the folder's attributes now, not when the list was read: the sync app may have freed it since.
-            bool unfetched = await Task.Run(() => CloudFiles.IsUnfetchedFolder(entry.FullPath));
-            if (version != _version) return;
-            if (unfetched)
-            {
-                // Looking into it would make the sync app fetch its list of files; opening the folder does that on request.
-                AddDetail("DetailNote", Loc.T("CloudFolderNotFetched"));
-                return;
-            }
-            (int folders, int files, bool more) = await Task.Run(() => Count(entry.FullPath), cts.Token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : (0, 0, false), TaskScheduler.Default);
-            if (version != _version) return;
-            AddDetail("DetailContains", Loc.F(more ? "ContainsMore" : "Contains", folders, files));
-            await ShowTotalsAsync(new[] { entry.FullPath }, version, cts.Token, selection: true);
+            if (await ShowFolderContentsAsync(entry.FullPath, version, cts.Token))
+                await ShowTotalsAsync(new[] { entry.FullPath }, version, cts.Token, selection: true);
         }
+    }
+
+    private async Task<bool> ShowFolderContentsAsync(string path, int version, CancellationToken token)
+    {
+        // Recheck the live attributes before enumerating, including on a totals-only refresh.
+        bool unfetched = await Task.Run(() => CloudFiles.IsUnfetchedFolder(path), token);
+        if (version != _version) return false;
+        if (unfetched)
+        {
+            ExistingOrAddDetail("DetailNote", Loc.T("CloudFolderNotFetched")).Text = Loc.T("CloudFolderNotFetched");
+            SetDetailVisible("DetailNote", true);
+            foreach (string key in new[] { "DetailContains", "DetailTotal", "DetailSize", "DetailOnlineOnly" }) SetDetailVisible(key, false);
+            return false;
+        }
+        (int folders, int files, bool more) = await Task.Run(() => Count(path), token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : (0, 0, false), TaskScheduler.Default);
+        if (version != _version) return false;
+        ExistingOrAddDetail("DetailContains", "").Text = Loc.F(more ? "ContainsMore" : "Contains", folders, files);
+        SetDetailVisible("DetailContains", true);
+        SetDetailVisible("DetailNote", false);
+        return true;
     }
 
     /// <summary>Counts already done, kept for two minutes, so going back to a folder does not count it again.</summary>
     private readonly FolderTotalsCache _totals = new();
 
-    internal void InvalidateTotals()
+    internal bool InvalidateTotals(string folder, FolderChanges? changes)
     {
         _totals.Invalidate();
+        var action = _refresh.Invalidate(folder, changes);
+        if (action == PreviewRefreshAction.Reload && _refresh.Current?.CountsContent != true) StopBackgroundWork();
+        return action == PreviewRefreshAction.Reload;
+    }
+
+    internal void Reload()
+    {
+        _forceFullRender = true;
+        _totals.Invalidate();
+        _refresh.Invalidate();
         StopBackgroundWork();
     }
 
@@ -195,12 +269,13 @@ public sealed partial class PreviewPanel : UserControl
     /// </summary>
     private async Task ShowTotalsAsync(IReadOnlyList<string> paths, int version, CancellationToken token, bool selection = false)
     {
-        TextBlock total = AddDetail("DetailTotal", Loc.T("Counting"));
-        TextBlock size = AddDetail("DetailSize", "…");
-        TextBlock? online = null;
+        TextBlock total = ExistingOrAddDetail("DetailTotal", Loc.T("Counting"));
+        TextBlock size = ExistingOrAddDetail("DetailSize", "…");
         void Show(FolderTotals totals)
         {
             if (version != _version) return;
+            SetDetailVisible("DetailTotal", true);
+            SetDetailVisible("DetailSize", true);
             string running = totals.Complete ? "" : " …";
             long unfetched = totals.UnfetchedFolders;
             total.Text = Loc.F("Contains", totals.Folders, totals.Files)
@@ -208,8 +283,13 @@ public sealed partial class PreviewPanel : UserControl
                 + running;
             size.Text = $"{SizeFormat.Format(totals.Bytes)}  ({totals.Bytes.ToString("N0", CultureInfo.CurrentCulture)} B){running}";
             // In a cloud folder: how much of it is only online, which opening would download.
-            if (totals.OnlineFiles == 0) return;
-            online ??= AddDetail("DetailOnlineOnly", "");
+            if (totals.OnlineFiles == 0)
+            {
+                SetDetailVisible("DetailOnlineOnly", false);
+                return;
+            }
+            TextBlock online = ExistingOrAddDetail("DetailOnlineOnly", "");
+            SetDetailVisible("DetailOnlineOnly", true);
             online.Text = Loc.F("OnlineOnlyTotals", totals.OnlineFiles, SizeFormat.Format(totals.OnlineBytes)) + running;
         }
         string key = string.Join("|", paths);
@@ -282,11 +362,15 @@ public sealed partial class PreviewPanel : UserControl
         AddDetail("DetailFree", SizeFormat.Format(free));
     }
 
-    private void ShowShellThumbnail(string path, int side, int version)
+    private void ShowShellThumbnail(string path, int side)
     {
-        ImageCache.RequestLarge(path, Math.Min(side, 768), DispatcherQueue, () => version == _version, image =>
+        int pictureVersion = _pictureVersion;
+        _thumbnailPending = true;
+        ImageCache.RequestLarge(path, Math.Min(side, 768), DispatcherQueue, () => pictureVersion == _pictureVersion, image =>
         {
-            if (version == _version && image is Microsoft.UI.Xaml.Media.Imaging.BitmapSource bitmap) SetPicture(bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
+            if (pictureVersion != _pictureVersion) return;
+            _thumbnailPending = false;
+            if (image is Microsoft.UI.Xaml.Media.Imaging.BitmapSource bitmap) SetPicture(bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
         });
     }
 
@@ -335,7 +419,18 @@ public sealed partial class PreviewPanel : UserControl
         Grid.SetColumn(text, 1);
         Details.Children.Add(label);
         Details.Children.Add(text);
+        _detailValues[labelKey] = text;
         return text;
+    }
+
+    private TextBlock ExistingOrAddDetail(string key, string value) => _detailValues.TryGetValue(key, out var text) ? text : AddDetail(key, value);
+
+    private void SetDetailVisible(string key, bool visible)
+    {
+        if (!_detailValues.TryGetValue(key, out var value)) return;
+        int row = Grid.GetRow(value);
+        foreach (var child in Details.Children.OfType<FrameworkElement>().Where(child => Grid.GetRow(child) == row))
+            child.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void Open_Click(object sender, RoutedEventArgs e)

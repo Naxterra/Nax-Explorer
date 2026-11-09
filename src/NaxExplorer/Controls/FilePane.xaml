@@ -49,7 +49,7 @@
                          Loaded="RenameBox_Loaded" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
                 <TextBlock Grid.Column="2" Margin="8,0" Text="{x:Bind DateText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
                 <TextBlock Grid.Column="3" Margin="8,0" Text="{x:Bind TypeText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
-                <Grid Grid.Column="4" Margin="8,0,12,0" VerticalAlignment="Center">
+                <Grid Grid.Column="4" Margin="8,0,12,0" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind SizeTip, Mode=OneWay}">
                     <TextBlock Text="{x:Bind SizeText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" HorizontalAlignment="Right" />
                 </Grid>
             </Grid>
@@ -57,19 +57,24 @@
 
         <!-- Drives on "This PC": a usage bar under the name. -->
         <DataTemplate x:Key="DriveTemplate" x:DataType="m:FileItem">
-            <Grid Height="48">
+            <Grid Height="56">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="36" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <Image Width="28" Height="28" Source="{x:Bind Icon, Mode=OneWay}" VerticalAlignment="Center" />
-                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0" Spacing="4">
-                    <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" Style="{StaticResource CellTextStyle}" FontWeight="SemiBold" />
-                    <ProgressBar Value="{x:Bind UsedFraction, Mode=OneWay}" Maximum="1" Height="6" CornerRadius="3" MaxWidth="360" HorizontalAlignment="Left" Width="360"
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,0,12,0" Spacing="6">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" Style="{StaticResource CellTextStyle}" FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind SizeText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
+                    </Grid>
+                    <ProgressBar Value="{x:Bind UsedFraction, Mode=OneWay}" Maximum="1" Height="6" CornerRadius="3" HorizontalAlignment="Stretch"
                                  Foreground="{x:Bind UsageBrush, Mode=OneWay}" Visibility="{x:Bind UsageVisibility, Mode=OneWay}" />
                 </StackPanel>
-                <TextBlock Grid.Column="2" Margin="8,0,12,0" Text="{x:Bind SizeText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
             </Grid>
         </DataTemplate>
 
@@ -231,7 +236,7 @@
         </Grid>
 
         <!-- Column headers of the details view. -->
-        <Grid x:Name="ColumnHeader" Grid.Row="3" Padding="4,0,4,2" Height="30">
+        <Grid x:Name="ColumnHeader" Grid.Row="3" Height="30">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="28" />
                 <ColumnDefinition Width="*" />
@@ -239,10 +244,10 @@
                 <ColumnDefinition x:Name="TypeColumn" Width="130" />
                 <ColumnDefinition x:Name="SizeColumn" Width="90" />
             </Grid.ColumnDefinitions>
-            <Button x:Name="NameHeader" Grid.Column="1" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Name" />
+            <Button x:Name="NameHeader" Grid.Column="1" Padding="6,4,8,4" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Name" />
             <Button x:Name="DateHeader" Grid.Column="2" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Modified" />
             <Button x:Name="TypeHeader" Grid.Column="3" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Type" />
-            <Button x:Name="SizeHeader" Grid.Column="4" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Size" HorizontalContentAlignment="Right" />
+            <Button x:Name="SizeHeader" Grid.Column="4" Padding="8,4,12,4" Style="{StaticResource ColumnHeaderButtonStyle}" Click="Header_Click" Tag="Size" HorizontalContentAlignment="Right" />
             <Rectangle Grid.ColumnSpan="5" Height="1" VerticalAlignment="Bottom" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
         </Grid>
 
@@ -253,15 +258,13 @@
                       CanDragItems="True" DragItemsStarting="List_DragItemsStarting" DragItemsCompleted="List_DragItemsCompleted"
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
                       DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived"
-                      KeyDown="List_KeyDown" />
+                      PreviewKeyDown="List_KeyDown" />
             <GridView x:Name="Thumbs" Visibility="Collapsed" SelectionMode="Extended" IsItemClickEnabled="False" ItemTemplate="{StaticResource ThumbnailTemplate}"
                       Padding="8,4,8,8" CanDragItems="True" DragItemsStarting="List_DragItemsStarting" DragItemsCompleted="List_DragItemsCompleted"
                       ContainerContentChanging="List_ContainerContentChanging" SelectionChanged="List_SelectionChanged"
-                      DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived" KeyDown="List_KeyDown" />
+                      DoubleTapped="List_DoubleTapped" RightTapped="List_RightTapped" CharacterReceived="List_CharacterReceived" PreviewKeyDown="List_KeyDown" />
             <!-- The selection box drawn while the mouse is dragged over the empty part of the list. -->
-            <Canvas x:Name="MarqueeLayer" IsHitTestVisible="False">
-                <Rectangle x:Name="MarqueeRect" Visibility="Collapsed" Fill="#333B82F6" Stroke="#3B82F6" StrokeThickness="1" RadiusX="2" RadiusY="2" />
-            </Canvas>
+            <Canvas x:Name="MarqueeLayer" IsHitTestVisible="False" />
             <StackPanel x:Name="EmptyPanel" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10" Visibility="Collapsed" IsHitTestVisible="False" MaxWidth="420">
                 <FontIcon x:Name="EmptyGlyph" Glyph="&#xE8B7;" FontSize="40" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 <TextBlock x:Name="EmptyText" TextAlignment="Center" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

@@ -286,7 +286,11 @@ public sealed partial class MainWindow : Window
         {
             UpdateTitle();
             if (pane.IsSelectingWithMouse) OnPaneMouseSelectionStarted(pane);
-            else _previewTimer.Restart();
+            else
+            {
+                Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
+                _previewTimer.Restart();
+            }
             _shellWindow?.Navigated(pane.Location);
         }
     }
@@ -340,6 +344,7 @@ public sealed partial class MainWindow : Window
     internal void OnPaneLocationChanged(FilePane pane)
     {
         if (pane != _active) return;
+        Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
         UpdateTitle();
         _shellWindow?.Navigated(pane.Location);
         // Another tab or folder in the active pane: the details panel shows that folder now. The address bar reports
@@ -353,7 +358,11 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneSelectionChanged(FilePane pane)
     {
-        if (pane == _active && !pane.IsSelectingWithMouse) _previewTimer.Restart();
+        if (pane != _active || pane.IsSelectingWithMouse) return;
+        // Retire the old read now, before the debounce timer can fire. Its text or
+        // bitmap must not land during the user's next click and block that paint.
+        Preview.PrepareSelection(pane.SelectedItems, pane.PreviewLocation);
+        _previewTimer.Restart();
     }
 
     internal void OnPaneMouseSelectionStarted(FilePane pane)
@@ -377,7 +386,7 @@ public sealed partial class MainWindow : Window
     {
         foreach (MainWindow window in App.Instance!.Windows)
         {
-            window.InvalidatePreviewTotals();
+            window.InvalidatePreviewTotals(folder);
             foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
             {
                 if (pane.Folder is { } shown && PathTools.SameLocation(shown, folder)) pane.ScheduleRefresh();
@@ -385,17 +394,26 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    internal void OnPaneContentsChanged()
+    internal void OnPaneContentsChanged(string folder, FolderChanges changes)
     {
         // Recursive totals can describe an ancestor of the changed folder, including in another window.
-        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals();
+        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals(folder, changes);
     }
 
-    private void InvalidatePreviewTotals()
+    internal void OnPaneReloaded(FilePane pane)
     {
-        Preview.InvalidateTotals();
+        // Opening or reloading another pane is not a change to this window's selected file.
+        if (pane != _active) return;
+        Preview.Reload();
         _previewTimer.Restart();
     }
+
+    private void InvalidatePreviewTotals(string folder, FolderChanges? changes = null)
+    {
+        if (Preview.InvalidateTotals(folder, changes)) _previewTimer.Restart();
+    }
+
+    internal void RefreshPreviewSoon() => _previewTimer.Restart();
 
     internal void SetCutPaths(IReadOnlyList<string> paths)
     {
@@ -406,14 +424,25 @@ public sealed partial class MainWindow : Window
 
     private void UpdatePreview()
     {
-        if (!Settings.ShowPreview || _active.IsSelectingWithMouse) return;
+        if (!Settings.ShowPreview || _active.IsSelectingWithMouse || IsViewerOpen) return;
         _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }
 
     internal void ShowViewer(IReadOnlyList<string> pictures, int index, FilePane source)
     {
+        _previewTimer.Stop();
+        Preview.StopBackgroundWork();
+        LeftPane.IsEnabled = RightPane.IsEnabled = false;
         Viewer.Open(pictures, index, source);
+    }
+
+    internal bool IsViewerOpen => Viewer.Visibility == Visibility.Visible;
+
+    internal void OnViewerClosed()
+    {
+        LeftPane.IsEnabled = RightPane.IsEnabled = true;
+        _previewTimer.Restart();
     }
 
     // ---------------------------------------------------------------- messages
@@ -620,7 +649,9 @@ public sealed partial class MainWindow : Window
         }
         if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
         {
-            bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
+            string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+            bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
+                e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, entry.Location);
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", entry.Label);
             return;
@@ -632,6 +663,8 @@ public sealed partial class MainWindow : Window
     {
         if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry)) return;
         DragOperationDeferral deferral = e.GetDeferral();
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
         try
         {
             List<string> paths = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) && value is string[] own ? [.. own] : [];
@@ -646,7 +679,7 @@ public sealed partial class MainWindow : Window
                 if (files.Count > 0) await DeleteAsync(files, permanently: false);
                 return;
             }
-            bool move = e.Modifiers.HasFlag(DragDropModifiers.Shift);
+            bool move = DropPolicy.Moves(control, shift, paths, entry.Location);
             if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None) return;
             await TransferAsync(paths, entry.Location, move);
         }
@@ -983,7 +1016,12 @@ public sealed partial class MainWindow : Window
     /// <summary>F8 moves the selection to the other pane. F7 (copy) comes through the keyboard hook instead.</summary>
     private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != VirtualKey.F8 || Viewer.Visibility == Visibility.Visible) return;
+        if (IsViewerOpen)
+        {
+            Viewer.HandleKey(e);
+            return;
+        }
+        if (e.Key != VirtualKey.F8) return;
         if (e.OriginalSource is TextBox or AutoSuggestBox or PasswordBox) return;
         _active.TransferToOtherPane(move: true);
         e.Handled = true;
