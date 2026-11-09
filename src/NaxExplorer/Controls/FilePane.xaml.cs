@@ -74,16 +74,24 @@ public sealed partial class FilePane : UserControl
     internal void StopBackgroundWork()
     {
         _closed = true;
+        CompositionTarget.Rendering -= TraceSelectionPaint;
+        _selectionPaintStarted = 0;
         CancelFolderSizes();
         _loadCts?.Cancel();
         CancelSearch();
         StopWatcher();
         EndMarquee();
+        CancelMouseFileDrag();
     }
 
     public FilePane()
     {
         InitializeComponent();
+        Loaded += (_, _) =>
+        {
+            PrepareMarqueeVisual();
+            PrepareMarqueeScrollTimer();
+        };
         // Incremental rename/reorder updates must not animate the other rows out.
         List.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
         Thumbs.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
@@ -111,7 +119,7 @@ public sealed partial class FilePane : UserControl
         ContentArea.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
         ContentArea.PointerCanceled += (_, e) =>
         {
-            if (ReferenceEquals(e.OriginalSource, ContentArea)) EndMarquee();
+            if (ReferenceEquals(e.OriginalSource, ContentArea)) { EndMarquee(); CancelMouseFileDrag(); }
         };
         ContentArea.PointerCaptureLost += (_, e) =>
         {
@@ -121,6 +129,7 @@ public sealed partial class FilePane : UserControl
             {
                 _selectionTrace?.Record("capture-lost", Stopwatch.GetTimestamp());
                 EndMarquee();
+                CancelMouseFileDrag();
             }
         };
     }
@@ -719,7 +728,7 @@ public sealed partial class FilePane : UserControl
         var parts = new List<string> { Loc.F("ItemCount", _items.Count) };
         if (IsSelectingWithMouse)
         {
-            long count = (_marqueeList?.SelectedRanges.Sum(range => (long)range.Length)) ?? 0;
+            long count = (_marqueeList ?? CurrentList).SelectedRanges.Sum(range => (long)range.Length);
             if (count > 0) parts.Add(Loc.F("Selected", count));
             if (_freeSpace.Length > 0) parts.Add(_freeSpace);
             StatusText.Text = string.Join("   ·   ", parts);
@@ -1164,6 +1173,8 @@ public sealed partial class FilePane : UserControl
             return;
         }
         if (args.Item is not FileItem item) return;
+        args.ItemContainer.DragStarting -= Item_DragStarting;
+        args.ItemContainer.DragStarting += Item_DragStarting;
         item.IsRealized = true;
         if (sender == List && !PathTools.IsThisPc(_tab.Location) && args.ItemContainer.ContentTemplateRoot is Grid row) ApplyColumns(row);
         ImageCache.RequestIcon(item, PathTools.IsThisPc(_tab.Location) ? IconPixels * 3 / 2 : IconPixels, DispatcherQueue);
@@ -1198,15 +1209,24 @@ public sealed partial class FilePane : UserControl
         // Correcting a click or updating a selection box can raise this once per row.
         // Recalculate the status and preview once after that batch, not for every item.
         if (_adjustingSelection) return;
-        // A click that selects one row, or a Ctrl+click that removes one, makes it the start of a later Shift+click
-        // range, as in Explorer. A range the list selected itself leaves the start where it was.
-        if (e.AddedItems is [FileItem added]) _clickAnchor = added;
-        else if (e.AddedItems.Count == 0 && e.RemovedItems is [FileItem removed] && Native.IsKeyDown(0x11)) _clickAnchor = removed;
+        long started = InteractionTrace.Enabled ? Stopwatch.GetTimestamp() : 0;
         NotifySelectionChanged();
+        if (started != 0)
+        {
+            InteractionTrace.Record("selection-handler", started, new { Added = e.AddedItems.Count, Removed = e.RemovedItems.Count, Selected = CurrentList.SelectedItems.Count });
+            if (_selectionPaintStarted == 0) CompositionTarget.Rendering += TraceSelectionPaint;
+            _selectionPaintStarted = started;
+        }
     }
 
-    /// <summary>The row a Shift+click selects from: the row last clicked or selected on its own.</summary>
-    private FileItem? _clickAnchor;
+    private long _selectionPaintStarted;
+
+    private void TraceSelectionPaint(object? sender, object e)
+    {
+        CompositionTarget.Rendering -= TraceSelectionPaint;
+        InteractionTrace.Record("selection-next-render", _selectionPaintStarted);
+        _selectionPaintStarted = 0;
+    }
 
     private void NotifySelectionChanged()
     {
@@ -1221,7 +1241,18 @@ public sealed partial class FilePane : UserControl
     private Windows.Foundation.Point? _marqueeStart;
     private bool _marqueeShown;
     private bool _marqueeKeep;
-    private FileItem? _marqueePressedItem;
+    private readonly SelectionGesture _marqueeGesture = new();
+    private DependencyObject? _marqueePressedSource;
+    private bool _marqueeClearPending;
+    private readonly SelectionGesture _itemGesture = new();
+    private ListViewBase? _itemGestureList;
+    private DependencyObject? _itemPressedSource;
+    private SelectorItem? _itemPressedRow;
+    private FileDragSession? _mouseFileDrag;
+    private Windows.Foundation.Point _mouseFileDragPoint;
+    private DispatcherTimer? _fileDragTimer;
+    private string[]? _nativeDragPaths;
+    internal bool IsDraggingItems { get; private set; }
     private bool _refreshAfterSelection;
     private RangeSelection? _marqueeSelection;
     private readonly FrameInput<Windows.Foundation.Point> _marqueeInput = new();
@@ -1247,58 +1278,90 @@ public sealed partial class FilePane : UserControl
     }
     private void TraceSelectionLayout(object? sender, object e) => _selectionTrace?.Layout();
 
-    internal bool IsSelectingWithMouse => _marqueeStart is not null;
+    internal bool IsSelectingWithMouse => _marqueeStart is not null || IsDraggingItems;
 
     /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
     private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not ListViewBase list || e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
         PointerPoint point = e.GetCurrentPoint(ContentArea);
-        if (!point.Properties.IsLeftButtonPressed || OnRowOrScrollBar(e.OriginalSource as DependencyObject, list, point.Position)) return;
+        if (!point.Properties.IsLeftButtonPressed) return;
+        // A previous pending click may have lost its child capture outside the
+        // window. Retire it before classifying this press, including a name drag.
         EndMarquee();
+        CancelMouseFileDrag();
+        bool nativeRow = OnRowOrScrollBar(e.OriginalSource as DependencyObject, list, point.Position);
+        if (InteractionTrace.Enabled)
+            InteractionTrace.Record("mouse-press", data: new { X = point.Position.X, Y = point.Position.Y, NativeRow = nativeRow, Source = e.OriginalSource?.GetType().Name });
+        if (nativeRow)
+        {
+            if (_owner.Settings.DualPane)
+            {
+                for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+                {
+                    if (node is TextBox or ButtonBase) break;
+                    if (node is SelectorItem { Content: FileItem item } row)
+                    {
+                        if (item.Entry.Kind != EntryKind.Drive && !item.IsRenaming && !PathTools.IsShellPlace(item.Entry.FullPath))
+                        {
+                            _itemGesture.Press(point.Position.X, point.Position.Y);
+                            _itemGestureList = list;
+                            _itemPressedSource = e.OriginalSource as DependencyObject;
+                            _itemPressedRow = row;
+                            list.CanDragItems = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            return;
+        }
         _marqueeStart = point.Position;
+        _marqueeGesture.Press(point.Position.X, point.Position.Y);
+        _marqueePressedSource = e.OriginalSource as DependencyObject;
         _marqueeList = list;
+        // Whitespace belongs to box selection. Keep the native click path, but
+        // prevent the list from launching a competing file drag from this press.
+        list.CanDragItems = false;
         _marqueeScroller = list.FindDescendant<ScrollViewer>();
         _marqueeOrigin = new(point.Position.X + (_marqueeScroller?.HorizontalOffset ?? 0), point.Position.Y + (_marqueeScroller?.VerticalOffset ?? 0));
         _marqueePointer = point.Position;
         _marqueeGrid = null;
         _marqueeVisited.Clear();
-        MarqueeLayer.Clip = new RectangleGeometry { Rect = new(0, 0, ContentArea.ActualWidth, ContentArea.ActualHeight) };
-        if (_marqueeScroller is not null) _marqueeScroller.ViewChanged += Marquee_ViewChanged;
         _marqueeBoundsDirty = true;
         _marqueeInput.Clear();
+        _marqueeShown = false;
+        bool keep = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift)
+            || Native.IsPhysicalKeyDown(0x11) || Native.IsPhysicalKeyDown(0x10);
+        _marqueeKeep = keep;
+    }
+
+    private bool BeginMarquee(PointerRoutedEventArgs e)
+    {
+        var initial = _marqueeKeep
+            ? _marqueeList!.SelectedRanges.Select(range => (range.FirstIndex, range.Length)).ToArray()
+            : Array.Empty<(int FirstIndex, uint Length)>();
+        _marqueeSelection = new(_marqueeKeep ? initial : []);
+        _marqueeClearPending = !_marqueeKeep;
+        if (InteractionTrace.Enabled) InteractionTrace.Record("box-start", data: new { Origin = _marqueeOrigin, Initial = initial.Select(run => new { run.FirstIndex, run.Length }).ToArray() });
+        MarqueeLayer.Clip = new RectangleGeometry { Rect = new(0, 0, ContentArea.ActualWidth, ContentArea.ActualHeight) };
+        if (_marqueeScroller is not null) _marqueeScroller.ViewChanged += Marquee_ViewChanged;
         _selectionTrace = SelectionTrace.Start();
         CompositionTarget.Rendering += RenderMarquee;
-        if (_selectionTrace is not null)
-        {
-            ContentArea.LayoutUpdated += TraceSelectionLayout;
-        }
-        _marqueeShown = false;
-        bool keep = Native.IsKeyDown(0x11) || Native.IsKeyDown(0x10);
-        _marqueeKeep = keep;
-        _marqueePressedItem = null;
-        for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
-            if (node is SelectorItem { Content: FileItem pressed }) { _marqueePressedItem = pressed; break; }
-        _marqueeSelection = new(keep ? list.SelectedRanges.Select(range => (range.FirstIndex, range.Length)) : []);
+        if (_selectionTrace is not null) ContentArea.LayoutUpdated += TraceSelectionLayout;
         _owner.OnPaneMouseSelectionStarted(this);
         CancelFolderSizes();
-        list.Focus(FocusState.Pointer);
-        // Own the empty-space gesture so the list cannot compete with the box for
-        // pointer moves or clear its result when the mouse button is released.
-        // A row or the list's scrolling host can capture in its class handler,
-        // before this handled-events listener runs. Release the original route's
-        // captures before transferring ownership to the parent.
-        for (DependencyObject? node = e.OriginalSource as DependencyObject; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
+        for (DependencyObject? node = _marqueePressedSource; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
             if (node is UIElement element) element.ReleasePointerCaptures();
-        _selectionTrace?.Record(e.Pointer.IsInContact ? "contact" : "no-contact", Stopwatch.GetTimestamp());
         bool captured = ContentArea.CapturePointer(e.Pointer);
         _selectionTrace?.Record(captured ? "captured" : "capture-failed", Stopwatch.GetTimestamp());
-        if (!captured) { EndMarquee(); return; }
-        e.Handled = true;
+        if (!captured) { EndMarquee(); return false; }
+        return true;
     }
 
     private void Marquee_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (_itemGestureList is not null) { MoveMouseFileDrag(e); return; }
         if (_marqueeStart is null || _marqueeList is null) return;
         _selectionTrace?.Input();
         long inputStart = Stopwatch.GetTimestamp();
@@ -1309,6 +1372,8 @@ public sealed partial class FilePane : UserControl
             EndMarquee();
             return;
         }
+        if (_marqueeGesture.Move(current.Position.X, current.Position.Y) && !BeginMarquee(e)) return;
+        if (!_marqueeGesture.Dragging) return;
         QueueMarquee(current.Position);
         _selectionTrace?.Record("pointer", inputStart);
         e.Handled = true;
@@ -1333,13 +1398,16 @@ public sealed partial class FilePane : UserControl
         double left = Math.Min(start.X, now.X), top = Math.Min(start.Y, now.Y);
         double width = Math.Abs(now.X - start.X), height = Math.Abs(now.Y - start.Y);
         if (!_marqueeShown && width < 4 && height < 4) return;
-        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
-        {
-            _adjustingSelection = true;
-            try { list.SelectedItems.Clear(); }
-            finally { _adjustingSelection = false; }
-        }
         _marqueeShown = true;
+        PrepareMarqueeVisual();
+        _marqueeVisual!.Offset = new Vector3((float)left, (float)top, 0);
+        _marqueeVisual.Size = new Vector2((float)width, (float)height);
+        _marqueeGeometry!.Size = new Vector2((float)Math.Max(0, width - 1), (float)Math.Max(0, height - 1));
+        _marqueeVisual.Opacity = 1;
+    }
+
+    private void PrepareMarqueeVisual()
+    {
         if (_marqueeVisual is null)
         {
             var compositor = ElementCompositionPreview.GetElementVisual(MarqueeLayer).Compositor;
@@ -1352,12 +1420,9 @@ public sealed partial class FilePane : UserControl
             shape.StrokeThickness = 1;
             _marqueeVisual = compositor.CreateShapeVisual();
             _marqueeVisual.Shapes.Add(shape);
+            _marqueeVisual.Opacity = 0;
             ElementCompositionPreview.SetElementChildVisual(MarqueeLayer, _marqueeVisual);
         }
-        _marqueeVisual.Offset = new Vector3((float)left, (float)top, 0);
-        _marqueeVisual.Size = new Vector2((float)width, (float)height);
-        _marqueeGeometry!.Size = new Vector2((float)Math.Max(0, width - 1), (float)Math.Max(0, height - 1));
-        _marqueeVisual.Opacity = 1;
     }
 
     private void ApplyPendingMarquee()
@@ -1441,6 +1506,13 @@ public sealed partial class FilePane : UserControl
         _adjustingSelection = true;
         try
         {
+            if (_marqueeClearPending)
+            {
+                // One native reset is much faster than DeselectRange over a large
+                // materialized selection. Defer it until the first coalesced frame.
+                list.SelectedItems.Clear();
+                _marqueeClearPending = false;
+            }
             foreach (var run in delta.Removed) list.DeselectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(run.Start, run.Length));
             foreach (var run in delta.Added) list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(run.Start, run.Length));
         }
@@ -1469,6 +1541,16 @@ public sealed partial class FilePane : UserControl
         double speed = MarqueeScroll.Speed(_marqueePointer.Y - top, scroll.ViewportHeight);
         _selectionTrace?.Scroll(_marqueePointer.Y - top, scroll.ViewportHeight, scroll.ScrollableHeight, scroll.VerticalOffset, speed, scroll.ActualHeight);
         if (speed == 0) { _marqueeScrollTimer?.Stop(); return; }
+        PrepareMarqueeScrollTimer();
+        if (!_marqueeScrollTimer!.IsEnabled)
+        {
+            _marqueeScrollTick = Stopwatch.GetTimestamp();
+            _marqueeScrollTimer.Start();
+        }
+    }
+
+    private void PrepareMarqueeScrollTimer()
+    {
         if (_marqueeScrollTimer is null)
         {
             _marqueeScrollTimer = new DispatcherTimer();
@@ -1488,63 +1570,21 @@ public sealed partial class FilePane : UserControl
                 QueueMarquee(_marqueePointer);
             });
         }
-        if (!_marqueeScrollTimer.IsEnabled)
-        {
-            _marqueeScrollTick = Stopwatch.GetTimestamp();
-            _marqueeScrollTimer.Start();
-        }
     }
 
     private void Marquee_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (_itemGestureList is not null) { ReleaseMouseFileDrag(e); return; }
         if (_marqueeStart is null) return;
-        QueueMarquee(e.GetCurrentPoint(ContentArea).Position);
-        ApplyPendingMarquee();
-        // A click in unused row space still selects that row. Only a real drag
-        // replaces the native click selection with the rectangle's result.
-        if (!_marqueeShown && !_marqueeKeep && _marqueeList is { } list)
+        bool dragged = _marqueeGesture.Dragging;
+        if (dragged)
         {
-            _adjustingSelection = true;
-            try
-            {
-                list.SelectedItems.Clear();
-                if (_marqueePressedItem is { } pressed) list.SelectedItem = pressed;
-            }
-            finally { _adjustingSelection = false; }
-            if (_marqueePressedItem is { } clicked) _clickAnchor = clicked;
+            QueueMarquee(e.GetCurrentPoint(ContentArea).Position);
+            ApplyPendingMarquee();
         }
-        else if (!_marqueeShown && _marqueeKeep && _marqueeList is { } modified && _marqueePressedItem is { } target)
-        {
-            // The box took the press from the row, so a Ctrl or Shift click beside a row's name is applied here:
-            // Ctrl adds or removes the row, Shift selects the rows from the last clicked one to it.
-            ApplyModifiedClick(modified, target, shift: Native.IsKeyDown(0x10), control: Native.IsKeyDown(0x11));
-        }
+        if (InteractionTrace.Enabled) InteractionTrace.Record("mouse-release", data: new { Dragged = dragged, Point = e.GetCurrentPoint(ContentArea).Position, Selected = _marqueeList?.SelectedRanges.Select(r => new { r.FirstIndex, r.Length }).ToArray() });
         EndMarquee();
-        e.Handled = true;
-    }
-
-    private void ApplyModifiedClick(ListViewBase list, FileItem target, bool shift, bool control)
-    {
-        _adjustingSelection = true;
-        try
-        {
-            int to = _items.IndexOf(target);
-            // The anchor may belong to a list shown earlier; then the selected row stands in, as in the list itself.
-            FileItem? anchor = _clickAnchor is { } known && _items.Contains(known) ? known : list.SelectedItem as FileItem;
-            if (shift && anchor is not null && _items.IndexOf(anchor) is var from and >= 0 && to >= 0)
-            {
-                if (!control) list.SelectedItems.Clear();
-                list.SelectRange(new Microsoft.UI.Xaml.Data.ItemIndexRange(Math.Min(from, to), (uint)(Math.Abs(to - from) + 1)));
-                return;
-            }
-            if (list.SelectedItems.Contains(target)) list.SelectedItems.Remove(target);
-            else list.SelectedItems.Add(target);
-            _clickAnchor = target;
-        }
-        finally
-        {
-            _adjustingSelection = false;
-        }
+        if (dragged) e.Handled = true;
     }
 
     private void EndMarquee()
@@ -1558,6 +1598,8 @@ public sealed partial class FilePane : UserControl
             _selectionTrace = null;
         }
         _marqueeStart = null;
+        _marqueeGesture.Reset();
+        if (_marqueeList is { } list) list.CanDragItems = true;
         _marqueeList = null;
         if (_marqueeScroller is not null) _marqueeScroller.ViewChanged -= Marquee_ViewChanged;
         _marqueeScrollTimer?.Stop();
@@ -1568,7 +1610,8 @@ public sealed partial class FilePane : UserControl
         _marqueeBounds.Clear();
         _marqueeShown = false;
         _marqueeSelection = null;
-        _marqueePressedItem = null;
+        _marqueePressedSource = null;
+        _marqueeClearPending = false;
         if (_marqueeVisual is not null) _marqueeVisual.Opacity = 0;
         ContentArea.ReleasePointerCaptures();
         if (!_closed) NotifySelectionChanged();
@@ -1589,11 +1632,12 @@ public sealed partial class FilePane : UserControl
             if (node is SelectorItem item)
             {
                 if (list != List || item.ContentTemplateRoot is not Grid row) return true;
-                // Keep icons and names as file drag targets; unused row space starts a box.
-                var name = row.Children.OfType<TextBlock>().FirstOrDefault(child => Grid.GetColumn(child) == 1);
-                if (name is null) return true;
-                double textLeft = name.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
-                return point.X <= textLeft + Math.Min(name.ActualWidth, name.DesiredSize.Width) + 8;
+                // The whole name column is a file drag target, including space
+                // after short names. Other columns can start a selection box.
+                if (row.ColumnDefinitions.Count < 2) return true;
+                double rowLeft = row.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
+                double nameRight = rowLeft + row.ColumnDefinitions[0].ActualWidth + row.ColumnDefinitions[1].ActualWidth;
+                return point.X <= nameRight;
             }
         }
         return false;
@@ -1827,7 +1871,7 @@ public sealed partial class FilePane : UserControl
     private async Task<bool> CheckedTransfer(IReadOnlyList<string> paths, string target, bool move)
     {
         if (RefuseShellItems(paths) || PathTools.IsShellPlace(target)) return false;
-        switch (TransferCheck.Check(paths, target, move))
+        switch (await Task.Run(() => TransferCheck.Check(paths, target, move)))
         {
             case TransferProblem.IntoItself:
                 _owner.ShowMessage(Loc.T("IntoItself"), InfoBarSeverity.Warning);
@@ -2308,8 +2352,155 @@ public sealed partial class FilePane : UserControl
 
     // ---------------------------------------------------------------- drag and drop
 
+    internal string? MouseDropTarget(Windows.Foundation.Point point, UIElement relativeTo)
+    {
+        if (Visibility != Visibility.Visible || CurrentList.Visibility != Visibility.Visible) return null;
+        var bounds = CurrentList.TransformToVisual(relativeTo).TransformBounds(new(0, 0, CurrentList.ActualWidth, CurrentList.ActualHeight));
+        if (!bounds.Contains(point)) return null;
+        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(point, CurrentList))
+            if (element is SelectorItem { Content: FileItem item }) return item.Entry.IsContainer ? item.Entry.FullPath : Folder;
+        return Folder;
+    }
+
+    private async void MoveMouseFileDrag(PointerRoutedEventArgs e)
+    {
+        var point = e.GetCurrentPoint(ContentArea);
+        if (!point.Properties.IsLeftButtonPressed) { CancelMouseFileDrag(); return; }
+        if (_itemGesture.Move(point.Position.X, point.Position.Y))
+        {
+            if (_itemPressedRow?.Content is not FileItem pressed) { CancelMouseFileDrag(); return; }
+            var paths = _itemGestureList!.SelectedItems.Contains(pressed) ? SelectedPaths : new[] { pressed.Entry.FullPath };
+            _mouseFileDrag = new(paths);
+            IsDraggingItems = true;
+            _owner.OnPaneMouseSelectionStarted(this);
+            CancelFolderSizes();
+            for (var node = _itemPressedSource; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
+                if (node is UIElement element) element.ReleasePointerCaptures();
+            if (!ContentArea.CapturePointer(e.Pointer)) { CancelMouseFileDrag(); return; }
+            _fileDragTimer ??= CreateFileDragTimer();
+            _fileDragTimer.Start();
+            InteractionTrace.Record("mouse-file-drag-start", data: new { Count = paths.Count });
+        }
+        if (_mouseFileDrag is not { } drag) return;
+        _mouseFileDragPoint = _owner.MouseDragPoint(e);
+        bool outside = _owner.UpdateMouseFileDrag(this, drag, _mouseFileDragPoint);
+        e.Handled = true;
+        if (outside && _itemPressedRow is { } container)
+        {
+            // Hand an outgoing drag to Windows; between-pane drags stay in this
+            // pointer route and do not depend on the native drop message loop.
+            _nativeDragPaths = drag.Sources.ToArray();
+            var nativePoint = e.GetCurrentPoint(container);
+            EndMouseFileGesture();
+            IsDraggingItems = true;
+            try { FinishItemDrag(await container.StartDragAsync(nativePoint) == DataPackageOperation.Move); }
+            catch (System.Runtime.InteropServices.COMException ex)
+            {
+                FinishItemDrag(moved: false);
+                if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+            }
+            finally { _nativeDragPaths = null; }
+        }
+    }
+
+    private DispatcherTimer CreateFileDragTimer()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        timer.Tick += (_, _) => SafeDispatch.Run(() =>
+        {
+            if (_mouseFileDrag is { } drag) _owner.UpdateMouseFileDrag(this, drag, _mouseFileDragPoint, modifiersOnly: true);
+        });
+        return timer;
+    }
+
+    private async void ReleaseMouseFileDrag(PointerRoutedEventArgs e)
+    {
+        var drag = _mouseFileDrag;
+        if (drag is null) { EndMouseFileGesture(); return; }
+        _owner.UpdateMouseFileDrag(this, drag, _owner.MouseDragPoint(e));
+        // Preserve the modifiers attached to mouse-up even if the key was
+        // released before the queued event reaches this UI thread.
+        bool control = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
+        bool shift = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
+        var choice = drag.Release(control, shift);
+        EndMouseFileGesture();
+        e.Handled = true;
+        if (choice is not { } drop) return;
+        InteractionTrace.Record("mouse-file-drop", data: new { drop.Target, drop.Move, Count = drag.Sources.Count });
+        try
+        {
+            bool completed = await CheckedTransfer(drag.Sources, drop.Target, drop.Move);
+            InteractionTrace.Record("mouse-file-drop-complete", data: new { Completed = completed, drop.Move });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
+        {
+            if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+    }
+
+    internal void CancelMouseFileDrag()
+    {
+        _mouseFileDrag?.Cancel();
+        EndMouseFileGesture();
+    }
+
+    private void EndMouseFileGesture()
+    {
+        bool dragging = _mouseFileDrag is not null;
+        _mouseFileDrag = null;
+        _itemGesture.Reset();
+        if (_itemGestureList is { } list) list.CanDragItems = true;
+        _itemGestureList = null;
+        _itemPressedRow = null;
+        _itemPressedSource = null;
+        _fileDragTimer?.Stop();
+        _owner?.EndMouseFileDrag(this);
+        if (dragging) { ContentArea.ReleasePointerCaptures(); FinishItemDrag(moved: false); }
+    }
+
+    private async void Item_DragStarting(UIElement sender, DragStartingEventArgs e)
+    {
+        // RequestedOperation describes the data package. The native drag has a
+        // separate allowed-operation mask, which must permit both choices before
+        // the drag starts so Ctrl/Shift can change the action while it is running.
+        e.AllowedOperations = DataPackageOperation.Copy | DataPackageOperation.Move;
+        e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+        var deferral = e.GetDeferral();
+        long started = InteractionTrace.Enabled ? Stopwatch.GetTimestamp() : 0;
+        try
+        {
+            string[] paths = e.Data.Properties.TryGetValue(InternalDragFormat, out object? value) && value is string[] own
+                ? own : _nativeDragPaths ?? SelectedPaths.ToArray();
+            if (paths.Length == 0)
+            {
+                e.Cancel = true;
+                return;
+            }
+            var items = await FileDragPayload.ReadAsync(paths);
+            if (_closed) { e.Cancel = true; return; }
+            e.Data.SetStorageItems(items);
+            e.Data.Properties[InternalDragFormat] = paths;
+            e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+            InteractionTrace.Record("drag-ready", started, new { Count = items.Length, Allowed = e.AllowedOperations.ToString(), Requested = e.Data.RequestedOperation.ToString() });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
+        {
+            e.Cancel = true;
+            if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            if (e.Cancel)
+            {
+                FinishItemDrag(moved: false);
+            }
+            deferral.Complete();
+        }
+    }
+
     private void List_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
+        if (_marqueeStart is not null) { e.Cancel = true; return; }
         string[] paths = e.Items.OfType<FileItem>().Where(i => i.Entry.Kind != EntryKind.Drive).Select(i => i.Entry.FullPath).ToArray();
         // Items of the Recycle Bin or a phone have no path another folder could take; they are restored or copied
         // through their context menu instead.
@@ -2320,30 +2511,32 @@ public sealed partial class FilePane : UserControl
         }
         e.Data.Properties.Add(InternalDragFormat, paths);
         e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
-        // Other programs, such as Explorer or a mail client, receive the files as storage items.
-        e.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
-        {
-            DataProviderDeferral deferral = request.GetDeferral();
-            try
-            {
-                var items = new List<IStorageItem>();
-                foreach (string path in paths)
-                {
-                    items.Add(Directory.Exists(path) ? await StorageFolder.GetFolderFromPathAsync(path) : await StorageFile.GetFileFromPathAsync(path));
-                }
-                request.SetData(items);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
-            {
-            }
-            finally
-            {
-                deferral.Complete();
-            }
-        });
+        IsDraggingItems = true;
+        _owner.OnPaneMouseSelectionStarted(this);
+        CancelFolderSizes();
+        InteractionTrace.Record("drag-start", data: new { Count = paths.Length, Control = Native.IsPhysicalKeyDown(0x11), Shift = Native.IsPhysicalKeyDown(0x10) });
     }
 
-    private void List_DragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args) => ScheduleRefresh();
+    private void List_DragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args)
+    {
+        InteractionTrace.Record("drag-completed", data: new { Result = args.DropResult.ToString() });
+        FinishItemDrag(args.DropResult == DataPackageOperation.Move);
+    }
+
+    private void FinishItemDrag(bool moved)
+    {
+        if (!IsDraggingItems) return;
+        IsDraggingItems = false;
+        bool refresh = moved || _refreshAfterSelection;
+        _refreshAfterSelection = false;
+        if (_closed) return;
+        NotifySelectionChanged();
+        UpdateVisibleFolderSizes();
+        // A cancelled drag or a copy has not changed the source folder. Avoid
+        // rereading a large listing unless a watcher deferred a real change.
+        if (refresh) ScheduleRefresh();
+        InteractionTrace.Record("drag-finish", data: new { Refresh = refresh });
+    }
 
     /// <summary>
     /// The folder a drop goes into: the folder or drive row under the pointer, otherwise the folder the pane shows. The
@@ -2369,6 +2562,7 @@ public sealed partial class FilePane : UserControl
 
     private void Content_DragOver(object sender, DragEventArgs e)
     {
+        e.Handled = true;
         string? target = DropTarget(e);
         bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey(InternalDragFormat);
         if (target is null || PathTools.IsShellPlace(target) || !files)
@@ -2390,6 +2584,15 @@ public sealed partial class FilePane : UserControl
             return;
         }
         e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
+        if (InteractionTrace.Enabled)
+        {
+            string traceChoice = $"{target}|{e.AcceptedOperation}|{e.Modifiers}";
+            if (traceChoice != _lastDropTrace)
+            {
+                _lastDropTrace = traceChoice;
+                InteractionTrace.Record("drag-over", data: new { Target = target, Allowed = e.AllowedOperations.ToString(), Operation = e.AcceptedOperation.ToString(), Modifiers = e.Modifiers.ToString(), Control = Native.IsPhysicalKeyDown(0x11), Shift = Native.IsPhysicalKeyDown(0x10), InternalType = value?.GetType().FullName, Sources = internalPaths?.Length });
+            }
+        }
         e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", PlaceName(target));
         e.DragUIOverride.IsCaptionVisible = true;
     }
@@ -2397,18 +2600,23 @@ public sealed partial class FilePane : UserControl
     /// <summary>Explorer's rule: Shift moves, Ctrl copies, otherwise items on the same drive move and others copy.</summary>
     private static bool DropMoves(DragEventArgs e, string[]? sources, string target)
     {
-        return DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11),
-            e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10), sources, target);
+        return DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11),
+            e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10), sources, target);
     }
+
+    private string? _lastDropTrace;
 
     private async void Content_Drop(object sender, DragEventArgs e)
     {
+        e.Handled = true;
         string? target = DropTarget(e);
         if (target is null) return;
         DragOperationDeferral deferral = e.GetDeferral();
         // Capture the user's choice before awaiting external storage-item resolution.
-        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsKeyDown(0x11);
-        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsKeyDown(0x10);
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
+        long dropStarted = InteractionTrace.Enabled ? Stopwatch.GetTimestamp() : 0;
+        InteractionTrace.Record("drop-input", data: new { Target = target, Control = control, Shift = shift, Modifiers = e.Modifiers.ToString(), Accepted = e.AcceptedOperation.ToString() });
         try
         {
             string[]? internalPaths = e.DataView.Properties.TryGetValue(InternalDragFormat, out object? value) ? value as string[] : null;
@@ -2421,7 +2629,18 @@ public sealed partial class FilePane : UserControl
             // Decided from the same input as the pointer during the drag: the app's own paths. A drag from another
             // program has none there, so it copies unless Shift was held, exactly as the pointer said.
             bool move = DropPolicy.Moves(control, shift, internalPaths, target);
-            if (paths.Count > 0) await CheckedTransfer(paths, target, move);
+            InteractionTrace.Record("drop-resolved", dropStarted, new { Count = paths.Count, Move = move });
+            if (paths.Count > 0)
+            {
+                bool completed = await CheckedTransfer(paths, target, move);
+                e.AcceptedOperation = completed ? (move ? DataPackageOperation.Move : DataPackageOperation.Copy) : DataPackageOperation.None;
+                InteractionTrace.Record("drop-complete", dropStarted, new { Completed = completed, Move = move });
+            }
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
         finally
         {

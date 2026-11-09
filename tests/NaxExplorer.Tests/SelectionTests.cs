@@ -8,6 +8,71 @@ internal static class SelectionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("file_drag_chooses_modifiers_at_release_and_completes_once", "Ctrl pressed after movement changes a same-drive move to copy; Shift at release changes a cross-drive copy to move, and release cannot perform the action twice.", () =>
+        {
+            var drag = new FileDragSession([@"C:\source\a.txt"]);
+            drag.Hover(@"C:\target", false, false);
+            Check.Equal(new FileDropChoice(@"C:\target", true), drag.Choice!.Value);
+            Check.Equal(new FileDropChoice(@"C:\target", false), drag.Release(true, false)!.Value);
+            Check.That(!drag.Active && drag.Release(false, true) is null, "release could repeat a transfer");
+            var crossDrive = new FileDragSession([@"C:\source\b.txt"]);
+            crossDrive.Hover(@"D:\target", false, false);
+            Check.That(crossDrive.Choice is { Move: false }, "cross-drive default should copy");
+            Check.That(crossDrive.Release(false, true) is { Move: true }, "late Shift was ignored");
+        });
+        yield return ("file_drag_stationary_modifiers_and_invalid_targets", "Modifiers can change while the pointer stays still; same-folder moves, shell places and a folder's own descendant remain blocked.", () =>
+        {
+            var drag = new FileDragSession([@"C:\source\a.txt"]);
+            drag.Hover(@"C:\source", false, false);
+            Check.That(drag.Choice is null, "same-folder move was offered");
+            drag.Hover(drag.Target, true, false);
+            Check.That(drag.Choice is { Move: false }, "stationary Ctrl did not permit a copy");
+            drag.Hover(drag.Target, false, false);
+            Check.That(drag.Choice is null, "released Ctrl left a stale copy choice");
+            drag.Hover(PathTools.ThisPc, true, false);
+            Check.That(drag.Choice is null, "virtual location accepted a file drop");
+            var folder = new FileDragSession([@"C:\source"]);
+            folder.Hover(@"C:\source\child", true, false);
+            Check.That(folder.Release(true, false) is null, "folder could be copied into itself");
+        });
+        yield return ("file_drag_cancel_and_source_snapshot_are_stable", "Selection changes after drag start cannot add files to the transfer; cancellation and leaving every target cannot produce a transfer.", () =>
+        {
+            var selected = new List<string> { @"C:\source\a.txt" };
+            var drag = new FileDragSession(selected);
+            selected.Add(@"C:\source\b.txt");
+            Check.Equal(1, drag.Sources.Count);
+            drag.Hover(@"D:\target", true, false);
+            drag.Cancel();
+            Check.That(drag.Release(false, true) is null && drag.Choice is null, "cancelled drag still had a transfer");
+            var outside = new FileDragSession(selected);
+            outside.Hover(@"D:\target", false, false);
+            outside.Hover(null, false, false);
+            Check.That(outside.Release(false, false) is null, "leaving target retained a stale transfer");
+        });
+        yield return ("selection_gesture_preserves_clicks_and_subthreshold_jitter", "A click with small mouse movement stays native; crossing the threshold commits once, and releasing resets the next gesture.", () =>
+        {
+            var gesture = new SelectionGesture();
+            Check.That(!gesture.Move(100, 100), "movement without a press started selection");
+            gesture.Press(100, 100);
+            Check.That(!gesture.Move(102, 103) && !gesture.Dragging, "click jitter stole native selection");
+            gesture.Reset();
+            gesture.Press(200, 200);
+            Check.That(gesture.Move(196, 200) && gesture.Dragging, "horizontal box drag did not start");
+            Check.That(!gesture.Move(190, 180) && gesture.Dragging, "drag initialized twice");
+            gesture.Reset();
+            Check.That(!gesture.Dragging && !gesture.Move(0, 0), "release left capture pending");
+        });
+        yield return ("selection_gesture_cancellation_and_vertical_drag", "Cancellation discards the old origin; a new vertical drag starts at its own threshold, including negative coordinates.", () =>
+        {
+            var gesture = new SelectionGesture();
+            gesture.Press(1000, 1000);
+            gesture.Reset();
+            gesture.Press(-20, -20);
+            Check.That(!gesture.Move(-19, -17), "old origin leaked into the next press");
+            Check.That(gesture.Move(-20, -16), "vertical threshold failed");
+            gesture.Press(10, 10);
+            Check.That(!gesture.Dragging && !gesture.Move(11, 10), "new press inherited a drag");
+        });
         yield return ("rename_repositions_one_row_without_resetting_large_list", "A rename that changes sort position preserves all 10,000 row instances and sends one Move notification instead of clearing or replacing the file list.", () =>
         {
             var rows = new ObservableCollection<RenameRow>(Enumerable.Range(0, 10_000).Select(i => new RenameRow(i.ToString("D5"))));

@@ -473,6 +473,11 @@ internal static partial class Native
     public static extern short GetKeyState(int key);
 
     [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
+
+    public static bool IsPhysicalKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+
+    [DllImport("user32.dll")]
     public static extern bool OpenClipboard(IntPtr owner);
 
     [DllImport("user32.dll")]

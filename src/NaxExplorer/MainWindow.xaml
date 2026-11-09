@@ -226,6 +226,14 @@
         <!-- The app's own progress cards for copy, move and delete, in place of Windows' progress window. -->
         <StackPanel x:Name="OperationsPanel" Grid.Row="2" VerticalAlignment="Bottom" HorizontalAlignment="Right" Width="380" Margin="0,0,20,20" Spacing="8" />
 
+        <Canvas Grid.RowSpan="3" IsHitTestVisible="False">
+            <Border x:Name="MouseDragBadge" Visibility="Collapsed" Background="{ThemeResource PaneBackgroundBrush}"
+                    BorderBrush="{ThemeResource AccentTextFillColorPrimaryBrush}" BorderThickness="1" CornerRadius="6" Padding="10,6" MaxWidth="320">
+                <Border.RenderTransform><TranslateTransform x:Name="MouseDragTransform" /></Border.RenderTransform>
+                <TextBlock x:Name="MouseDragText" FontSize="13" TextTrimming="CharacterEllipsis" />
+            </Border>
+        </Canvas>
+
         <!-- Below the title bar, whose area belongs to window dragging. -->
         <controls:ImageViewer x:Name="Viewer" Grid.Row="1" Grid.RowSpan="2" Visibility="Collapsed" />
     </Grid>

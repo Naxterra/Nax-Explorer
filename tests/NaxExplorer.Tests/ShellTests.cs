@@ -9,6 +9,45 @@ internal static class ShellTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("file_drag_prepares_mixed_storage_items_without_changing_payload", "Files and folders, including Unicode names, become a complete ordered native drag payload while their contents and timestamps stay unchanged.", () =>
+        {
+            string root = Fixtures.TempFolder("drag-payload");
+            string file = Fixtures.Write(root, "Ünicode note.txt", "drag payload");
+            string child = Fixtures.Write(root, @"folder\child.txt", "nested payload");
+            string folder = Path.GetDirectoryName(child)!;
+            DateTime stamp = File.GetLastWriteTimeUtc(file);
+            string[] paths = [file, folder, child];
+            var items = FileDragPayload.ReadAsync(paths).GetAwaiter().GetResult();
+            Check.Sequence(paths, items.Select(item => item.Path));
+            Check.That(items[0] is Windows.Storage.StorageFile && items[1] is Windows.Storage.StorageFolder, "native drag types were lost");
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage
+            {
+                RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy,
+            };
+            package.SetStorageItems(items);
+            var view = package.GetView();
+            Check.That(view.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems), "storage format was not ready when the drag began");
+            Check.Sequence(paths, view.GetStorageItemsAsync().AsTask().GetAwaiter().GetResult().Select(item => item.Path));
+            Check.Equal("drag payload", File.ReadAllText(file));
+            Check.Equal("nested payload", File.ReadAllText(child));
+            Check.Equal(stamp, File.GetLastWriteTimeUtc(file));
+        });
+        yield return ("file_drag_rejects_incomplete_or_cancelled_payloads", "A missing selected file cannot silently become a partial drag, and cancellation prevents preparation from proceeding.", () =>
+        {
+            string root = Fixtures.TempFolder("drag-missing");
+            string file = Fixtures.Write(root, "present.txt", "keep me");
+            bool rejected = false;
+            try { FileDragPayload.ReadAsync([file, Path.Combine(root, "missing.txt")]).GetAwaiter().GetResult(); }
+            catch (Exception ex) when (ex is FileNotFoundException or System.Runtime.InteropServices.COMException) { rejected = true; }
+            Check.That(rejected, "missing file silently produced a partial payload");
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            bool stopped = false;
+            try { FileDragPayload.ReadAsync([file], cancelled.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { stopped = true; }
+            Check.That(stopped, "cancelled drag preparation continued");
+            Check.Equal("keep me", File.ReadAllText(file));
+        });
         yield return ("native_rename_preserves_payload_and_unrelated_siblings", "Renaming a generated file and folder through the Windows shell changes their names while sibling contents and modification times remain intact.", () =>
         {
             string root = Fixtures.TempFolder("native-rename");
