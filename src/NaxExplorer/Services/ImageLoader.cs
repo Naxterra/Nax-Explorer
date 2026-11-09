@@ -63,8 +63,12 @@ internal static class ImageLoader
         using SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync(
             BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, transform, ExifOrientationMode.RespectExifOrientation, ColorManagementMode.ColorManageToSRgb);
         token.ThrowIfCancellationRequested();
-        var source = new SoftwareBitmapSource();
-        await source.SetBitmapAsync(bitmap);
+        // Own the copied pixels directly, so retiring a picture cannot leave a
+        // SoftwareBitmapSource operation with a closed native image source.
+        token.ThrowIfCancellationRequested();
+        var source = new WriteableBitmap(bitmap.PixelWidth, bitmap.PixelHeight);
+        bitmap.CopyToBuffer(source.PixelBuffer);
+        source.Invalidate();
         return new LoadedImage(source, bitmap.PixelWidth, bitmap.PixelHeight, originalWidth, originalHeight, Animated: false);
     }
 
