@@ -55,6 +55,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimerWrapper _previewTimer;
     private FilePane _active;
     private HashSet<string> _cut = new(StringComparer.OrdinalIgnoreCase);
+    private bool _windowIsActive;
 
     public MainWindow(string? startPath)
     {
@@ -125,8 +126,14 @@ public sealed partial class MainWindow : Window
         bool firstActivation = true;
         Activated += (_, args) =>
         {
-            _shellWindow.Activated(args.WindowActivationState != WindowActivationState.Deactivated);
-            if (args.WindowActivationState == WindowActivationState.Deactivated) return;
+            _windowIsActive = args.WindowActivationState != WindowActivationState.Deactivated;
+            _shellWindow.Activated(_windowIsActive);
+            if (!_windowIsActive)
+            {
+                if (!IsViewerOpen && !LeftPane.HasSelectionInteraction && !RightPane.HasSelectionInteraction)
+                    DispatcherQueue.SafeEnqueue(ClearSelectionAfterDeactivation);
+                return;
+            }
             _active.UpdateCutMarks();
             // On its first activation the window gives the focus to its first control; the list takes it back, so
             // typing works right away.
@@ -135,6 +142,19 @@ public sealed partial class MainWindow : Window
         };
         LeftPane.FocusAfterFirstLoad = true;
         KeyboardHook.Install(App.OnHookedKey);
+    }
+
+    private void ClearSelectionAfterDeactivation()
+    {
+        if (_windowIsActive || IsViewerOpen || LeftPane.HasSelectionInteraction || RightPane.HasSelectionInteraction) return;
+        if (Root.XamlRoot is { } root && VisualTreeHelper.GetOpenPopupsForXamlRoot(root).Count > 0) return;
+        IntPtr foreground = Native.GetForegroundWindow();
+        if (foreground == IntPtr.Zero || foreground == Hwnd) return;
+        Native.GetWindowThreadProcessId(foreground, out uint process);
+        // Owned native dialogs and flyouts need their source selection. A different Explorer window is outside this one.
+        if (process == Environment.ProcessId && !App.Instance!.Windows.Any(window => window.Hwnd == foreground)) return;
+        LeftPane.ClearSelection();
+        RightPane.ClearSelection();
     }
 
     /// <summary>F7 from the keyboard hook: copy to the other pane, unless a text box or the viewer has the focus.</summary>

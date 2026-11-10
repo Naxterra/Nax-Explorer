@@ -20,6 +20,10 @@ public sealed class SelectionGesture
         return true;
     }
 
+    /// <summary>A plain click on the background dismisses selection; a row click or a box drag keeps its own result.</summary>
+    public bool ClearsSelectionOnRelease(bool pressedOnItem, bool preserveSelection) =>
+        _origin is not null && !Dragging && !pressedOnItem && !preserveSelection;
+
     public void Reset()
     {
         _origin = null;

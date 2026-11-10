@@ -374,6 +374,9 @@ internal static partial class Native
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
     [DllImport("shell32.dll")]
     public static extern void ILFree(IntPtr pidl);
 

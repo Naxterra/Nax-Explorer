@@ -8,6 +8,27 @@ internal static class SelectionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("empty_space_click_dismisses_selection_after_pointer_jitter", "A background click clears selection even after subthreshold movement, while a click on a file's date/type area and modified clicks retain their selection semantics.", () =>
+        {
+            var gesture = new SelectionGesture();
+            gesture.Press(100, 200);
+            gesture.Move(102, 201);
+            Check.That(gesture.ClearsSelectionOnRelease(false, false), "plain background click did not dismiss selection");
+            Check.That(!gesture.ClearsSelectionOnRelease(true, false), "a file row's whitespace was mistaken for background");
+            Check.That(!gesture.ClearsSelectionOnRelease(false, true), "Ctrl/Shift background click discarded retained selection");
+        });
+        yield return ("empty_space_release_preserves_box_result_and_cancelled_gestures", "Releasing a box drag keeps the selected range, and cancelled or inactive gestures cannot dismiss the next selection.", () =>
+        {
+            var gesture = new SelectionGesture();
+            Check.That(!gesture.ClearsSelectionOnRelease(false, false), "inactive gesture cleared selection");
+            gesture.Press(0, 0);
+            gesture.Move(20, 40);
+            Check.That(!gesture.ClearsSelectionOnRelease(false, false), "box selection was cleared on release");
+            gesture.Reset();
+            Check.That(!gesture.ClearsSelectionOnRelease(false, false), "cancelled gesture cleared selection");
+            gesture.Press(200, 300);
+            Check.That(gesture.ClearsSelectionOnRelease(false, false), "next background click inherited the drag");
+        });
         yield return ("file_drag_chooses_modifiers_at_release_and_completes_once", "Ctrl pressed after movement changes a same-drive move to copy; Shift at release changes a cross-drive copy to move, and release cannot perform the action twice.", () =>
         {
             var drag = new FileDragSession([@"C:\source\a.txt"]);

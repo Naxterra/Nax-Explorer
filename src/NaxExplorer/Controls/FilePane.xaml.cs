@@ -113,8 +113,8 @@ public sealed partial class FilePane : UserControl
         foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
         {
             list.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
-            list.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
         }
+        ContentArea.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
         ContentArea.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
         ContentArea.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
         ContentArea.PointerCanceled += (_, e) =>
@@ -1241,6 +1241,7 @@ public sealed partial class FilePane : UserControl
     private Windows.Foundation.Point? _marqueeStart;
     private bool _marqueeShown;
     private bool _marqueeKeep;
+    private bool _marqueePressedOnItem;
     private readonly SelectionGesture _marqueeGesture = new();
     private DependencyObject? _marqueePressedSource;
     private bool _marqueeClearPending;
@@ -1279,11 +1280,25 @@ public sealed partial class FilePane : UserControl
     private void TraceSelectionLayout(object? sender, object e) => _selectionTrace?.Layout();
 
     internal bool IsSelectingWithMouse => _marqueeStart is not null || IsDraggingItems;
+    internal bool HasSelectionInteraction => IsDraggingItems || _marqueeGesture.Dragging || _renaming ||
+        CurrentList.SelectedItem is FileItem { IsRenaming: true };
+
+    internal void ClearSelection()
+    {
+        EndMarquee();
+        CancelMouseFileDrag();
+        if (CurrentList.SelectedRanges.Count == 0) return;
+        _adjustingSelection = true;
+        try { CurrentList.SelectedItems.Clear(); }
+        finally { _adjustingSelection = false; }
+        NotifySelectionChanged();
+    }
 
     /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
     private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not ListViewBase list || e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        if (e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        ListViewBase list = CurrentList;
         PointerPoint point = e.GetCurrentPoint(ContentArea);
         if (!point.Properties.IsLeftButtonPressed) return;
         // A previous pending click may have lost its child capture outside the
@@ -1319,6 +1334,9 @@ public sealed partial class FilePane : UserControl
         _marqueeStart = point.Position;
         _marqueeGesture.Press(point.Position.X, point.Position.Y);
         _marqueePressedSource = e.OriginalSource as DependencyObject;
+        _marqueePressedOnItem = false;
+        for (var node = _marqueePressedSource; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
+            if (node is SelectorItem) { _marqueePressedOnItem = true; break; }
         _marqueeList = list;
         // Whitespace belongs to box selection. Keep the native click path, but
         // prevent the list from launching a competing file drag from this press.
@@ -1582,6 +1600,14 @@ public sealed partial class FilePane : UserControl
             QueueMarquee(e.GetCurrentPoint(ContentArea).Position);
             ApplyPendingMarquee();
         }
+        bool preserve = _marqueeKeep || e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift)
+            || Native.IsPhysicalKeyDown(0x11) || Native.IsPhysicalKeyDown(0x10);
+        if (_marqueeGesture.ClearsSelectionOnRelease(_marqueePressedOnItem, preserve) && _marqueeList is { } list)
+        {
+            _adjustingSelection = true;
+            try { list.SelectedItems.Clear(); }
+            finally { _adjustingSelection = false; }
+        }
         if (InteractionTrace.Enabled) InteractionTrace.Record("mouse-release", data: new { Dragged = dragged, Point = e.GetCurrentPoint(ContentArea).Position, Selected = _marqueeList?.SelectedRanges.Select(r => new { r.FirstIndex, r.Length }).ToArray() });
         EndMarquee();
         if (dragged) e.Handled = true;
@@ -1611,6 +1637,7 @@ public sealed partial class FilePane : UserControl
         _marqueeShown = false;
         _marqueeSelection = null;
         _marqueePressedSource = null;
+        _marqueePressedOnItem = false;
         _marqueeClearPending = false;
         if (_marqueeVisual is not null) _marqueeVisual.Opacity = 0;
         ContentArea.ReleasePointerCaptures();
@@ -2252,6 +2279,7 @@ public sealed partial class FilePane : UserControl
         // menu is still loading or when it fails. It opens one file, so it is offered only when one file is selected.
         if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
+        if (!container && !several) StartMenuPinMenu.Add(menu, item.Entry.FullPath, _owner);
         menu.Items.Add(new MenuFlyoutSeparator());
         // An item of the Recycle Bin or another shell place cannot be copied, moved or renamed by path; Windows' part
         // of the menu brings what it offers instead, such as "Restore".

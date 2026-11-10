@@ -17,6 +17,7 @@ var suites = new (string File, IEnumerable<(string Name, string Scenario, Action
     ("ListingTests.cs", ListingTests.All()),
     ("PreviewTests.cs", PreviewTests.All()),
     ("ShellTests.cs", ShellTests.All()),
+    ("StartMenuPinTests.cs", StartMenuPinTests.All()),
     ("ModelTests.cs", ModelTests.All()),
 };
 
@@ -42,7 +43,7 @@ foreach (var (file, tests) in suites)
         catch (Exception ex)
         {
             failures++;
-            result = "FAIL: " + ex.Message;
+            result = "FAIL: " + ex;
         }
         Console.WriteLine($"{file}::{name} | {scenario} | {result}");
     }
