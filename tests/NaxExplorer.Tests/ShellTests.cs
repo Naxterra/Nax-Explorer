@@ -62,6 +62,21 @@ internal static class ShellTests
             Check.That(rejected, "a missing file was silently left out");
             Check.Equal("one", File.ReadAllText(first));
         });
+        yield return ("file_drag_time_limit_holds_even_when_a_check_blocks_and_ignores_cancellation", "Work stuck in a call that ignores cancellation, as on a stalled network share, still gets the answer 'later' at the end of the time limit instead of holding the drag until the call returns.", () =>
+        {
+            using var release = new ManualResetEventSlim();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            string? result = FileDragPayload.WithinAsync<string>(_ =>
+            {
+                release.Wait(TimeSpan.FromSeconds(10)); // blocks without looking at the token
+                return Task.FromResult("too late");
+            }, TimeSpan.FromMilliseconds(200)).GetAwaiter().GetResult();
+            clock.Stop();
+            release.Set();
+            Check.That(result is null, "the stuck work was waited for");
+            Check.That(clock.Elapsed < TimeSpan.FromSeconds(3), $"the answer took {clock.Elapsed.TotalSeconds:0.0} s instead of about 0.2 s");
+            Check.Equal("in time", FileDragPayload.WithinAsync<string>(_ => Task.FromResult("in time"), TimeSpan.FromSeconds(5)).GetAwaiter().GetResult());
+        });
         yield return ("native_rename_preserves_payload_and_unrelated_siblings", "Renaming a generated file and folder through the Windows shell changes their names while sibling contents and modification times remain intact.", () =>
         {
             string root = Fixtures.TempFolder("native-rename");

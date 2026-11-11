@@ -2428,8 +2428,10 @@ public sealed partial class FilePane : UserControl
             // keep waiting until the native drag ends.
             EndMouseFileGesture(handOff: true);
             try { FinishItemDrag(await container.StartDragAsync(nativePoint) == DataPackageOperation.Move); }
-            catch (System.Runtime.InteropServices.COMException ex)
+            catch (Exception ex)
             {
+                // This handler is async void, so every failure of the native drag ends here instead of ending the app.
+                if (ex is not System.Runtime.InteropServices.COMException) CrashLog.Write(ex);
                 FinishItemDrag(moved: false);
                 if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
             }
@@ -2469,8 +2471,10 @@ public sealed partial class FilePane : UserControl
                 : await CheckedTransfer(drag.Sources, drop.Target, drop.Move);
             InteractionTrace.Record("mouse-file-drop-complete", data: new { Completed = completed, drop.Move, drop.Recycle });
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
+        catch (Exception ex)
         {
+            // This handler is async void, so every failure of the drop ends here instead of ending the app.
+            if (ex is not (IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)) CrashLog.Write(ex);
             if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
     }
@@ -2527,8 +2531,10 @@ public sealed partial class FilePane : UserControl
             e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
             InteractionTrace.Record("drag-ready", started, new { Count = paths.Length, Ready = items is not null, Allowed = e.AllowedOperations.ToString(), Requested = e.Data.RequestedOperation.ToString() });
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
+        catch (Exception ex)
         {
+            // Every failure ends here: this handler is async void, so an escaping exception would end the app.
+            if (ex is not (IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)) CrashLog.Write(ex);
             e.Cancel = true;
             if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
@@ -2545,12 +2551,22 @@ public sealed partial class FilePane : UserControl
     /// <summary>Supplies the storage items of a drag whose items took too long to resolve before it started.</summary>
     private static async void ProvideStorageItems(DataProviderRequest request, string[] paths)
     {
-        DataProviderDeferral deferral = request.GetDeferral();
-        try { request.SetData(await FileDragPayload.ReadAsync(paths)); }
-        // An item that vanished meanwhile leaves the target without data, so nothing reaches it at all rather than
-        // part of the selection.
+        DataProviderDeferral? deferral = null;
+        try
+        {
+            deferral = request.GetDeferral();
+            request.SetData(await FileDragPayload.ReadAsync(paths));
+        }
+        // An item that vanished meanwhile leaves the target without data, so nothing reaches it at all rather than part
+        // of the selection. Every failure ends here: this runs outside any caller, often on a worker thread, where an
+        // escaping exception would end the app in the middle of a drop.
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException) { }
-        finally { deferral.Complete(); }
+        catch (Exception ex) { CrashLog.Write(ex); }
+        finally
+        {
+            try { deferral?.Complete(); }
+            catch (Exception ex) { CrashLog.Write(ex); }
+        }
     }
 
     private void List_DragItemsStarting(object sender, DragItemsStartingEventArgs e)

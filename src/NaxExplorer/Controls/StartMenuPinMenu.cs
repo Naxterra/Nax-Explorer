@@ -63,11 +63,17 @@ internal static class StartMenuPinMenu
         }
     }
 
+    /// <summary>
+    /// True when the menu runs in this sign-in session. Another signed-in user's menu, in a session of its own, serves
+    /// that user's pipe and does not count.
+    /// </summary>
     private static bool IsMenuRunning()
     {
+        int session;
+        using (Process current = Process.GetCurrentProcess()) session = current.SessionId;
         Process[] running = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(InstalledMenu));
-        foreach (Process process in running) process.Dispose();
-        return running.Length > 0;
+        try { return running.Any(process => process.SessionId == session); }
+        finally { foreach (Process process in running) process.Dispose(); }
     }
 
     private static void ShowStartEntry(MenuFlyoutSubItem menu, MainWindow owner)
@@ -81,8 +87,9 @@ internal static class StartMenuPinMenu
                 await Task.Run(StartMenu);
                 owner.ShowMessage(Loc.T("NaxStartMenuStarting"), InfoBarSeverity.Informational);
             }
-            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+            catch (Exception ex)
             {
+                // The click handler is async void, so every failure is shown here instead of ending the app.
                 owner.ShowMessage(Loc.F("PinToNaxStartMenuFailed", ex.Message), InfoBarSeverity.Error);
             }
         };
@@ -91,24 +98,33 @@ internal static class StartMenuPinMenu
 
     /// <summary>
     /// Starts the menu the way it starts at sign-in, through its own scheduled task, which runs it with the rights its
-    /// setup chose and without a UAC prompt. Only when that task is missing is the program itself started.
+    /// setup chose and without a UAC prompt. The program itself is started only when Windows reports that the task does
+    /// not exist; its manifest asks for no elevation ("asInvoker"), so that start shows no UAC prompt either. Any other
+    /// failure, such as a task this user may not run, is reported and starts nothing, so two copies never start.
     /// </summary>
     private static void StartMenu()
     {
-        var task = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "schtasks.exe"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        task.ArgumentList.Add("/run");
-        task.ArgumentList.Add("/tn");
-        task.ArgumentList.Add(SignInTask);
+        const int FileNotFound = unchecked((int)0x80070002);
+        object? service = null, folder = null, task = null, running = null;
         try
         {
-            using Process? runner = Process.Start(task);
-            if (runner is not null && runner.WaitForExit(10000) && runner.ExitCode == 0) return;
+            service = Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service", throwOnError: true)!)!;
+            ((dynamic)service).Connect();
+            folder = ((dynamic)service).GetFolder(@"\");
+            try { task = ((dynamic)folder).GetTask(SignInTask); }
+            catch (System.Runtime.InteropServices.COMException ex) when (ex.HResult == FileNotFound) { }
+            if (task is not null)
+            {
+                // An empty string runs the task's own action without parameters.
+                running = ((dynamic)task).Run("");
+                return;
+            }
         }
-        catch (System.ComponentModel.Win32Exception) { }
+        finally
+        {
+            foreach (object? com in new[] { running, task, folder, service })
+                if (com is not null && System.Runtime.InteropServices.Marshal.IsComObject(com)) System.Runtime.InteropServices.Marshal.FinalReleaseComObject(com);
+        }
         Process.Start(new ProcessStartInfo(InstalledMenu) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(InstalledMenu)! })?.Dispose();
     }
 

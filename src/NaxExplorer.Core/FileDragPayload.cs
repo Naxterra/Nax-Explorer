@@ -25,10 +25,27 @@ public static class FileDragPayload
     /// very many items or a slow network share. The caller then supplies them when the drop target asks, instead of
     /// holding the drag back. A missing or unreadable item still fails, so a drag never silently leaves one out.
     /// </summary>
-    public static async Task<IStorageItem[]?> ReadWithinAsync(IReadOnlyList<string> paths, TimeSpan budget)
+    public static Task<IStorageItem[]?> ReadWithinAsync(IReadOnlyList<string> paths, TimeSpan budget) =>
+        WithinAsync(token => ReadAsync(paths, token), budget);
+
+    /// <summary>
+    /// The result of <paramref name="work"/> if it finishes within <paramref name="budget"/>, otherwise null at the end
+    /// of the budget. The answer never waits longer, even when the work is stuck in a call that ignores cancellation,
+    /// such as a check on a stalled network share: it is cancelled and left to end in the background, where a late
+    /// failure is observed and dropped. A failure within the budget is passed on.
+    /// </summary>
+    public static async Task<T?> WithinAsync<T>(Func<CancellationToken, Task<T>> work, TimeSpan budget) where T : class
     {
-        using var limit = new CancellationTokenSource(budget);
-        try { return await ReadAsync(paths, limit.Token).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (limit.IsCancellationRequested) { return null; }
+        var limit = new CancellationTokenSource();
+        // On the thread pool, so even work that blocks before its first await cannot hold the caller.
+        Task<T> running = Task.Run(() => work(limit.Token));
+        _ = running.ContinueWith(task => { _ = task.Exception; limit.Dispose(); }, TaskScheduler.Default);
+        if (await Task.WhenAny(running, Task.Delay(budget)).ConfigureAwait(false) != running)
+        {
+            try { limit.Cancel(); } catch (ObjectDisposedException) { }
+            return null;
+        }
+        try { return await running.ConfigureAwait(false); }
+        catch (OperationCanceledException) { return null; }
     }
 }
