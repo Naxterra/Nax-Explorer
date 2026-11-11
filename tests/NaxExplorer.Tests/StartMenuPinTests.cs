@@ -116,6 +116,23 @@ internal static class StartMenuPinTests
             server.Dispose();
             Check.That(server.Completion.Wait(2000), "shutdown must release the listener");
         });
+
+        yield return ("startmenu_pin_listener_answers_a_failing_request_and_keeps_listening", "A handler that throws an unexpected exception turns that one request into an error reply and a reported error, and the next request is still answered.", () =>
+        {
+            string name = "NaxPinTest." + Guid.NewGuid().ToString("N");
+            var errors = new List<Exception>();
+            using var server = new StartMenuPinServer(async (request, _) =>
+            {
+                await Task.Yield();
+                if (request.AppId == "broken") throw new InvalidOperationException("layout is busy");
+                return new PinReply(true, Groups: [new("tools", "Tools")]);
+            }, ex => { lock (errors) errors.Add(ex); }, name);
+            PinReply failed = StartMenuProtocol.SendAsync(new("pin", "broken", "tools"), name).GetAwaiter().GetResult();
+            Check.That(!failed.Success && failed.Error is { } error && error.Contains("layout is busy"), "a failing request did not get an error reply");
+            Check.That(StartMenuProtocol.SendAsync(new("groups"), name).GetAwaiter().GetResult().Success, "the listener stopped after a failing request");
+            lock (errors) Check.That(errors.Any(ex => ex is InvalidOperationException), "the failure was not reported");
+            Check.That(!server.Completion.IsCompleted, "the listener ended");
+        });
     }
 
     private static void OnSta(Action body)

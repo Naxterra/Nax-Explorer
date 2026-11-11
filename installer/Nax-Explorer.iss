@@ -256,6 +256,7 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     RemoveStartAtSignIn;
+    RemovePinnedShortcuts(ExpandConstant('{userprograms}'));
     ReleaseFolderType('Directory');
     ReleaseFolderType('Drive');
     if ReleaseCommand(WinEKey) then

@@ -874,17 +874,17 @@ public sealed partial class FilePane : UserControl
             _items.Remove(item);
         }
         // Any change here makes the kept sizes of this folder and the folders above it wrong, but not those of the
-        // folders inside it. A changed or removed folder, which may have been replaced, takes the sizes kept for
-        // everything inside it along.
+        // folders inside it. A changed, removed or added folder, which may replace one of the same name counted
+        // earlier, takes the sizes kept for everything inside it along.
         FolderSizeCache.Shared.Forget(_tab.Location);
         foreach (FileEntry changed in changes.Changed)
         {
             if (changed.Kind == EntryKind.Folder) FolderSizeCache.Shared.ForgetWithContents(changed.FullPath);
             if (byPath.TryGetValue(changed.FullPath, out FileItem? item)) item.Update(changed);
         }
-        foreach (FileEntry removed in changes.Removed)
+        foreach (FileEntry entry in changes.Removed.Concat(changes.Added))
         {
-            if (removed.Kind == EntryKind.Folder) FolderSizeCache.Shared.ForgetWithContents(removed.FullPath);
+            if (entry.Kind == EntryKind.Folder) FolderSizeCache.Shared.ForgetWithContents(entry.FullPath);
         }
         Comparison<FileEntry> order = EntrySorter.Comparison(_tab.Sort, _tab.Descending);
         ItemStyle style = RowStyle;
@@ -2424,8 +2424,9 @@ public sealed partial class FilePane : UserControl
             // pointer route and do not depend on the native drop message loop.
             _nativeDragPaths = drag.Sources.ToArray();
             var nativePoint = e.GetCurrentPoint(container);
-            EndMouseFileGesture();
-            IsDraggingItems = true;
+            // The drag goes on in Windows' hands, so it is not finished here: folder counting and a deferred refresh
+            // keep waiting until the native drag ends.
+            EndMouseFileGesture(handOff: true);
             try { FinishItemDrag(await container.StartDragAsync(nativePoint) == DataPackageOperation.Move); }
             catch (System.Runtime.InteropServices.COMException ex)
             {
@@ -2480,7 +2481,8 @@ public sealed partial class FilePane : UserControl
         EndMouseFileGesture();
     }
 
-    private void EndMouseFileGesture()
+    /// <param name="handOff">True when the drag continues as Windows' own drag, which finishes it when it ends.</param>
+    private void EndMouseFileGesture(bool handOff = false)
     {
         bool dragging = _mouseFileDrag is not null;
         _mouseFileDrag = null;
@@ -2491,7 +2493,9 @@ public sealed partial class FilePane : UserControl
         _itemPressedSource = null;
         _fileDragTimer?.Stop();
         _owner?.EndMouseFileDrag(this);
-        if (dragging) { ContentArea.ReleasePointerCaptures(); FinishItemDrag(moved: false); }
+        if (!dragging) return;
+        ContentArea.ReleasePointerCaptures();
+        if (!handOff) FinishItemDrag(moved: false);
     }
 
     private async void Item_DragStarting(UIElement sender, DragStartingEventArgs e)
@@ -2512,12 +2516,16 @@ public sealed partial class FilePane : UserControl
                 e.Cancel = true;
                 return;
             }
-            var items = await FileDragPayload.ReadAsync(paths);
-            if (_closed) { e.Cancel = true; return; }
-            e.Data.SetStorageItems(items);
+            // The app's own panes and sidebar only need the paths. Other programs need storage items, which are ready
+            // when the drag starts if they resolve within a second; for very many items or a slow share they are
+            // supplied when the drop target asks, so the drag never waits for all of them.
             e.Data.Properties[InternalDragFormat] = paths;
+            IStorageItem[]? items = await FileDragPayload.ReadWithinAsync(paths, TimeSpan.FromSeconds(1));
+            if (_closed) { e.Cancel = true; return; }
+            if (items is not null) e.Data.SetStorageItems(items);
+            else e.Data.SetDataProvider(StandardDataFormats.StorageItems, request => ProvideStorageItems(request, paths));
             e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
-            InteractionTrace.Record("drag-ready", started, new { Count = items.Length, Allowed = e.AllowedOperations.ToString(), Requested = e.Data.RequestedOperation.ToString() });
+            InteractionTrace.Record("drag-ready", started, new { Count = paths.Length, Ready = items is not null, Allowed = e.AllowedOperations.ToString(), Requested = e.Data.RequestedOperation.ToString() });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
         {
@@ -2532,6 +2540,17 @@ public sealed partial class FilePane : UserControl
             }
             deferral.Complete();
         }
+    }
+
+    /// <summary>Supplies the storage items of a drag whose items took too long to resolve before it started.</summary>
+    private static async void ProvideStorageItems(DataProviderRequest request, string[] paths)
+    {
+        DataProviderDeferral deferral = request.GetDeferral();
+        try { request.SetData(await FileDragPayload.ReadAsync(paths)); }
+        // An item that vanished meanwhile leaves the target without data, so nothing reaches it at all rather than
+        // part of the selection.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException) { }
+        finally { deferral.Complete(); }
     }
 
     private void List_DragItemsStarting(object sender, DragItemsStartingEventArgs e)

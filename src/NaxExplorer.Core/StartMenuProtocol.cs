@@ -93,24 +93,39 @@ public sealed class StartMenuPinServer : IDisposable
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(4));
                 PinRequest request = await StartMenuProtocol.ReadAsync<PinRequest>(_pipe, timeout.Token).ConfigureAwait(false);
-                PinReply reply = request.Version != 1 || request.Operation is not ("groups" or "pin")
-                    ? new(false, "Unsupported pin request.")
-                    : await handle(request, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+                PinReply reply;
+                if (request.Version != 1 || request.Operation is not ("groups" or "pin")) reply = new(false, "Unsupported pin request.");
+                else
+                {
+                    // Whatever the handler throws ends this one request with an error reply, never the listener.
+                    try { reply = await handle(request, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        onError(ex);
+                        reply = new(false, "The pin request failed: " + ex.Message);
+                    }
+                }
                 await StartMenuProtocol.WriteAsync(_pipe, reply, timeout.Token).ConfigureAwait(false);
                 // DisconnectNamedPipe discards unread output. Wait for the client to consume the reply and close.
                 await _pipe.ReadAsync(new byte[1], timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is IOException or InvalidDataException or OperationCanceledException or JsonException or ObjectDisposedException)
+            catch (Exception ex) when (ex is IOException or InvalidDataException or OperationCanceledException or JsonException or ObjectDisposedException
+                or InvalidOperationException or UnauthorizedAccessException)
             {
                 if (!_stop.IsCancellationRequested && ex is not OperationCanceledException) onError(ex);
-                // An unrecoverable listener failure must not turn into a busy retry loop in the background.
+                // An unrecoverable listener failure must not turn into a busy retry loop in the background; it is
+                // reported through onError above instead of ending silently.
                 if (!accepted) return;
             }
             finally
             {
                 // A peer that closed during a read puts the stream into Broken (IsConnected is then false), but it
                 // still needs Disconnect to reset the server for the next connection.
-                if (!_stop.IsCancellationRequested && accepted) _pipe.Disconnect();
+                if (!_stop.IsCancellationRequested && accepted)
+                {
+                    try { _pipe.Disconnect(); }
+                    catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException) { onError(ex); }
+                }
             }
         }
     }

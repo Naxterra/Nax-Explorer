@@ -29,3 +29,11 @@ begin
   // Unknown files are preserved; an empty app data directory is removed.
   RemoveDir(Folder);
 end;
+
+// "Pin to Nax-StartMenu" puts its shortcuts in this one folder of the user's Start Menu programs, because Nax-StartMenu
+// only accepts pins from there. The folder belongs to the app alone; the user's other Start Menu entries stay.
+procedure RemovePinnedShortcuts(const ProgramsFolder: String);
+begin
+  if ProgramsFolder = '' then Exit;
+  DelTree(ProgramsFolder + '\Nax pinned apps', True, True, True);
+end;

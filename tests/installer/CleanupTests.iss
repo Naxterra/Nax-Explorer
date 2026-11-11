@@ -76,6 +76,17 @@ begin
   Check((Contents(Folder + '\user-note.txt') = 'keep this') and
     not FileExists(Folder + '\shellwindow-trace.log'), 'cleanup_preserves_unrecognized_files');
 
+  Folder := Root + '\programs';
+  Put(Folder + '\Nax pinned apps\0123456789ABCDEF\Game.lnk', 'pinned shortcut');
+  Put(Folder + '\Nax pinned apps\FEDCBA9876543210\Tool.url', 'pinned link');
+  Put(Folder + '\Other app\Other app.lnk', 'someone else''s shortcut');
+  Put(Folder + '\Loose.lnk', 'loose shortcut');
+  RemovePinnedShortcuts(Folder);
+  Check(not DirExists(Folder + '\Nax pinned apps') and (Contents(Folder + '\Other app\Other app.lnk') = 'someone else''s shortcut') and
+    (Contents(Folder + '\Loose.lnk') = 'loose shortcut'), 'uninstall_removes_pinned_shortcuts_and_keeps_other_start_menu_entries');
+  RemovePinnedShortcuts('');
+  Check(DirExists(Folder + '\Other app'), 'an_unknown_programs_folder_removes_nothing');
+
   // The PowerShell harness creates index and models as junctions to the outside fixture before this process starts.
   Folder := Root + '\junction';
   CleanupAppData(Folder, True);

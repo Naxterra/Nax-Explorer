@@ -48,6 +48,20 @@ internal static class ShellTests
             Check.That(stopped, "cancelled drag preparation continued");
             Check.Equal("keep me", File.ReadAllText(file));
         });
+        yield return ("file_drag_items_that_take_too_long_are_left_for_later_but_missing_ones_still_fail", "Storage items resolved within the time limit come back complete and in order; when the limit runs out the answer is 'later' instead of an error, and a missing file still fails instead of being left out.", () =>
+        {
+            string root = Fixtures.TempFolder("drag-budget");
+            string first = Fixtures.Write(root, "first.txt", "one");
+            string second = Fixtures.Write(root, "second.txt", "two");
+            var items = FileDragPayload.ReadWithinAsync([first, second], TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            Check.Sequence(new[] { first, second }, items!.Select(item => item.Path));
+            Check.That(FileDragPayload.ReadWithinAsync([first, second], TimeSpan.Zero).GetAwaiter().GetResult() is null, "an exhausted time limit was not reported as 'later'");
+            bool rejected = false;
+            try { FileDragPayload.ReadWithinAsync([first, Path.Combine(root, "missing.txt")], TimeSpan.FromSeconds(30)).GetAwaiter().GetResult(); }
+            catch (Exception ex) when (ex is FileNotFoundException or System.Runtime.InteropServices.COMException) { rejected = true; }
+            Check.That(rejected, "a missing file was silently left out");
+            Check.Equal("one", File.ReadAllText(first));
+        });
         yield return ("native_rename_preserves_payload_and_unrelated_siblings", "Renaming a generated file and folder through the Windows shell changes their names while sibling contents and modification times remain intact.", () =>
         {
             string root = Fixtures.TempFolder("native-rename");

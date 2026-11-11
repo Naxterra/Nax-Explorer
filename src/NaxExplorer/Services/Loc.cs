@@ -163,6 +163,8 @@ internal static class Loc
         ["PinToNaxStartMenuFailed"] = ("Could not pin to Nax-StartMenu: {0}", "Anheften an Nax-StartMenu fehlgeschlagen: {0}"),
         ["StartMenuUnavailable"] = ("Start or update Nax-StartMenu to pin apps", "Nax-StartMenu zum Anheften starten oder aktualisieren"),
         ["StartMenuNoGroups"] = ("Create a group in Nax-StartMenu first", "Zuerst eine Gruppe in Nax-StartMenu erstellen"),
+        ["StartNaxStartMenu"] = ("Start Nax-StartMenu", "Nax-StartMenu starten"),
+        ["NaxStartMenuStarting"] = ("Nax-StartMenu is starting. Right-click the file again to choose a group.", "Nax-StartMenu wird gestartet. Klicke die Datei danach erneut mit der rechten Maustaste an, um eine Gruppe zu wählen."),
         ["Unpin"] = ("Remove from quick access", "Aus Schnellzugriff entfernen"),
         ["ReplaceExplorer"] = ("Open folders in Nax Explorer instead of Explorer", "Ordner in Nax Explorer statt im Explorer öffnen"),
         ["ReplaceExplorerNote"] = ("Applies to folders and drives opened from the desktop and other programs, and to Win+E. The desktop, the taskbar's Explorer button and file dialogs stay with Windows. Turning it off or uninstalling puts everything back.", "Gilt für Ordner und Laufwerke, die vom Desktop oder aus anderen Programmen geöffnet werden, und für Win+E. Desktop, die Explorer-Schaltfläche der Taskleiste und Dateidialoge bleiben bei Windows. Ausschalten oder Deinstallieren stellt alles wieder her."),

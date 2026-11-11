@@ -24,7 +24,7 @@ foreach ($keep in @($false, $true)) {
         $process = Start-Process -FilePath (Join-Path $output 'CleanupTests.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru -Wait
         if ($process.ExitCode -ne 0) { throw "Cleanup regressions failed: exit $($process.ExitCode), see $log" }
         $passes = @(Select-String -LiteralPath $log -Pattern 'PASS ')
-        if ($passes.Count -ne 7) { throw "Expected seven passing scenarios, got $($passes.Count)" }
+        if ($passes.Count -ne 9) { throw "Expected nine passing scenarios, got $($passes.Count)" }
         $passes | ForEach-Object { $_.Line }
     }
     finally {
