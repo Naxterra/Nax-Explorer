@@ -55,7 +55,6 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimerWrapper _previewTimer;
     private FilePane _active;
     private HashSet<string> _cut = new(StringComparer.OrdinalIgnoreCase);
-    private bool _windowIsActive;
 
     public MainWindow(string? startPath)
     {
@@ -126,14 +125,10 @@ public sealed partial class MainWindow : Window
         bool firstActivation = true;
         Activated += (_, args) =>
         {
-            _windowIsActive = args.WindowActivationState != WindowActivationState.Deactivated;
-            _shellWindow.Activated(_windowIsActive);
-            if (!_windowIsActive)
-            {
-                if (!IsViewerOpen && !LeftPane.HasSelectionInteraction && !RightPane.HasSelectionInteraction)
-                    DispatcherQueue.SafeEnqueue(ClearSelectionAfterDeactivation);
-                return;
-            }
+            // Switching to another window keeps the selection, as in Explorer, so the user finds it again on return.
+            bool active = args.WindowActivationState != WindowActivationState.Deactivated;
+            _shellWindow.Activated(active);
+            if (!active) return;
             _active.UpdateCutMarks();
             // On its first activation the window gives the focus to its first control; the list takes it back, so
             // typing works right away.
@@ -142,19 +137,6 @@ public sealed partial class MainWindow : Window
         };
         LeftPane.FocusAfterFirstLoad = true;
         KeyboardHook.Install(App.OnHookedKey);
-    }
-
-    private void ClearSelectionAfterDeactivation()
-    {
-        if (_windowIsActive || IsViewerOpen || LeftPane.HasSelectionInteraction || RightPane.HasSelectionInteraction) return;
-        if (Root.XamlRoot is { } root && VisualTreeHelper.GetOpenPopupsForXamlRoot(root).Count > 0) return;
-        IntPtr foreground = Native.GetForegroundWindow();
-        if (foreground == IntPtr.Zero || foreground == Hwnd) return;
-        Native.GetWindowThreadProcessId(foreground, out uint process);
-        // Owned native dialogs and flyouts need their source selection. A different Explorer window is outside this one.
-        if (process == Environment.ProcessId && !App.Instance!.Windows.Any(window => window.Hwnd == foreground)) return;
-        LeftPane.ClearSelection();
-        RightPane.ClearSelection();
     }
 
     /// <summary>F7 from the keyboard hook: copy to the other pane, unless a text box or the viewer has the focus.</summary>
@@ -299,28 +281,89 @@ public sealed partial class MainWindow : Window
 
     internal Windows.Foundation.Point MouseDragPoint(PointerRoutedEventArgs e) => e.GetCurrentPoint(Root).Position;
 
+    /// <summary>The element the pointer is over during a mouse drag, which the highlight frames.</summary>
+    private FrameworkElement? _mouseDropElement;
+    private bool _mouseDropRecycle;
+    private SolidColorBrush? _mouseDropFill;
+
     internal bool UpdateMouseFileDrag(FilePane source, FileDragSession drag, Windows.Foundation.Point point, bool modifiersOnly = false)
     {
         _mouseDragSource = source;
         bool outside = point.X < 0 || point.Y < 0 || point.X > Root.ActualWidth || point.Y > Root.ActualHeight;
-        string? target = modifiersOnly ? drag.Target
-            : LeftPane.MouseDropTarget(point, Root) ?? RightPane.MouseDropTarget(point, Root);
-        drag.Hover(outside ? null : target, Native.IsPhysicalKeyDown(0x11), Native.IsPhysicalKeyDown(0x10));
-        string caption = drag.Choice is { } choice
-            ? Loc.F(choice.Move ? "DropMove" : "DropCopy", FilePane.PlaceName(choice.Target)) + "  ·  " + Loc.F("ItemCount", drag.Sources.Count)
-            : "×  " + Loc.F("ItemCount", drag.Sources.Count);
+        string? target = drag.Target;
+        if (!modifiersOnly)
+        {
+            (target, _mouseDropElement, _mouseDropRecycle) = outside ? (null, null, false) : MouseDropTargetAt(point);
+        }
+        drag.Hover(outside ? null : target, Native.IsPhysicalKeyDown(0x11), Native.IsPhysicalKeyDown(0x10), _mouseDropRecycle);
+        string count = Loc.F("ItemCount", drag.Sources.Count);
+        string caption = drag.Choice switch
+        {
+            { Recycle: true } => Loc.T("DropToRecycleBin") + "  ·  " + count,
+            { } choice => Loc.F(choice.Move ? "DropMove" : "DropCopy", FilePane.PlaceName(choice.Target)) + "  ·  " + count,
+            null => "×  " + count,
+        };
         if (MouseDragText.Text != caption) MouseDragText.Text = caption;
         MouseDragTransform.X = Math.Clamp(point.X + 14, 0, Math.Max(0, Root.ActualWidth - Math.Max(160, MouseDragBadge.ActualWidth)));
         MouseDragTransform.Y = Math.Clamp(point.Y + 18, 0, Math.Max(0, Root.ActualHeight - 45));
         MouseDragBadge.Visibility = outside ? Visibility.Collapsed : Visibility.Visible;
+        ShowMouseDropHighlight(drag.Choice is not null && !outside ? _mouseDropElement : null);
         return outside;
+    }
+
+    /// <summary>
+    /// The place a mouse drag would drop into at <paramref name="point"/>: a folder row or the folder of either pane,
+    /// or a folder, drive or the Recycle Bin in the sidebar, as for drags that come from another program.
+    /// </summary>
+    private (string? Target, FrameworkElement? Element, bool RecycleBin) MouseDropTargetAt(Windows.Foundation.Point point)
+    {
+        if ((LeftPane.MouseDropTarget(point, Root) ?? RightPane.MouseDropTarget(point, Root)) is { } pane) return (pane.Target, pane.Element, false);
+        foreach (ListView list in new[] { QuickList, CloudList, DriveList })
+        {
+            if (list.Visibility != Visibility.Visible) continue;
+            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, list))
+            {
+                if (element is not SelectorItem { Content: SidebarEntry entry } item) continue;
+                if (IsRecycleBin(entry)) return (entry.Location, item, true);
+                return entry.IsShellPlace ? (null, null, false) : (entry.Location, item, false);
+            }
+        }
+        return (null, null, false);
+    }
+
+    private void ShowMouseDropHighlight(FrameworkElement? element)
+    {
+        if (element is null || element.XamlRoot is null || element.ActualWidth <= 0)
+        {
+            MouseDropHighlight.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var bounds = element.TransformToVisual(Root).TransformBounds(new(0, 0, element.ActualWidth, element.ActualHeight));
+        // A folder row or sidebar entry is filled lightly; a whole pane, which takes the drop into its own folder,
+        // only gets the frame, so its rows stay readable.
+        if (element is ListViewBase) MouseDropHighlight.Background = null;
+        else
+        {
+            // The accent differs between light and dark theme, so the fill follows the frame's current colour.
+            Windows.UI.Color accent = (MouseDropHighlight.BorderBrush as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.DodgerBlue;
+            if (_mouseDropFill?.Color != accent) _mouseDropFill = new SolidColorBrush(accent) { Opacity = 0.18 };
+            MouseDropHighlight.Background = _mouseDropFill;
+        }
+        Canvas.SetLeft(MouseDropHighlight, bounds.X);
+        Canvas.SetTop(MouseDropHighlight, bounds.Y);
+        MouseDropHighlight.Width = bounds.Width;
+        MouseDropHighlight.Height = bounds.Height;
+        MouseDropHighlight.Visibility = Visibility.Visible;
     }
 
     internal void EndMouseFileDrag(FilePane source)
     {
         if (_mouseDragSource != source) return;
         _mouseDragSource = null;
+        _mouseDropElement = null;
+        _mouseDropRecycle = false;
         MouseDragBadge.Visibility = Visibility.Collapsed;
+        MouseDropHighlight.Visibility = Visibility.Collapsed;
     }
 
     internal void SetActivePane(FilePane pane)

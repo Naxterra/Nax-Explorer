@@ -227,7 +227,9 @@
         <StackPanel x:Name="OperationsPanel" Grid.Row="2" VerticalAlignment="Bottom" HorizontalAlignment="Right" Width="380" Margin="0,0,20,20" Spacing="8" />
 
         <Canvas Grid.RowSpan="3" IsHitTestVisible="False">
-            <Border x:Name="MouseDragBadge" Visibility="Collapsed" Background="{ThemeResource PaneBackgroundBrush}"
+            <!-- Frames the folder, pane or sidebar entry a mouse drag would drop into. -->
+            <Border x:Name="MouseDropHighlight" Visibility="Collapsed" BorderBrush="{ThemeResource AccentFillColorDefaultBrush}" BorderThickness="2" CornerRadius="4" />
+            <Border x:Name="MouseDragBadge" Visibility="Collapsed" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
                     BorderBrush="{ThemeResource AccentTextFillColorPrimaryBrush}" BorderThickness="1" CornerRadius="6" Padding="10,6" MaxWidth="320">
                 <Border.RenderTransform><TranslateTransform x:Name="MouseDragTransform" /></Border.RenderTransform>
                 <TextBlock x:Name="MouseDragText" FontSize="13" TextTrimming="CharacterEllipsis" />

@@ -1280,20 +1280,6 @@ public sealed partial class FilePane : UserControl
     private void TraceSelectionLayout(object? sender, object e) => _selectionTrace?.Layout();
 
     internal bool IsSelectingWithMouse => _marqueeStart is not null || IsDraggingItems;
-    internal bool HasSelectionInteraction => IsDraggingItems || _marqueeGesture.Dragging || _renaming ||
-        CurrentList.SelectedItem is FileItem { IsRenaming: true };
-
-    internal void ClearSelection()
-    {
-        EndMarquee();
-        CancelMouseFileDrag();
-        if (CurrentList.SelectedRanges.Count == 0) return;
-        _adjustingSelection = true;
-        try { CurrentList.SelectedItems.Clear(); }
-        finally { _adjustingSelection = false; }
-        NotifySelectionChanged();
-    }
-
     /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
     private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -1659,12 +1645,12 @@ public sealed partial class FilePane : UserControl
             if (node is SelectorItem item)
             {
                 if (list != List || item.ContentTemplateRoot is not Grid row) return true;
-                // The whole name column is a file drag target, including space
-                // after short names. Other columns can start a selection box.
-                if (row.ColumnDefinitions.Count < 2) return true;
-                double rowLeft = row.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
-                double nameRight = rowLeft + row.ColumnDefinitions[0].ActualWidth + row.ColumnDefinitions[1].ActualWidth;
-                return point.X <= nameRight;
+                // As in Explorer, a file is dragged by its icon and its name. The blank space after the name and the
+                // other columns start a selection box when dragged, and select the row when clicked.
+                var name = row.Children.OfType<TextBlock>().FirstOrDefault(child => Grid.GetColumn(child) == 1);
+                if (name is null || name.Visibility != Visibility.Visible) return true;
+                double textLeft = name.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
+                return point.X <= textLeft + Math.Min(name.ActualWidth, name.DesiredSize.Width) + 8;
             }
         }
         return false;
@@ -2380,14 +2366,21 @@ public sealed partial class FilePane : UserControl
 
     // ---------------------------------------------------------------- drag and drop
 
-    internal string? MouseDropTarget(Windows.Foundation.Point point, UIElement relativeTo)
+    /// <summary>
+    /// The folder a mouse drag would drop into at <paramref name="point"/>, with the element to frame: the folder row
+    /// under the pointer, or otherwise the list of the folder this pane shows. Null outside this pane.
+    /// </summary>
+    internal (string Target, FrameworkElement Element)? MouseDropTarget(Windows.Foundation.Point point, UIElement relativeTo)
     {
         if (Visibility != Visibility.Visible || CurrentList.Visibility != Visibility.Visible) return null;
         var bounds = CurrentList.TransformToVisual(relativeTo).TransformBounds(new(0, 0, CurrentList.ActualWidth, CurrentList.ActualHeight));
         if (!bounds.Contains(point)) return null;
         foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(point, CurrentList))
-            if (element is SelectorItem { Content: FileItem item }) return item.Entry.IsContainer ? item.Entry.FullPath : Folder;
-        return Folder;
+        {
+            if (element is SelectorItem { Content: FileItem { Entry.IsContainer: true } item } row) return (item.Entry.FullPath, row);
+            if (element is SelectorItem) break;
+        }
+        return Folder is { } folder ? (folder, CurrentList) : null;
     }
 
     private async void MoveMouseFileDrag(PointerRoutedEventArgs e)
@@ -2397,7 +2390,19 @@ public sealed partial class FilePane : UserControl
         if (_itemGesture.Move(point.Position.X, point.Position.Y))
         {
             if (_itemPressedRow?.Content is not FileItem pressed) { CancelMouseFileDrag(); return; }
-            var paths = _itemGestureList!.SelectedItems.Contains(pressed) ? SelectedPaths : new[] { pressed.Entry.FullPath };
+            if (!_itemGestureList!.SelectedItems.Contains(pressed))
+            {
+                // As in Explorer, dragging a row that is not selected selects it, alone or with Ctrl added to the
+                // others, so what moves is what the list shows as selected.
+                _adjustingSelection = true;
+                try
+                {
+                    if (!(e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || Native.IsPhysicalKeyDown(0x11))) _itemGestureList.SelectedItems.Clear();
+                    _itemGestureList.SelectedItems.Add(pressed);
+                }
+                finally { _adjustingSelection = false; }
+            }
+            var paths = SelectedPaths;
             _mouseFileDrag = new(paths);
             IsDraggingItems = true;
             _owner.OnPaneMouseSelectionStarted(this);
@@ -2457,8 +2462,11 @@ public sealed partial class FilePane : UserControl
         InteractionTrace.Record("mouse-file-drop", data: new { drop.Target, drop.Move, Count = drag.Sources.Count });
         try
         {
-            bool completed = await CheckedTransfer(drag.Sources, drop.Target, drop.Move);
-            InteractionTrace.Record("mouse-file-drop-complete", data: new { Completed = completed, drop.Move });
+            // The Recycle Bin in the sidebar deletes what is dropped on it, as a drag from another program does there.
+            bool completed = drop.Recycle
+                ? await _owner.DeleteAsync(drag.Sources, permanently: false)
+                : await CheckedTransfer(drag.Sources, drop.Target, drop.Move);
+            InteractionTrace.Record("mouse-file-drop-complete", data: new { Completed = completed, drop.Move, drop.Recycle });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
         {

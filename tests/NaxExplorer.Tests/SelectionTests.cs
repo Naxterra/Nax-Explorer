@@ -56,6 +56,25 @@ internal static class SelectionTests
             folder.Hover(@"C:\source\child", true, false);
             Check.That(folder.Release(true, false) is null, "folder could be copied into itself");
         });
+        yield return ("file_drag_onto_the_recycle_bin_deletes_whatever_keys_are_held_and_never_shell_items", "Hovering the Recycle Bin offers deleting the dragged files with or without Ctrl, the choice survives release, leaving the bin drops it, and items of a shell place are never offered for deleting.", () =>
+        {
+            const string bin = "shell:::{645FF040-5081-101B-9F08-00AA002F954E}";
+            var drag = new FileDragSession([@"C:\source\a.txt", @"C:\source\b.txt"]);
+            drag.Hover(bin, false, false, recycleBin: true);
+            Check.That(drag.Choice is { Recycle: true, Target: bin }, "the Recycle Bin did not offer deleting");
+            drag.Hover(bin, true, false, recycleBin: true);
+            Check.That(drag.Choice is { Recycle: true }, "Ctrl turned deleting into something else");
+            drag.Hover(@"D:\target", false, false);
+            Check.That(drag.Choice is { Recycle: false, Move: false }, "leaving the bin kept the delete choice");
+            drag.Hover(bin, false, false, recycleBin: true);
+            Check.That(drag.Release(false, false) is { Recycle: true }, "release over the bin lost the delete choice");
+            var shellItem = new FileDragSession([@"shell:::{645FF040-5081-101B-9F08-00AA002F954E}\$R123.txt"]);
+            shellItem.Hover(bin, false, false, recycleBin: true);
+            Check.That(shellItem.Choice is null, "an item of a shell place was offered for deleting");
+            var plainShellPlace = new FileDragSession([@"C:\source\a.txt"]);
+            plainShellPlace.Hover(bin, false, false);
+            Check.That(plainShellPlace.Choice is null, "a shell place that is not the bin accepted a drop");
+        });
         yield return ("file_drag_cancel_and_source_snapshot_are_stable", "Selection changes after drag start cannot add files to the transfer; cancellation and leaving every target cannot produce a transfer.", () =>
         {
             var selected = new List<string> { @"C:\source\a.txt" };
