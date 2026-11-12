@@ -417,23 +417,37 @@ internal static class ShellContextMenu
 internal static class FileClipboard
 {
     private static readonly uint DropEffectFormat = Native.RegisterClipboardFormat("Preferred DropEffect");
+    private static readonly uint ShellIdFormat = Native.RegisterClipboardFormat(ShellClipboardIds.Format);
 
     public static bool Put(IReadOnlyList<string> paths, bool cut, IntPtr owner)
     {
-        if (paths.Count == 0 || !Open(owner)) return false;
+        if (paths.Count == 0) return false;
+        byte[]? shellIds = null;
+        if (paths.Any(Core.PathTools.IsShellPlace))
+        {
+            try { shellIds = ShellClipboardIds.Encode(paths); }
+            catch (Exception ex) when (ex is COMException or IOException or ArgumentException) { return false; }
+        }
+        if (!Open(owner)) return false;
         try
         {
             Native.EmptyClipboard();
-            // DROPFILES followed by the paths, each ending with a NUL, and one more NUL at the end.
+            // Filesystem paths use HDROP; ZIP entries use shell identities, never nonexistent paths in HDROP.
             string list = string.Join('\0', paths) + "\0\0";
             int header = Marshal.SizeOf<Native.DROPFILES>();
-            int bytes = header + list.Length * 2;
+            int bytes = shellIds?.Length ?? header + list.Length * 2;
             IntPtr drop = Native.GlobalAlloc(Native.GMEM_MOVEABLE | Native.GMEM_ZEROINIT, (UIntPtr)bytes);
+            if (drop == IntPtr.Zero) return false;
             IntPtr target = Native.GlobalLock(drop);
-            Marshal.StructureToPtr(new Native.DROPFILES { pFiles = header, fWide = 1 }, target, false);
-            Marshal.Copy(list.ToCharArray(), 0, target + header, list.Length);
+            if (target == IntPtr.Zero) { Native.GlobalFree(drop); return false; }
+            if (shellIds is not null) Marshal.Copy(shellIds, 0, target, shellIds.Length);
+            else
+            {
+                Marshal.StructureToPtr(new Native.DROPFILES { pFiles = header, fWide = 1 }, target, false);
+                Marshal.Copy(list.ToCharArray(), 0, target + header, list.Length);
+            }
             Native.GlobalUnlock(drop);
-            if (Native.SetClipboardData(Native.CF_HDROP, drop) == IntPtr.Zero)
+            if (Native.SetClipboardData(shellIds is null ? Native.CF_HDROP : ShellIdFormat, drop) == IntPtr.Zero)
             {
                 Native.GlobalFree(drop);
                 return false;
@@ -453,19 +467,35 @@ internal static class FileClipboard
     /// <summary>The files on the clipboard and whether they were cut, or null when it holds no files.</summary>
     public static (List<string> Paths, bool Cut, Core.CutPasteCompletion Completion)? Get(IntPtr owner)
     {
-        if (!Native.IsClipboardFormatAvailable(Native.CF_HDROP) || !Open(owner)) return null;
+        if (!HasFiles || !Open(owner)) return null;
         try
         {
             IntPtr drop = Native.GetClipboardData(Native.CF_HDROP);
-            if (drop == IntPtr.Zero) return null;
-            uint count = Native.DragQueryFile(drop, 0xFFFFFFFF, null, 0);
-            var paths = new List<string>((int)count);
-            for (uint i = 0; i < count; i++)
+            List<string> paths;
+            if (drop == IntPtr.Zero)
             {
-                uint length = Native.DragQueryFile(drop, i, null, 0);
-                var builder = new StringBuilder((int)length + 1);
-                Native.DragQueryFile(drop, i, builder, length + 1);
-                paths.Add(builder.ToString());
+                IntPtr ids = Native.GetClipboardData(ShellIdFormat);
+                if (ids == IntPtr.Zero || Native.GlobalSize(ids).ToUInt64() is not (> 0 and <= int.MaxValue)) return null;
+                IntPtr buffer = Native.GlobalLock(ids);
+                if (buffer == IntPtr.Zero) return null;
+                try
+                {
+                    if (ShellClipboardIds.Decode(buffer, (int)Native.GlobalSize(ids)) is not { } decoded) return null;
+                    paths = decoded;
+                }
+                finally { Native.GlobalUnlock(ids); }
+            }
+            else
+            {
+                uint count = Native.DragQueryFile(drop, 0xFFFFFFFF, null, 0);
+                paths = new List<string>((int)count);
+                for (uint i = 0; i < count; i++)
+                {
+                    uint length = Native.DragQueryFile(drop, i, null, 0);
+                    var builder = new StringBuilder((int)length + 1);
+                    Native.DragQueryFile(drop, i, builder, length + 1);
+                    paths.Add(builder.ToString());
+                }
             }
             bool cut = false;
             IntPtr effect = Native.GetClipboardData(DropEffectFormat);
@@ -486,7 +516,7 @@ internal static class FileClipboard
         }
     }
 
-    public static bool HasFiles => Native.IsClipboardFormatAvailable(Native.CF_HDROP);
+    public static bool HasFiles => Native.IsClipboardFormatAvailable(Native.CF_HDROP) || Native.IsClipboardFormatAvailable(ShellIdFormat);
 
     /// <summary>Empties the clipboard after cut files were pasted, as Explorer does.</summary>
     public static bool ClearIfUnchanged(IntPtr owner, Core.CutPasteCompletion completion)

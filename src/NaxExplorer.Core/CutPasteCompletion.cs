@@ -11,11 +11,20 @@ public sealed class CutPasteCompletion(IReadOnlyList<string> sources, uint clipb
         {
             try
             {
+                if (CompressedFolders.IsEntry(source))
+                {
+                    if (CompressedFolders.EntryExists(source)) return false;
+                    continue;
+                }
+                if (PathTools.IsShellPlace(source)) return false;
                 File.GetAttributes(source);
                 return false; // A skipped file, or a merged folder with items left behind.
             }
-            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                if (PathTools.IsShellPlace(source)) return false;
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
                 return false; // An inaccessible source is not proof that it moved.
             }

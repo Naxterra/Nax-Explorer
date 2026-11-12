@@ -127,6 +127,7 @@ public sealed partial class MainWindow : Window
         {
             // Switching to another window keeps the selection, as in Explorer, so the user finds it again on return.
             bool active = args.WindowActivationState != WindowActivationState.Deactivated;
+            IsWindowActive = active;
             _shellWindow.Activated(active);
             if (!active) return;
             _active.UpdateCutMarks();
@@ -184,6 +185,7 @@ public sealed partial class MainWindow : Window
     internal bool IsDark => Root.ActualTheme == ElementTheme.Dark;
 
     internal FilePane ActivePane => _active;
+    internal bool IsWindowActive { get; private set; }
 
     internal HashSet<string> CutPaths => _cut;
 
@@ -480,7 +482,8 @@ public sealed partial class MainWindow : Window
             window.InvalidatePreviewTotals(folder);
             foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
             {
-                if (pane.Folder is { } shown && PathTools.SameLocation(shown, folder)) pane.ScheduleRefresh();
+                if ((pane.Folder is { } shown && PathTools.SameLocation(shown, folder))
+                    || (PathTools.IsShellPlace(pane.Location) && PathTools.SameLocation(pane.Location, folder))) pane.ScheduleRefresh();
             }
         }
     }
@@ -881,7 +884,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal async Task<bool> TransferAsync(IReadOnlyList<string> paths, string target, bool move)
     {
-        TransferConflicts conflicts = await Task.Run(() => TransferPlan.FindConflicts(paths, target));
+        TransferConflicts conflicts;
+        try { conflicts = await Task.Run(() => TransferPlan.FindConflicts(paths, target)); }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+            return false;
+        }
         // Without a question there is no answer: a conflict that appears only later is left to Windows to ask about.
         ConflictChoice? choice = null;
         if (conflicts.Any)
@@ -889,7 +898,13 @@ public sealed partial class MainWindow : Window
             if (await AskSafelyAsync(() => FileOperationDialogs.AskConflictAsync(Root.XamlRoot, Root.RequestedTheme, conflicts, FilePane.PlaceName(target), move)) is not { } picked) return false;
             choice = picked;
         }
-        IReadOnlyList<TransferBatch> batches = await Task.Run(() => TransferPlan.Plan(paths, target, move, choice, conflicts.Items));
+        IReadOnlyList<TransferBatch> batches;
+        try { batches = await Task.Run(() => TransferPlan.Plan(paths, target, move, choice, conflicts.Items)); }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+            return false;
+        }
         if (batches.Count == 0) return true;
         string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
         bool completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
@@ -902,6 +917,15 @@ public sealed partial class MainWindow : Window
         if (move)
         {
             foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+            foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                ForgetFolderSizes(new[] { archive }, withContents: false);
+                // ZIP namespace views have no filesystem watcher. A move changes their listings and archive metadata.
+                foreach (MainWindow window in App.Instance!.Windows)
+                    foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                        if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+                if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+            }
         }
         return completed;
     }

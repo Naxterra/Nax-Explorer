@@ -169,8 +169,11 @@ public sealed class HybridSearch
         }
         token.ThrowIfCancellationRequested();
 
-        // 3. Meaning.
-        using EmbedderHost.Lease? lease = meaning && vectors.Count > 0 ? _host?.Acquire() : null;
+        // A single name with a filename match is a lookup, not a request for other senses of that word. Keep
+        // literal content matches, but do not add semantic-only guesses (or load the model for this lookup).
+        bool filenameLookup = terms.Count == 1 && named.Count > 0;
+        // 3. Meaning. Descriptive queries and queries with no matching filename retain semantic retrieval.
+        using EmbedderHost.Lease? lease = meaning && !filenameLookup && vectors.Count > 0 ? _host?.Acquire() : null;
         if (lease is not null)
         {
             float[] queryVector = lease.Embedder.Embed(["query: " + query], token)[0];

@@ -24,9 +24,11 @@ public sealed class FileDragSession(IEnumerable<string> sources)
         _recycle = recycleBin;
         Target = target;
         Choice = null;
-        if (Sources.Count == 0 || target is null || Sources.Any(PathTools.IsShellPlace)) return;
+        if (Sources.Count == 0 || target is null || Sources.Any(path => PathTools.IsShellPlace(path) && !CompressedFolders.IsEntry(path))) return;
         if (recycleBin)
         {
+            // Archive entries can be extracted to a real folder, but are not filesystem files to recycle.
+            if (Sources.Any(PathTools.IsShellPlace)) return;
             Choice = new(target, Move: true, Recycle: true);
             return;
         }

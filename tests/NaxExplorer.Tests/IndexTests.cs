@@ -38,6 +38,31 @@ internal static class IndexTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("single_name_query_keeps_literal_hits_without_semantic_noise", "When one search term matches an indexed filename, that file and literal text matches are returned without adding unrelated high-similarity documents or loading the model.", () =>
+        {
+            using IndexStore store = NewStore(out _);
+            const string named = @"C:\games\Birthright-Alternative-ISO-Version.zip";
+            store.SaveNamesOnly([(named, 1, 1)]);
+            store.Save(@"C:\games\game-notes.txt", 1, 1, FileState.Indexed, Pieces("Birthright is a fantasy strategy game."));
+            store.Save(@"C:\games\unrelated.txt", 1, 1, FileState.Indexed, Pieces("unrelated permit information"));
+            bool loaded = false;
+            using var host = new EmbedderHost(() => { loaded = true; return new QueryEchoEmbedder("unrelated permit information"); });
+            var hits = new HybridSearch(store, host).Search("Birthright", null, 100);
+            Check.Sequence([named, @"C:\games\game-notes.txt"], hits.Select(h => h.Path));
+            Check.That(!loaded, "a known filename lookup unnecessarily loaded the semantic model");
+        });
+        yield return ("name_intent_is_scoped_and_multiword_queries_keep_meaning", "A name outside the selected folder does not suppress that folder's semantic results, and descriptive multiword queries still find paraphrases alongside named files.", () =>
+        {
+            using IndexStore store = NewStore(out _);
+            store.SaveNamesOnly([(@"C:\elsewhere\Birthright.zip", 1, 1), (@"C:\docs\oracle_upgrade.txt", 1, 1)]);
+            store.Save(@"C:\docs\runbook.txt", 1, 1, FileState.Indexed, Pieces("database version migration instructions"));
+            using var host = new EmbedderHost(() => new QueryEchoEmbedder("database version migration instructions"));
+            var search = new HybridSearch(store, host);
+            Check.That(search.Search("Birthright", @"C:\docs", 100).Any(h => h.Kinds.HasFlag(MatchKind.Meaning)), "a filename outside the scope suppressed meaning search");
+            var hits = search.Search("oracle upgrade", @"C:\docs", 100);
+            Check.Equal(@"C:\docs\oracle_upgrade.txt", hits[0].Path);
+            Check.That(hits.Any(h => h.Path.EndsWith("runbook.txt") && h.Kinds.HasFlag(MatchKind.Meaning)), "descriptive search lost its paraphrase match");
+        });
         yield return ("chunker_keeps_short_text_whole_and_overlaps_long_text", "A short text stays one piece; a long text becomes pieces near the target size that share some text at each cut.", () =>
         {
             Check.Equal(1, Chunker.Split("Short note.\n\nSecond paragraph.").Count, "short text pieces");
@@ -240,6 +265,14 @@ internal static class IndexTests
         public string Device => "test";
         public float[][] Embed(IReadOnlyList<string> texts, CancellationToken token = default) => throw new NotSupportedException();
         public void Dispose() => Disposals++;
+    }
+
+    private sealed class QueryEchoEmbedder(string passage) : IEmbedder
+    {
+        public int Dimensions => EmbeddingModel.Dimensions;
+        public string Device => "test";
+        public float[][] Embed(IReadOnlyList<string> texts, CancellationToken token = default) => texts.Select(_ => new FakeEmbedder().Embed(["passage: " + passage])[0]).ToArray();
+        public void Dispose() { }
     }
 
     private static IndexStore NewStore(out string folder)

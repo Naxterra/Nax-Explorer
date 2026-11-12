@@ -114,11 +114,12 @@ public static class TransferPlan
     /// </summary>
     private static void AddMissing(string source, string existing, List<(string Source, string Folder)> missing)
     {
-        if (!IsRealFolder(source) || !IsRealFolder(existing)) return;
+        if (!IsRealFolder(existing)) return;
         IEnumerable<string> children;
         try
         {
-            children = Directory.EnumerateFileSystemEntries(source).ToList();
+            if (SourceChildren(source) is not { } found) return;
+            children = found;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -136,12 +137,12 @@ public static class TransferPlan
     private static int CountReplaced(string source, string existing, int limit)
     {
         if (limit <= 0) return 0;
-        bool sourceFolder = IsRealFolder(source), existingFolder = IsRealFolder(existing);
-        if (!sourceFolder || !existingFolder) return 1;
+        if (!IsRealFolder(existing)) return 1;
         int count = 0;
         try
         {
-            foreach (string child in Directory.EnumerateFileSystemEntries(source))
+            if (SourceChildren(source) is not { } children) return 1;
+            foreach (string child in children)
             {
                 string there = Path.Combine(existing, Path.GetFileName(child));
                 if (Path.Exists(there)) count += CountReplaced(child, there, limit - count);
@@ -171,6 +172,10 @@ public static class TransferPlan
             return false;
         }
     }
+
+    private static IReadOnlyList<string>? SourceChildren(string source) => CompressedFolders.IsEntry(source)
+        ? CompressedFolders.Children(source)
+        : IsRealFolder(source) ? Directory.EnumerateFileSystemEntries(source).ToList() : null;
 
     private static IEnumerable<string> Outside(IReadOnlyList<string> sources, string target) =>
         sources.Where(s => !InFolder(s, target));

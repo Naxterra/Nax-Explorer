@@ -510,6 +510,9 @@ internal static partial class Native
     [DllImport("kernel32.dll")]
     public static extern IntPtr GlobalFree(IntPtr memory);
 
+    [DllImport("kernel32.dll")]
+    public static extern UIntPtr GlobalSize(IntPtr memory);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr CreateEvent(IntPtr attributes, bool manualReset, bool initialState, string? name);
 

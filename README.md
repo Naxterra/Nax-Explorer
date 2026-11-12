@@ -5,6 +5,8 @@ Nax Explorer is a dual-pane file manager for Windows 11 with a Fluent design, a 
 ## Features
 
 - Two panes side by side, each with its own tabs, history, address bar with breadcrumbs, and details or thumbnail view. F7 copies the selection to the other pane and F8 moves it there.
+- ZIP archives open inside the panes, including their subfolders, with Back and Up navigation. Drag entries to another pane to extract them; Ctrl chooses copy and Shift chooses move, including when pressed during the drag. You can also use Copy to, Move to, the clipboard, or Extract all from the context menu. Filesystem commands such as creating a folder are available in real folders.
+- Double-click the address bar to edit and copy the complete address, including long paths. Right-click the address to copy it directly.
 - File names coloured by kind (pictures, documents, code, archives and so on), drive usage bars, a Mica window and light or dark theme.
 - With Nax-StartMenu 0.1.9 or newer installed, right-click an application or shortcut, choose "Pin to Nax-StartMenu", then its group. A per-user shortcut retains the app's arguments, working folder and icon without using Windows' separate Pin to Start command.
 - Copy, move, rename and delete use the Windows copy engine with the app's own progress, conflict and delete dialogs. Deleted items normally go to the Recycle Bin, and Explorer's Ctrl+Z can undo operations. A conflict that appears after the app checked still asks before replacing anything. The full Windows context menu with every shell extension is one click away under "Show more options" or Shift+right-click.

@@ -46,7 +46,7 @@
                            Visibility="{x:Bind NameVisibility, Mode=OneWay}" Style="{StaticResource CellTextStyle}" />
                 <TextBox x:Name="RenameBox" Grid.Column="1" Margin="0,1,8,1" Padding="6,3" MinHeight="26" FontSize="13"
                          x:Load="{x:Bind IsRenaming, Mode=OneWay}" Text="{x:Bind Entry.Name}"
-                         Loaded="RenameBox_Loaded" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
+                         Loaded="RenameBox_Loaded" TextChanged="RenameBox_TextChanged" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
                 <TextBlock Grid.Column="2" Margin="8,0" Text="{x:Bind DateText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
                 <TextBlock Grid.Column="3" Margin="8,0" Text="{x:Bind TypeText, Mode=OneWay}" Style="{StaticResource SecondaryCellTextStyle}" />
                 <Grid Grid.Column="4" Margin="8,0,12,0" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind SizeTip, Mode=OneWay}">
@@ -131,7 +131,7 @@
                 <TextBlock Grid.Row="1" Text="{x:Bind DisplayName, Mode=OneWay}" Foreground="{x:Bind NameBrush, Mode=OneWay}" Visibility="{x:Bind NameVisibility, Mode=OneWay}"
                            TextAlignment="Center" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" FontSize="12" HorizontalAlignment="Center" />
                 <TextBox x:Name="RenameBox" Grid.Row="1" x:Load="{x:Bind IsRenaming, Mode=OneWay}" Text="{x:Bind Entry.Name}" FontSize="12" Padding="4,2" MinHeight="24"
-                         Loaded="RenameBox_Loaded" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
+                         Loaded="RenameBox_Loaded" TextChanged="RenameBox_TextChanged" KeyDown="RenameBox_KeyDown" LostFocus="RenameBox_LostFocus" />
             </Grid>
         </DataTemplate>
         </ResourceDictionary>
@@ -180,9 +180,9 @@
                 <FontIcon Glyph="&#xE72C;" FontSize="14" />
             </Button>
 
-            <Grid x:Name="AddressArea" Grid.Column="4" Margin="6,0" MinHeight="32">
+            <Grid x:Name="AddressArea" Grid.Column="4" Margin="6,0" MinHeight="32" RightTapped="AddressArea_RightTapped">
                 <Border x:Name="AddressBack" CornerRadius="6" Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1" Tapped="AddressBack_Tapped" />
+                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1" />
                 <ScrollViewer x:Name="BreadcrumbScroller" HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Hidden" VerticalScrollMode="Disabled"
                               VerticalScrollBarVisibility="Disabled" Margin="6,0,24,0" VerticalAlignment="Center" HorizontalAlignment="Left">
                     <BreadcrumbBar x:Name="Breadcrumb" ItemClicked="Breadcrumb_ItemClicked" VerticalAlignment="Center" />

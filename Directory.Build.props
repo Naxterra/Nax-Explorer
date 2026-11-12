@@ -4,7 +4,7 @@
     <Company>Naxterra</Company>
     <Copyright>Copyright © 2026 Naxterra.</Copyright>
     <Deterministic>true</Deterministic>
-    <Version>0.1.14</Version>
+    <Version>0.1.18</Version>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 </Project>

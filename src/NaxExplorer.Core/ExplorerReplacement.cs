@@ -36,6 +36,7 @@ public sealed class ExplorerReplacement
 
     /// <summary>The commands that open every kind of folder, also the special places.</summary>
     private static readonly string[] FolderVerbKeys = [@"Folder\shell\open", @"Folder\shell\explore"];
+    private const string ZipVerbKey = @"CompressedFolder\shell\open";
 
     private readonly RegistryKey _classes;
 
@@ -86,6 +87,9 @@ public sealed class ExplorerReplacement
         }
         TakeCommand(WinEKey, $"\"{exe}\"");
         foreach (string key in FolderVerbKeys) TakeCommand(key, $"\"{exe}\" \"%1\"");
+        // ZIP's own open command takes precedence over Folder. Route it directly instead of catching and closing
+        // the Explorer window afterwards. Other archive handlers, such as WinRAR.ZIP, retain their associations.
+        TakeCommand(ZipVerbKey, $"\"{exe}\" \"%1\"");
         return _changed;
     }
 
@@ -181,6 +185,7 @@ public sealed class ExplorerReplacement
         }
         ReleaseCommand(WinEKey, $@"CLSID\{WinEClsid}\shell", $@"CLSID\{WinEClsid}", "CLSID");
         foreach (string key in FolderVerbKeys) ReleaseCommand(key, @"Folder\shell", "Folder");
+        ReleaseCommand(ZipVerbKey, @"CompressedFolder\shell", "CompressedFolder");
     }
 
     /// <summary>

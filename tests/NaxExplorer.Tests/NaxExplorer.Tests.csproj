@@ -22,6 +22,8 @@
     <Compile Include="../../src/NaxExplorer/Shell/Native.cs" Link="Shell/Native.cs" />
     <Compile Include="../../src/NaxExplorer/Shell/OperationProgress.cs" Link="Shell/OperationProgress.cs" />
     <Compile Include="../../src/NaxExplorer/Shell/ShellActions.cs" Link="Shell/ShellActions.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/ShellClipboardIds.cs" Link="Shell/ShellClipboardIds.cs" />
+    <Compile Include="../../src/NaxExplorer/Shell/ShellFolderReader.cs" Link="Shell/ShellFolderReader.cs" />
     <Compile Include="../../src/NaxExplorer/Shell/ShellWindowRegistration.cs" Link="Shell/ShellWindowRegistration.cs" />
     <ProjectReference Include="../../src/NaxExplorer.Core/NaxExplorer.Core.csproj" />
     <ProjectReference Include="../../src/NaxExplorer.Search/NaxExplorer.Search.csproj" />

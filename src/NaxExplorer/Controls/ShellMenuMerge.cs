@@ -17,6 +17,7 @@ internal static class ShellMenuMerge
     public const string PropertiesTag = "properties";
     public const string NewTag = "new";
     public const string OpenWithTag = "openwith";
+    public const string ExtractTag = "extract";
 
     /// <summary>How long the menu waits for Windows before it opens without Windows' commands.</summary>
     private static readonly TimeSpan Patience = TimeSpan.FromMilliseconds(120);
@@ -99,7 +100,8 @@ internal static class ShellMenuMerge
         }
         var shownVerbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         List<MenuFlyoutItemBase> items = Convert(entries, session, owner, shownVerbs,
-            hideWindowsStartPin: menu.Items.Any(item => item.Tag as string == StartMenuPinMenu.MenuTag));
+            hideWindowsStartPin: menu.Items.Any(item => item.Tag as string == StartMenuPinMenu.MenuTag),
+            hideWindowsExtract: menu.Items.Any(item => item.Tag as string == ExtractTag));
         if (items.Count == 0) return;
         // Windows' entries go between the app's commands and Properties, with one line on each side: the line the
         // app's menu already has above Properties is used, and a new one goes below Windows' entries.
@@ -116,7 +118,7 @@ internal static class ShellMenuMerge
     /// Turns Windows' entries into menu items, without duplicates of the app's commands and without stray separators.
     /// The verbs of the enabled items that are shown are added to <paramref name="shownVerbs"/>.
     /// </summary>
-    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner, ISet<string>? shownVerbs = null, bool hideWindowsStartPin = false)
+    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner, ISet<string>? shownVerbs = null, bool hideWindowsStartPin = false, bool hideWindowsExtract = false)
     {
         var result = new List<MenuFlyoutItemBase>();
         foreach (ShellMenuEntry entry in entries)
@@ -128,11 +130,12 @@ internal static class ShellMenuMerge
             }
             if (entry.Verb is { } verb && OwnVerbs.Contains(verb)) continue;
             if (hideWindowsStartPin && string.Equals(entry.Verb, "pintostartscreen", StringComparison.OrdinalIgnoreCase)) continue;
+            if (hideWindowsExtract && (string.Equals(entry.Verb, "extract", StringComparison.OrdinalIgnoreCase) || string.Equals(entry.Verb, "extractall", StringComparison.OrdinalIgnoreCase))) continue;
             if (entry.Text.Length == 0) continue;
             IconElement? icon = entry.Icon is { } pixels ? new ImageIcon { Source = ImageCache.ToBitmap(pixels) } : null;
             if (entry.Children.Count > 0)
             {
-                List<MenuFlyoutItemBase> children = Convert(entry.Children, session, owner, shownVerbs, hideWindowsStartPin);
+                List<MenuFlyoutItemBase> children = Convert(entry.Children, session, owner, shownVerbs, hideWindowsStartPin, hideWindowsExtract);
                 if (children.Count == 0) continue;
                 var sub = new MenuFlyoutSubItem { Text = entry.Text, Icon = icon };
                 foreach (MenuFlyoutItemBase child in children) sub.Items.Add(child);

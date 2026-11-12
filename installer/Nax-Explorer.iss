@@ -266,6 +266,9 @@ begin
     end;
     ReleaseCommand('Software\Classes\Folder\shell\open');
     ReleaseCommand('Software\Classes\Folder\shell\explore');
+    ReleaseCommand('Software\Classes\CompressedFolder\shell\open');
+    DeleteKeyIfEmpty('Software\Classes\CompressedFolder\shell');
+    DeleteKeyIfEmpty('Software\Classes\CompressedFolder');
     DeleteKeyIfEmpty('Software\Classes\Folder\shell');
     DeleteKeyIfEmpty('Software\Classes\Folder');
     Exit;

@@ -8,6 +8,25 @@ internal static class SelectionTests
 {
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("zip_drag_accepts_archive_entries_and_switches_modifiers", "ZIP entry drags to a real folder default to extraction by copy, switch to move with Shift and back to copy with Ctrl while held, then preserve the final choice at release.", () =>
+        {
+            string folder = CompressedFolders.Location(@"C:\Downloads\Game.zip\Game ISO");
+            string file = CompressedFolders.Location(@"C:\Downloads\Game.zip\Game ISO\Game.bin");
+            var drag = new FileDragSession([folder, file]);
+            drag.Hover(@"C:\Games", false, false);
+            Check.That(drag.Choice is { Move: false, Recycle: false }, "ZIP drag did not offer copy");
+            drag.Hover(@"C:\Games", false, true);
+            Check.That(drag.Choice is { Move: true }, "Shift did not offer a ZIP move");
+            drag.Hover(@"C:\Games", true, false);
+            Check.That(drag.Choice is { Move: false }, "Ctrl did not switch ZIP move back to copy");
+            Check.That(drag.Release(true, false) is { Target: @"C:\Games", Move: false }, "release lost ZIP extraction choice");
+            var bin = new FileDragSession([folder]);
+            bin.Hover("shell:RecycleBinFolder", false, false, recycleBin: true);
+            Check.That(bin.Choice is null, "ZIP entries unexpectedly offered for deleting in the Recycle Bin");
+            var mixed = new FileDragSession([folder, "shell:RecycleBinFolder\\deleted.txt"]);
+            mixed.Hover(@"C:\Games", true, false);
+            Check.That(mixed.Choice is null, "unsupported virtual source silently allowed a partial ZIP drag");
+        });
         yield return ("empty_space_click_dismisses_selection_after_pointer_jitter", "A background click clears selection even after subthreshold movement, while a click on a file's date/type area and modified clicks retain their selection semantics.", () =>
         {
             var gesture = new SelectionGesture();

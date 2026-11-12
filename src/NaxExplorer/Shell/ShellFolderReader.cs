@@ -97,11 +97,12 @@ internal static class ShellFolderReader
     public static Task<string?> ResolveAsync(string text) => RunOnSta(() =>
     {
         Guid riid = Native.IID_IShellItem;
-        if (Native.SHCreateItemFromParsingName(text, IntPtr.Zero, ref riid, out IShellItem item) != 0) return null;
+        if (Native.SHCreateItemFromParsingName(PathTools.ParsingName(text), IntPtr.Zero, ref riid, out IShellItem item) != 0) return null;
         try
         {
             if (item.GetAttributes(SfgaoFolder | SfgaoFileSystem | SfgaoStream, out uint attributes) < 0) return null;
-            if ((attributes & SfgaoFolder) == 0 || (attributes & SfgaoStream) != 0) return null;
+            // ZIP files expose both folder enumeration and a byte stream.
+            if ((attributes & SfgaoFolder) == 0) return null;
             string? path = (attributes & SfgaoFileSystem) != 0 ? Name(item, SigdnFileSysPath) : null;
             if (!string.IsNullOrEmpty(path) && Directory.Exists(path)) return path;
             string? parsing = Name(item, SigdnDesktopAbsoluteParsing);
@@ -119,7 +120,7 @@ internal static class ShellFolderReader
     private static ShellListing Read(string location, bool showHidden, CancellationToken token)
     {
         Guid riid = Native.IID_IShellItem;
-        int created = Native.SHCreateItemFromParsingName(location, IntPtr.Zero, ref riid, out IShellItem folder);
+        int created = Native.SHCreateItemFromParsingName(PathTools.ParsingName(location), IntPtr.Zero, ref riid, out IShellItem folder);
         if (created != 0) throw new IOException(Marshal.GetExceptionForHR(created)?.Message ?? Loc.T("FolderNotFound"));
         try
         {
@@ -170,10 +171,10 @@ internal static class ShellFolderReader
         if (string.IsNullOrEmpty(shown) || string.IsNullOrEmpty(parsing)) return null;
         // The Recycle Bin names its items by their original full path; the list shows the name, as Explorer does.
         if (keepShellIdentity && shown.Contains('\\') && Path.GetFileName(shown.TrimEnd('\\')) is { Length: > 0 } name) shown = name;
-        // A zip file is a folder to Windows, but the app opens it with its program, as it does everywhere else.
+        // Stream-backed archives stay files here; the pane opens ZIPs through its compressed-folder route.
         bool folder = (attributes & SfgaoFolder) != 0 && (attributes & SfgaoStream) == 0;
         string? path = !keepShellIdentity && (attributes & SfgaoFileSystem) != 0 ? Name(child, SigdnFileSysPath) : null;
-        string full = !string.IsNullOrEmpty(path) && Path.IsPathFullyQualified(path) ? path : PathTools.ShellPlace(parsing);
+        string full = !string.IsNullOrEmpty(path) && Path.IsPathFullyQualified(path) && Path.Exists(path) ? path : PathTools.ShellPlace(parsing);
         if (PathTools.IsShellPlace(full)) s_names[full] = shown;
         long size = 0;
         DateTime modified = default;

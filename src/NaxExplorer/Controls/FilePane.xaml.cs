@@ -74,6 +74,7 @@ public sealed partial class FilePane : UserControl
     internal void StopBackgroundWork()
     {
         _closed = true;
+        EndRenameEdit();
         CompositionTarget.Rendering -= TraceSelectionPaint;
         _selectionPaintStarted = 0;
         CancelFolderSizes();
@@ -110,6 +111,9 @@ public sealed partial class FilePane : UserControl
         _flushTimer.SafeTick(FlushHits);
         // The list marks pointer presses as handled, so the pane listens to handled ones too, to know it is active.
         Root.AddHandler(PointerPressedEvent, new PointerEventHandler(Root_PointerPressed), handledEventsToo: true);
+        // The current breadcrumb consumes its input. Listen to handled double taps as well, including when a long
+        // final segment fills the whole bar and leaves no background to click.
+        AddressArea.AddHandler(DoubleTappedEvent, new DoubleTappedEventHandler(AddressArea_DoubleTapped), handledEventsToo: true);
         foreach (ListViewBase list in new ListViewBase[] { List, Thumbs })
         {
             list.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(List_PreviewSpace), handledEventsToo: true);
@@ -188,6 +192,7 @@ public sealed partial class FilePane : UserControl
         }
         if (start is not null)
         {
+            if (CompressedFolders.IsZip(start) && File.Exists(start)) start = CompressedFolders.Location(start);
             string folder = PathTools.IsThisPc(start) || PathTools.IsShellPlace(start) || Directory.Exists(start) ? start : Path.GetDirectoryName(start) ?? fallback;
             AddTab(folder, settings, select: false).Selection = !PathTools.IsShellPlace(start) && File.Exists(start) ? [start] : [];
         }
@@ -215,6 +220,11 @@ public sealed partial class FilePane : UserControl
     internal void FocusList()
     {
         if (_owner?.IsViewerOpen == true) return;
+        if (_renameEdit.IsActive)
+        {
+            if (_renameBox is { } editor && _renameItem is { } editing) FocusRenameBox(editor, editing);
+            return;
+        }
         ListViewBase list = CurrentList;
         // Right after the list was filled its rows do not exist yet; a layout pass creates them, so one can take focus.
         list.UpdateLayout();
@@ -274,6 +284,7 @@ public sealed partial class FilePane : UserControl
 
     internal void OpenTab(string location, bool select = true)
     {
+        if (CompressedFolders.IsZip(location) && File.Exists(location)) location = CompressedFolders.Location(location);
         string? folder = location;
         string? file = null;
         if (!PathTools.IsThisPc(location) && !PathTools.IsShellPlace(location) && File.Exists(location))
@@ -336,6 +347,7 @@ public sealed partial class FilePane : UserControl
 
     private void ShowTab(PaneTab tab)
     {
+        EndRenameEdit();
         if (_tab is not null && _tab != tab)
         {
             _tab.Selection = SelectedPaths.Take(500).ToList();
@@ -541,6 +553,7 @@ public sealed partial class FilePane : UserControl
 
     private async Task LoadAsync()
     {
+        EndRenameEdit();
         if (_closed) return;
         _refreshVersion++;
         CancelFolderSizes();
@@ -810,7 +823,7 @@ public sealed partial class FilePane : UserControl
     private async Task RefreshAsync()
     {
         if (_closed || _tab.Search is not null) return;
-        if (_renaming) return;
+        if (_renaming || _renameEdit.IsActive) { _refreshAfterRename = true; return; }
         if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         int refreshVersion = ++_refreshVersion;
         PaneTab tab = _tab;
@@ -833,6 +846,7 @@ public sealed partial class FilePane : UserControl
             return;
         }
         if (_closed || refreshVersion != _refreshVersion || tab != _tab || !PathTools.SameLocation(location, tab.Location) || tab.Search is not null) return;
+        if (_renaming || _renameEdit.IsActive) { _refreshAfterRename = true; return; }
         if (IsSelectingWithMouse) { _refreshAfterSelection = true; return; }
         FolderChanges changes = FolderChanges.Compute(_entries, fresh);
         _entries = fresh;
@@ -1303,7 +1317,7 @@ public sealed partial class FilePane : UserControl
                     if (node is TextBox or ButtonBase) break;
                     if (node is SelectorItem { Content: FileItem item } row)
                     {
-                        if (item.Entry.Kind != EntryKind.Drive && !item.IsRenaming && !PathTools.IsShellPlace(item.Entry.FullPath))
+                        if (item.Entry.Kind != EntryKind.Drive && !item.IsRenaming && (!PathTools.IsShellPlace(item.Entry.FullPath) || CompressedFolders.IsEntry(item.Entry.FullPath)))
                         {
                             _itemGesture.Press(point.Position.X, point.Position.Y);
                             _itemGestureList = list;
@@ -1720,7 +1734,7 @@ public sealed partial class FilePane : UserControl
     /// <summary>Typing letters jumps to the first name that starts with them.</summary>
     private void List_CharacterReceived(UIElement sender, CharacterReceivedRoutedEventArgs args)
     {
-        if (_owner.IsViewerOpen) return;
+        if (args.Handled || _owner.IsViewerOpen || _renameEdit.IsActive || KeyIsInsideEditor(args.OriginalSource as DependencyObject, sender)) return;
         char c = args.Character;
         if (char.IsControl(c)) return;
         DateTime now = DateTime.UtcNow;
@@ -1759,6 +1773,11 @@ public sealed partial class FilePane : UserControl
     internal async void OpenItem(FileItem item)
     {
         string path = item.Entry.FullPath;
+        if (item.Entry.Kind == EntryKind.File && CompressedFolders.IsZip(path))
+        {
+            await NavigateAsync(CompressedFolders.Location(path));
+            return;
+        }
         if (item.Entry.IsContainer)
         {
             await NavigateAsync(path);
@@ -1843,7 +1862,7 @@ public sealed partial class FilePane : UserControl
     /// </summary>
     private bool RefuseShellItems(IReadOnlyList<string> paths)
     {
-        if (!paths.Any(PathTools.IsShellPlace)) return false;
+        if (!paths.Any(path => PathTools.IsShellPlace(path) && !CompressedFolders.IsEntry(path))) return false;
         _owner.ShowMessage(Loc.T("ShellItemsNoCopy"), InfoBarSeverity.Warning);
         return true;
     }
@@ -1880,6 +1899,23 @@ public sealed partial class FilePane : UserControl
         await CheckedTransfer(paths, target, move);
     }
 
+    private async void ExtractToFolder(string? archive = null)
+    {
+        try
+        {
+            IReadOnlyList<string> paths = archive is null ? SelectedPaths
+                : (await ShellFolderReader.ReadAsync(CompressedFolders.Location(archive), true, default)).Entries.Select(e => e.FullPath).ToArray();
+            if (paths.Count == 0) return;
+            string? start = CompressedFolders.TrySplit(archive is null ? Location : CompressedFolders.Location(archive), out string zip, out _)
+                ? Path.GetDirectoryName(zip) : Folder;
+            if (await _owner.ChooseFolderAsync(false, paths, start) is { } target) await CheckedTransfer(paths, target, false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
+        {
+            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+    }
+
     /// <summary>Checks a copy or move, then runs it with the app's own windows. Returns false when it did not start.</summary>
     private async Task<bool> CheckedTransfer(IReadOnlyList<string> paths, string target, bool move)
     {
@@ -1909,42 +1945,61 @@ public sealed partial class FilePane : UserControl
 
     internal void BeginRename()
     {
-        if (_renaming) return;
+        if (_renaming || _renameEdit.IsActive) return;
         if (SelectedItems is not [var item, ..] || item.Entry.Kind == EntryKind.Drive) return;
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
         CurrentList.ScrollIntoView(item);
-        _renameStarted = Environment.TickCount64;
+        _typed = "";
+        _refreshVersion++;
+        _renameItem = item;
+        _renameEdit.Begin(item.Entry.Name, item.Entry.Kind == EntryKind.File);
         item.IsRenaming = true;
     }
 
     /// <summary>
-    /// When the rename box last opened. Right after it opens, focus can still move on its own: a menu that closes gives
-    /// focus back to its button, and the list moves it to the selected row. Such a move must not end the rename, or a
-    /// new folder would keep its default name before the user could type one.
+    /// Owns the editor until commit or cancellation. Watchers and queued list focus must wait for that editor.
     /// </summary>
-    private long _renameStarted;
+    private readonly RenameEditState _renameEdit = new();
+    private FileItem? _renameItem;
+    private TextBox? _renameBox;
+    private bool _refreshAfterRename;
     private bool _renaming;
     private int _refreshVersion;
 
-    private static readonly TimeSpan RenameSettleTime = TimeSpan.FromMilliseconds(1000);
-
     private void RenameBox_Loaded(object sender, RoutedEventArgs e)
     {
-        if (sender is not TextBox box || box.DataContext is not FileItem item) return;
-        box.Text = item.Entry.Name;
+        if (sender is not TextBox box || box.DataContext is not FileItem item || item != _renameItem) return;
+        _renameBox = box;
+        box.Text = _renameEdit.Text;
         FocusRenameBox(box, item);
         // Focus is given again once a closing menu has put it back on its button.
         DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => FocusRenameBox(box, item));
     }
 
-    private static void FocusRenameBox(TextBox box, FileItem item)
+    private void FocusRenameBox(TextBox box, FileItem item)
     {
-        if (!item.IsRenaming || box.FocusState != FocusState.Unfocused) return;
-        box.Focus(FocusState.Programmatic);
-        int dot = item.Entry.Kind == EntryKind.File ? item.Entry.Name.LastIndexOf('.') : -1;
-        if (dot > 0) box.Select(0, dot);
-        else box.SelectAll();
+        if (_closed || !_owner.IsWindowActive || item != _renameItem || !item.IsRenaming || !box.IsLoaded) return;
+        if (box.FocusState == FocusState.Unfocused && !box.Focus(FocusState.Programmatic)) return;
+        if (_renameEdit.TakeInitialSelection(out int length)) box.Select(0, length);
+    }
+
+    private void RenameBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (sender is TextBox box && ReferenceEquals(box, _renameBox)) _renameEdit.UpdateText(box.Text);
+    }
+
+    private void EndRenameEdit()
+    {
+        _renameEdit.End();
+        if (_renameItem is { } item) item.IsRenaming = false;
+        _renameItem = null;
+        _renameBox = null;
+        if (_refreshAfterRename && !_renaming && !_closed)
+        {
+            _refreshAfterRename = false;
+            ScheduleRefresh();
+        }
     }
 
     private void RenameBox_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -1958,7 +2013,7 @@ public sealed partial class FilePane : UserControl
         else if (e.Key == VirtualKey.Escape)
         {
             e.Handled = true;
-            item.IsRenaming = false;
+            EndRenameEdit();
             FocusList();
         }
     }
@@ -1966,7 +2021,7 @@ public sealed partial class FilePane : UserControl
     private void RenameBox_LostFocus(object sender, RoutedEventArgs e)
     {
         if (sender is not TextBox { DataContext: FileItem item } box) return;
-        if (item.IsRenaming && Environment.TickCount64 - _renameStarted < RenameSettleTime.TotalMilliseconds && FocusWentAstray(box))
+        if (item.IsRenaming && item == _renameItem && _owner.IsWindowActive && FocusWentAstray(box))
         {
             DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () => FocusRenameBox(box, item));
             return;
@@ -1989,35 +2044,37 @@ public sealed partial class FilePane : UserControl
 
     private async void CommitRename(FileItem item, string text)
     {
-        if (!item.IsRenaming) return;
-        item.IsRenaming = false;
+        if (!item.IsRenaming || item != _renameItem || _renaming) return;
         string name = text.Trim();
         // Let x:Load remove the editor after its key/focus event has unwound.
         // Forcing UpdateLayout here can recycle rows during the rename event.
-        FocusListSoon();
-        if (name.Length == 0 || name == item.Entry.Name) return;
+        if (name.Length == 0 || name == item.Entry.Name) { EndRenameEdit(); FocusListSoon(); return; }
         NameProblem problem = NameRules.Check(name);
         if (problem != NameProblem.None)
         {
             _owner.ShowMessage(Loc.T("Name" + problem), InfoBarSeverity.Warning);
+            if (_renameBox is { } editor) FocusRenameBox(editor, item);
             return;
         }
         string? folder = Path.GetDirectoryName(item.Entry.FullPath.TrimEnd('\\'));
-        if (folder is null) return;
+        if (folder is null) { EndRenameEdit(); return; }
         // A rename never replaces another item: a name that is taken is refused here, so Windows is never asked.
         // Changing only the case of the item's own name is allowed.
         bool caseOnly = string.Equals(name, item.Entry.Name, StringComparison.OrdinalIgnoreCase);
-        if (!caseOnly && await Task.Run(() => Path.Exists(Path.Combine(folder, name))))
-        {
-            _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
-            return;
-        }
         string originalPath = item.Entry.FullPath;
         PaneTab tab = _tab;
         _renaming = true;
         _refreshVersion++;
         try
         {
+            if (!caseOnly && await Task.Run(() => Path.Exists(Path.Combine(folder, name))))
+            {
+                _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
+                if (_renameBox is { } editor) FocusRenameBox(editor, item);
+                return;
+            }
+            EndRenameEdit();
+            FocusListSoon();
             await ShellActions.RenameAsync(originalPath, name, _owner.Hwnd);
             FileEntry? renamed = await Task.Run(() => !caseOnly && Path.Exists(originalPath) ? null : ReadAsOnDisk(folder, name));
             if (renamed is not null && !_closed && tab == _tab && PathTools.SameLocation(folder, _tab.Location))
@@ -2031,6 +2088,7 @@ public sealed partial class FilePane : UserControl
         {
             _renaming = false;
         }
+        _refreshAfterRename = false;
         await RefreshAsync();
     }
 
@@ -2082,44 +2140,50 @@ public sealed partial class FilePane : UserControl
         }
     }
 
-    internal async void NewFolder()
-    {
-        if (Folder is not { } folder) return;
-        string name = NameRules.Unused(Loc.T("NewFolderName"), isFolder: true, n => Path.Exists(Path.Combine(folder, n)));
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(folder, name));
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return;
-        }
-        await SelectNewAndRename(Path.Combine(folder, name));
-    }
+    internal async void NewFolder() => await CreateNewItem(folder: true);
 
-    internal async void NewTextFile()
+    internal async void NewTextFile() => await CreateNewItem(folder: false);
+
+    private bool _creatingItem;
+
+    private async Task CreateNewItem(bool folder)
     {
-        if (Folder is not { } folder) return;
-        string name = NameRules.Unused(Loc.T("NewTextFileName") + ".txt", isFolder: false, n => Path.Exists(Path.Combine(folder, n)));
+        if (_creatingItem || _renaming || Folder is not { } parent) return;
+        PaneTab tab = _tab;
+        string name = folder ? Loc.T("NewFolderName") : Loc.T("NewTextFileName") + ".txt";
+        _creatingItem = true;
         try
         {
-            using (new FileStream(Path.Combine(folder, name), FileMode.CreateNew, FileAccess.Write))
-            {
-            }
+            string path = await Task.Run(() => NewItemCreator.Create(parent, name, folder));
+            if (!_closed && tab == _tab && Folder is { } shown && PathTools.SameLocation(parent, shown)) await SelectNewAndRename(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return;
         }
-        await SelectNewAndRename(Path.Combine(folder, name));
+        finally { _creatingItem = false; }
     }
 
     private async Task SelectNewAndRename(string path)
     {
+        PaneTab tab = _tab;
+        string? parent = Path.GetDirectoryName(path);
         await RefreshAsync();
+        if (_closed || tab != _tab || parent is null || Folder is not { } shown || !PathTools.SameLocation(parent, shown)) return;
+        if (_filter.Length > 0) SearchBox.Text = "";
         FileItem? item = _items.FirstOrDefault(i => PathTools.SameLocation(i.Entry.FullPath, path));
+        // A watcher may have superseded the awaited refresh. Insert the new row directly rather than losing rename.
+        if (item is null && parent is not null)
+        {
+            FileEntry? entry = await Task.Run(() => ReadAsOnDisk(parent, Path.GetFileName(path)));
+            if (_closed || tab != _tab || Folder is not { } current || !PathTools.SameLocation(parent, current)) return;
+            if (entry is not null && !_entries.Any(existing => PathTools.SameLocation(existing.FullPath, path)))
+            {
+                _entries.Add(entry);
+                ApplyChanges(new FolderChanges([], [entry], []));
+            }
+            item = _items.FirstOrDefault(i => PathTools.SameLocation(i.Entry.FullPath, path));
+        }
         if (item is null) return;
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
@@ -2271,6 +2335,17 @@ public sealed partial class FilePane : UserControl
         // of the menu brings what it offers instead, such as "Restore".
         if (PathTools.IsShellPlace(item.Entry.FullPath))
         {
+            if (CompressedFolders.IsEntry(item.Entry.FullPath))
+            {
+                menu.Items.Add(Item("Cut", "", () => Copy(cut: true), "Ctrl+X"));
+                menu.Items.Add(Item("Copy", "", () => Copy(cut: false), "Ctrl+C"));
+                menu.Items.Add(Item("ExtractToFolder", "", () => ExtractToFolder()));
+                bool otherFolder = _owner.OtherPane(this) is not { } otherPane || otherPane.Folder is not null;
+                bool onePane = _owner.OtherPane(this) is null;
+                menu.Items.Add(Item(onePane ? "CopyToFolder" : "CopyToOther", "", () => TransferToOtherPane(false), "F7", otherFolder));
+                menu.Items.Add(Item(onePane ? "MoveToFolder" : "MoveToOther", "", () => TransferToOtherPane(true), "F8", otherFolder));
+                menu.Items.Add(new MenuFlyoutSeparator());
+            }
             menu.Items.Add(Item("Delete", "", () => Delete(permanently: false), "Del"));
             menu.Items.Add(Tagged(Item("Properties", "", ShowProperties, "Alt+Enter"), ShellMenuMerge.PropertiesTag));
             return menu;
@@ -2279,6 +2354,7 @@ public sealed partial class FilePane : UserControl
         {
             menu.Items.Add(Item("Cut", "", () => Copy(cut: true), "Ctrl+X"));
             menu.Items.Add(Item("Copy", "", () => Copy(cut: false), "Ctrl+C"));
+            if (!several && CompressedFolders.IsZip(item.Entry.FullPath)) menu.Items.Add(Tagged(Item("ExtractAll", "", () => ExtractToFolder(item.Entry.FullPath)), ShellMenuMerge.ExtractTag));
         }
         if (container && !several) menu.Items.Add(Item("PasteInto", "", () => Paste(item.Entry.FullPath), enabled: FileClipboard.HasFiles));
         menu.Items.Add(Item("CopyPath", "", CopyPaths, "Ctrl+Shift+C"));
@@ -2309,6 +2385,7 @@ public sealed partial class FilePane : UserControl
     private MenuFlyout BuildBackgroundMenu()
     {
         var menu = new MenuFlyout();
+        if (CompressedFolders.TrySplit(Location, out _, out _)) menu.Items.Add(Item("ExtractAll", "", () => ExtractToFolder(Location)));
         bool folder = Folder is not null;
         if (folder)
         {
@@ -2524,6 +2601,11 @@ public sealed partial class FilePane : UserControl
             // when the drag starts if they resolve within a second; for very many items or a slow share they are
             // supplied when the drop target asks, so the drag never waits for all of them.
             e.Data.Properties[InternalDragFormat] = paths;
+            if (paths.Any(CompressedFolders.IsEntry))
+            {
+                e.Data.SetData(ShellClipboardIds.Format, await ShellClipboardIds.DragDataAsync(paths));
+                return;
+            }
             IStorageItem[]? items = await FileDragPayload.ReadWithinAsync(paths, TimeSpan.FromSeconds(1));
             if (_closed) { e.Cancel = true; return; }
             if (items is not null) e.Data.SetStorageItems(items);
@@ -2575,7 +2657,7 @@ public sealed partial class FilePane : UserControl
         string[] paths = e.Items.OfType<FileItem>().Where(i => i.Entry.Kind != EntryKind.Drive).Select(i => i.Entry.FullPath).ToArray();
         // Items of the Recycle Bin or a phone have no path another folder could take; they are restored or copied
         // through their context menu instead.
-        if (paths.Length == 0 || paths.Any(PathTools.IsShellPlace))
+        if (paths.Length == 0 || paths.Any(path => PathTools.IsShellPlace(path) && !CompressedFolders.IsEntry(path)))
         {
             e.Cancel = true;
             return;
@@ -2723,16 +2805,38 @@ public sealed partial class FilePane : UserControl
 
     private async void Breadcrumb_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
     {
-        if (args.Item is Crumb crumb) await NavigateAsync(crumb.Location, ChildOf(_tab.Location, crumb.Location));
+        if (args.Item is not Crumb crumb) return;
+        if (!PathTools.SameLocation(crumb.Location, _tab.Location)) await NavigateAsync(crumb.Location, ChildOf(_tab.Location, crumb.Location));
     }
 
-    private void AddressBack_Tapped(object sender, TappedRoutedEventArgs e) => EnterAddressEdit();
+    private void AddressArea_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (AddressBox.Visibility == Visibility.Visible) return;
+        EnterAddressEdit();
+        e.Handled = true;
+    }
+
+    private void AddressArea_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (AddressBox.Visibility == Visibility.Visible) return;
+        e.Handled = true;
+        var menu = new MenuFlyout();
+        menu.Items.Add(Item("CopyAddress", "", () =>
+        {
+            var package = new DataPackage();
+            package.SetText(PathTools.IsThisPc(Location) ? "shell:MyComputerFolder" : PathTools.ParsingName(Location));
+            try { Clipboard.SetContent(package); _owner.ShowMessage(Loc.T("PathCopied"), InfoBarSeverity.Informational); }
+            catch (System.Runtime.InteropServices.COMException) { _owner.ShowMessage(Loc.T("ClipboardBusy"), InfoBarSeverity.Warning); }
+        }));
+        menu.Items.Add(Item("EditAddress", "", EnterAddressEdit));
+        menu.ShowAt(AddressArea, new FlyoutShowOptions { Position = e.GetPosition(AddressArea) });
+    }
 
     private void EnterAddressEdit()
     {
         BreadcrumbScroller.Visibility = Visibility.Collapsed;
         AddressBox.Visibility = Visibility.Visible;
-        AddressBox.Text = PathTools.IsThisPc(_tab.Location) ? "" : _tab.Location;
+        AddressBox.Text = PathTools.IsThisPc(_tab.Location) ? "" : PathTools.ParsingName(_tab.Location);
         // The box was collapsed, so its inner text field exists only after a layout pass. The keyboard focus goes
         // straight into that field; focusing the AutoSuggestBox itself left typing with nowhere to go.
         AddressBox.UpdateLayout();
@@ -2765,7 +2869,11 @@ public sealed partial class FilePane : UserControl
         }
         string? full = PathTools.Normalize(text, Folder);
         if (full is not null && Directory.Exists(full)) await NavigateAsync(full);
-        else if (full is not null && File.Exists(full)) await NavigateAsync(Path.GetDirectoryName(full)!, full);
+        else if (full is not null && File.Exists(full))
+        {
+            if (CompressedFolders.IsZip(full)) await NavigateAsync(CompressedFolders.Location(full));
+            else await NavigateAsync(Path.GetDirectoryName(full)!, full);
+        }
         // Places only Windows lists, such as "shell:RecycleBinFolder", "\\SERVER" or a folder inside a zip file.
         else if (await ShellFolderReader.ResolveAsync(text) is { } place) await NavigateAsync(place);
         else _owner.ShowMessage(Loc.F("FolderNotFound", text), InfoBarSeverity.Warning);
@@ -2785,6 +2893,7 @@ public sealed partial class FilePane : UserControl
         DispatcherQueue.SafeEnqueue(() =>
         {
             if (XamlRoot is null) return;
+            if (AddressBox.FindDescendant<TextBox>()?.ContextFlyout?.IsOpen == true) return;
             var focused = FocusManager.GetFocusedElement(XamlRoot) as DependencyObject;
             for (DependencyObject? node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
             {
