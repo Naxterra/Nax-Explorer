@@ -13,7 +13,7 @@ Nax Explorer is a dual-pane file manager for Windows 11 with a Fluent design, a 
 - A preview pane shows pictures, thumbnails of videos, PDFs and Office files, the start of text files and the text of Word, Excel, PowerPoint and PDF documents.
 - A picture viewer opens with Space or a double-click: arrow keys step through the folder, the mouse wheel zooms around the pointer, dragging pans, R turns the picture for viewing without changing the file, and F11 shows it full screen. It reads every format Windows has a codec for, including HEIC, AVIF and camera RAW files when their free extensions from the Microsoft Store are installed.
 - Typing in the search box filters the current folder at once. Enter starts a search of the folder and its subfolders:
-  - **Smart** search uses the AI index. It ranks file names that contain every word first, then documents whose text contains the words, merged with documents whose meaning is close to the query. "oracle upgrade" also finds a German runbook about raising a database from 19c to 23ai that never uses those words.
+  - **Smart** search uses the AI index. It ranks file names that contain every word first, then documents whose text contains all the words, merged with documents whose meaning is close to the query. "oracle upgrade" also finds a German runbook about raising a database from 19c to 23ai that never uses those words. Filename patterns such as `*.zip` or `*.jpg;*.png` return matching names only. Quoted phrases keep the search literal. Filename matching accepts different separators, accents and apostrophe styles; a single-word filename lookup does not add unrelated semantic results.
   - **Exact** search scans the folders live, by name (with wildcards such as `*.pdf`) and by content, including the text inside Word, Excel, PowerPoint, OpenDocument and PDF files.
 
 ## AI search
@@ -21,6 +21,8 @@ Nax Explorer is a dual-pane file manager for Windows 11 with a Fluent design, a 
 AI search is off until you turn it on in the settings. On first use the app downloads the model [intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small) (about 475 MB, MIT license) from a fixed revision and keeps the files only when their SHA-256 hashes match the published ones. The model understands German, English and about 100 other languages.
 
 The indexer reads text files, source code, HTML, RTF, Word, Excel, PowerPoint, OpenDocument and PDF files in the indexed folders (Documents, Desktop and Downloads by default; add or remove folders in the settings or with "Add to AI index" on a folder). Other files are recorded by name, so the smart search also finds them by name. It runs on a background thread with lowered priority, uses the graphics card through DirectML or the processor when there is no suitable card, pauses while a game or another full-screen program runs and, if set, on battery, and releases the model from memory after a few idle minutes. It opens files for reading only and never changes them.
+
+PDF content search needs an extractable text layer. Scanned pages without text remain searchable by filename; the indexer does not perform OCR. Meaning-based results are approximate, so use a filename pattern or quoted phrase when an exact match is required.
 
 The index and the model live in `%LOCALAPPDATA%\Nax-Explorer`. The settings can rebuild the index or delete index and model.
 

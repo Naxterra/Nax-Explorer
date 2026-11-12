@@ -422,8 +422,9 @@ public sealed class IndexStore : IDisposable
     /// Pieces that contain the words, best first by BM25. Every word must appear unless <paramref name="anyWord"/> is
     /// set. Words match as prefixes, so "upgrad" finds "upgrade" and "upgrades".
     /// </summary>
-    public List<FullTextHit> FullText(IReadOnlyList<string> terms, bool anyWord, int limit, string? scope = null)
+    public List<FullTextHit> FullText(IReadOnlyList<string> terms, bool anyWord, int limit, string? scope = null, bool distinctFiles = false)
     {
+        if (limit <= 0) return [];
         string? match = BuildMatch(terms, anyWord);
         if (match is null) return [];
         lock (_gate)
@@ -441,13 +442,20 @@ public sealed class IndexStore : IDisposable
             command.Parameters.AddWithValue("$match", match);
             command.Parameters.AddWithValue("$start", MarkStart.ToString());
             command.Parameters.AddWithValue("$end", MarkEnd.ToString());
-            command.Parameters.AddWithValue("$limit", limit);
+            command.Parameters.AddWithValue("$limit", distinctFiles ? -1 : limit);
             command.Parameters.AddWithValue("$scope", (object?)scope ?? DBNull.Value);
             command.Parameters.AddWithValue("$prefix", scope is null ? DBNull.Value : scope.TrimEnd('\\', '/') + "\\");
             try
             {
                 using SqliteDataReader reader = command.ExecuteReader();
-                while (reader.Read()) result.Add(new FullTextHit(reader.GetInt64(0), reader.GetInt64(1), reader.GetDouble(2), reader.GetString(3)));
+                var seen = new HashSet<long>();
+                while (reader.Read())
+                {
+                    long fileId = reader.GetInt64(1);
+                    if (distinctFiles && !seen.Add(fileId)) continue;
+                    result.Add(new FullTextHit(reader.GetInt64(0), fileId, reader.GetDouble(2), reader.GetString(3)));
+                    if (result.Count >= limit) break;
+                }
             }
             catch (SqliteException)
             {
