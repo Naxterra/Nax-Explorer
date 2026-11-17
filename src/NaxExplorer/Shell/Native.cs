@@ -464,6 +464,9 @@ internal static partial class Native
     public static extern bool SetForegroundWindow(IntPtr hwnd);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     public static extern bool AllowSetForegroundWindow(int processId);
 
     [DllImport("user32.dll")]

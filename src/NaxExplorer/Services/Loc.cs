@@ -179,6 +179,8 @@ internal static class Loc
         ["Properties"] = ("Properties", "Eigenschaften"),
         ["MoreOptions"] = ("Show more options", "Weitere Optionen anzeigen"),
         ["ShellLoading"] = ("Loading more commands…", "Weitere Befehle werden geladen…"),
+        ["MoreCommands"] = ("More commands", "Weitere Befehle"),
+        ["NoMoreCommands"] = ("No additional commands available", "Keine weiteren Befehle verfügbar"),
         ["Refresh"] = ("Refresh", "Aktualisieren"),
         ["OpenTerminal"] = ("Open in Terminal", "Im Terminal öffnen"),
 

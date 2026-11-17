@@ -20,6 +20,7 @@ var suites = new (string File, IEnumerable<(string Name, string Scenario, Action
     ("ListingTests.cs", ListingTests.All()),
     ("PreviewTests.cs", PreviewTests.All()),
     ("ShellTests.cs", ShellTests.All()),
+    ("ContextMenuTests.cs", ContextMenuTests.All()),
     ("StartMenuPinTests.cs", StartMenuPinTests.All()),
     ("ModelTests.cs", ModelTests.All()),
 };
