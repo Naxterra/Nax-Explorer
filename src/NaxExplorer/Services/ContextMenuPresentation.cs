@@ -1,33 +1,38 @@
 namespace NaxExplorer.Services;
 
-/// <summary>Opens a menu once. Commands that arrive after opening may only fill its reserved submenu.</summary>
+/// <summary>Opens one complete menu after its commands are ready, unless the request has been dismissed.</summary>
 internal static class ContextMenuPresentation
 {
     internal static async Task ShowAsync<T>(
         Task<T> loading,
-        TimeSpan patience,
         Func<bool> isCurrent,
         Action<T> showReady,
-        Action showPending,
-        Func<bool> isOpen,
-        Action<T> fillSubmenu,
-        Action<T> discard)
+        Action<T> discard,
+        CancellationToken token = default)
     {
-        bool ready = await Task.WhenAny(loading, Task.Delay(patience)) == loading;
-        if (!isCurrent())
+        T result;
+        try
         {
-            discard(await loading);
+            result = await loading.WaitAsync(token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // Shell extensions cannot be interrupted safely. Release their result when it arrives, without keeping
+            // the dismissed UI request waiting or ever opening a menu for it.
+            _ = DiscardWhenReadyAsync(loading, discard);
             return;
         }
-        if (ready)
+        if (token.IsCancellationRequested || !isCurrent())
         {
-            showReady(await loading);
+            discard(result);
             return;
         }
+        showReady(result);
+    }
 
-        showPending();
-        T result = await loading;
-        if (isOpen()) fillSubmenu(result);
-        else discard(result);
+    private static async Task DiscardWhenReadyAsync<T>(Task<T> loading, Action<T> discard)
+    {
+        try { discard(await loading.ConfigureAwait(false)); }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { CrashLog.Write(ex); }
     }
 }

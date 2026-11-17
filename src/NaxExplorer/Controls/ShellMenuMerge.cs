@@ -8,9 +8,8 @@ using NaxExplorer.Shell;
 namespace NaxExplorer.Controls;
 
 /// <summary>
-/// Puts the commands of the Windows context menu into the app's own menu, so everything is in one menu and nothing
-/// hides behind a separate native menu. If Windows takes longer than a moment, its commands fill a reserved submenu
-/// without resizing or rearranging the menu already under the pointer.
+/// Puts Windows and third-party commands directly into the app's menu before it opens. A slow shell extension delays
+/// opening the menu without blocking the window; it never rearranges an open menu or adds another command layer.
 /// </summary>
 internal static class ShellMenuMerge
 {
@@ -19,9 +18,6 @@ internal static class ShellMenuMerge
     public const string NewTag = "new";
     public const string OpenWithTag = "openwith";
     public const string ExtractTag = "extract";
-
-    /// <summary>How long the menu waits for Windows before it opens without Windows' commands.</summary>
-    private static readonly TimeSpan Patience = TimeSpan.FromMilliseconds(120);
 
     /// <summary>
     /// Commands the app's own menu already has, and commands that open Explorer windows. Windows' versions of them are
@@ -39,76 +35,50 @@ internal static class ShellMenuMerge
         FrameworkElement target,
         Windows.Foundation.Point position,
         Task<(ShellMenuSession Session, List<ShellMenuEntry> Entries)?> loading,
-        IntPtr owner,
+        MainWindow ownerWindow,
         bool background)
     {
+        IntPtr owner = ownerWindow.Hwnd;
         menu.AreOpenCloseAnimationsEnabled = false;
         var options = new FlyoutShowOptions { Position = position };
         ShellMenuSession? session = null;
         menu.Closed += (_, _) => session?.Close();
-        bool waitingToOpen = true, dismissed = false;
+        using var cancelled = new CancellationTokenSource();
+        bool waitingToOpen = true;
         UIElement root = target.XamlRoot.Content;
-        PointerEventHandler pointer = (_, _) => { if (waitingToOpen) dismissed = true; };
-        KeyEventHandler key = (_, _) => { if (waitingToOpen) dismissed = true; };
+        void Cancel() { if (waitingToOpen) cancelled.Cancel(); }
+        PointerEventHandler pointer = (_, _) => Cancel();
+        KeyEventHandler key = (_, _) => Cancel();
+        void Activated(object sender, WindowActivatedEventArgs args)
+        {
+            if (args.WindowActivationState == WindowActivationState.Deactivated) Cancel();
+        }
+        void Unloaded(object sender, RoutedEventArgs args) => Cancel();
         root.AddHandler(UIElement.PointerPressedEvent, pointer, handledEventsToo: true);
         root.AddHandler(UIElement.PreviewKeyDownEvent, key, handledEventsToo: true);
+        ownerWindow.Activated += Activated;
+        target.Unloaded += Unloaded;
         void StopWaiting()
         {
             if (!waitingToOpen) return;
             waitingToOpen = false;
             root.RemoveHandler(UIElement.PointerPressedEvent, pointer);
             root.RemoveHandler(UIElement.PreviewKeyDownEvent, key);
-        }
-        var more = new MenuFlyoutSubItem { Text = Loc.T("MoreCommands") };
-        var placeholder = new MenuFlyoutItem { Text = Loc.T("ShellLoading"), IsEnabled = false };
-        void Open()
-        {
-            StopWaiting();
-            menu.ShowAt(target, options);
+            ownerWindow.Activated -= Activated;
+            target.Unloaded -= Unloaded;
         }
         try
         {
-            await ContextMenuPresentation.ShowAsync(loading, Patience,
-                isCurrent: () =>
-                {
-                    StopWaiting();
-                    return !dismissed && target.IsLoaded && Native.GetForegroundWindow() == owner;
-                },
+            await ContextMenuPresentation.ShowAsync(loading,
+                isCurrent: () => target.IsLoaded && Native.GetForegroundWindow() == owner,
                 showReady: ready =>
                 {
                     session = ready?.Session;
                     if (ready is { } result) Merge(menu, result.Session, result.Entries, owner, background);
-                    Open();
+                    StopWaiting();
+                    menu.ShowAt(target, options);
                 },
-                showPending: () =>
-                {
-                    if (!background)
-                    {
-                        more.Items.Add(placeholder);
-                        menu.Items.Insert(IndexOf(menu, PropertiesTag), more);
-                    }
-                    Open();
-                },
-                isOpen: () => menu.IsOpen && target.IsLoaded,
-                fillSubmenu: late =>
-                {
-                    session = late?.Session;
-                    if (background)
-                    {
-                        // Only the existing New submenu changes, never the visible top-level menu.
-                        if (late is { } result) Merge(menu, result.Session, result.Entries, owner, background: true);
-                        return;
-                    }
-                    List<MenuFlyoutItemBase> items = late is { } ready
-                        ? Convert(ready.Entries, ready.Session, owner,
-                            hideWindowsStartPin: menu.Items.Any(i => i.Tag as string == StartMenuPinMenu.MenuTag),
-                            hideWindowsExtract: menu.Items.Any(i => i.Tag as string == ExtractTag))
-                        : [];
-                    more.Items.Clear();
-                    foreach (MenuFlyoutItemBase item in items) more.Items.Add(item);
-                    if (items.Count == 0) more.Items.Add(new MenuFlyoutItem { Text = Loc.T("NoMoreCommands"), IsEnabled = false });
-                },
-                discard: result => result?.Session.Close());
+                discard: result => result?.Session.Close(), token: cancelled.Token);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {

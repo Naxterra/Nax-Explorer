@@ -2265,7 +2265,7 @@ public sealed partial class FilePane : UserControl
         var loading = paths.Count > 0
             ? ShellMenuSession.ForItemsAsync(paths, _owner.Hwnd, extended: false)
             : Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
-        ShellMenuMerge.Show(BuildItemMenu(item), ContentArea, point, loading, _owner.Hwnd, background: false);
+        ShellMenuMerge.Show(BuildItemMenu(item), ContentArea, point, loading, _owner, background: false);
     }
 
     /// <summary>The app's menu for the empty area, with Windows' full "New" submenu when the folder has one.</summary>
@@ -2276,7 +2276,7 @@ public sealed partial class FilePane : UserControl
         var loading = place is { } folder
             ? ShellMenuSession.ForBackgroundAsync(folder, _owner.Hwnd)
             : Task.FromResult<(ShellMenuSession, List<ShellMenuEntry>)?>(null);
-        ShellMenuMerge.Show(BuildBackgroundMenu(), ContentArea, point, loading, _owner.Hwnd, background: true);
+        ShellMenuMerge.Show(BuildBackgroundMenu(), ContentArea, point, loading, _owner, background: true);
     }
 
     private static MenuFlyoutItemBase Tagged(MenuFlyoutItemBase item, string tag)
@@ -2325,8 +2325,8 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item("OpenInNewTab", "", () => OpenTab(item.Entry.FullPath, select: false)));
             menu.Items.Add(Item("OpenInOtherPane", "", () => _owner.OpenInOtherPane(this, item.Entry.FullPath)));
         }
-        // Windows' menu brings its own "Open with" and replaces this one when it arrives; this one serves while Windows'
-        // menu is still loading or when it fails. It opens one file, so it is offered only when one file is selected.
+        // Windows' usable Open with command replaces this fallback before the menu opens. It opens one file, so it
+        // is offered only when one file is selected.
         if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
         if (!container && !several) StartMenuPinMenu.Add(menu, item.Entry.FullPath, _owner);
