@@ -62,8 +62,8 @@ internal static class ShellImages
     /// <summary>Gets one image on the calling thread, which must be an STA thread.</summary>
     public static ImagePixels? Get(string path, int size, bool thumbnail)
     {
-        // Making a thumbnail of a cloud file that lives only online could download it, so such a file shows its icon.
-        if (thumbnail && Core.CloudFiles.IsOnlineOnly(path)) thumbnail = false;
+        // Making a thumbnail of an online-only cloud file or a cloud folder could hydrate online files, so use its icon.
+        if (thumbnail && ShouldAvoidThumbnail(path)) thumbnail = false;
         Guid riid = Native.IID_IShellItem;
         if (Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref riid, out IShellItem item) != 0) return null;
         try
@@ -83,6 +83,27 @@ internal static class ShellImages
         finally
         {
             Native.Release(item);
+        }
+    }
+
+    private static bool ShouldAvoidThumbnail(string path)
+    {
+        if (Core.PathTools.IsShellPlace(path)) return false;
+        try
+        {
+            FileAttributes attributes = File.GetAttributes(path);
+            if (Core.CloudFiles.IsOnlineOnly(attributes)) return true;
+            if ((attributes & FileAttributes.Directory) != 0)
+            {
+                // Avoid folder thumbnails on reparse points (cloud sync folders and junctions) as well as known cloud roots.
+                if ((attributes & FileAttributes.ReparsePoint) != 0) return true;
+                return Core.CloudFiles.IsUnfetchedFolder(attributes) || Services.CloudRoots.Contains(path);
+            }
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return true;
         }
     }
 

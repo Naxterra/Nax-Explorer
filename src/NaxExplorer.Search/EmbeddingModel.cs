@@ -72,30 +72,37 @@ public static class EmbeddingModel
                 continue;
             }
             string part = target + ".part";
-            using (HttpResponseMessage response = await http.GetAsync(file.Url, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
+            try
             {
-                response.EnsureSuccessStatusCode();
-                await using Stream source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
-                await using var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true);
-                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                byte[] buffer = new byte[1 << 20];
-                int read;
-                while ((read = await source.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+                using (HttpResponseMessage response = await http.GetAsync(file.Url, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
                 {
-                    hash.AppendData(buffer, 0, read);
-                    await output.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
-                    done += read;
-                    progress?.Report((done, TotalBytes));
+                    response.EnsureSuccessStatusCode();
+                    await using Stream source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                    await using var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true);
+                    using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                    byte[] buffer = new byte[1 << 20];
+                    int read;
+                    while ((read = await source.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+                    {
+                        hash.AppendData(buffer, 0, read);
+                        await output.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                        done += read;
+                        progress?.Report((done, TotalBytes));
+                    }
+                    string actual = Convert.ToHexStringLower(hash.GetHashAndReset());
+                    if (output.Length != file.Size || actual != file.Sha256)
+                    {
+                        throw new InvalidDataException($"{file.Name} does not match its published hash; it was not kept.");
+                    }
                 }
-                string actual = Convert.ToHexStringLower(hash.GetHashAndReset());
-                if (output.Length != file.Size || actual != file.Sha256)
-                {
-                    output.Close();
-                    File.Delete(part);
-                    throw new InvalidDataException($"{file.Name} does not match its published hash; it was not kept.");
-                }
+                File.Move(part, target, overwrite: true);
             }
-            File.Move(part, target, overwrite: true);
+            catch
+            {
+                try { if (File.Exists(part)) File.Delete(part); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                throw;
+            }
         }
     }
 

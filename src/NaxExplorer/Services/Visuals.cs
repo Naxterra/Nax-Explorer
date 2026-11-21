@@ -64,13 +64,15 @@ internal static class Palette
 internal static class ImageCache
 {
     private const int ThumbnailLimit = 600;
+    private const int IconLimit = 1000;
 
     private static readonly HashSet<string> OwnIcon = new(StringComparer.OrdinalIgnoreCase)
     {
         ".exe", ".lnk", ".ico", ".url", ".cpl", ".msc", ".appref-ms", ".scr", ".website", ".cur", ".ani",
     };
 
-    private static readonly Dictionary<string, ImageSource> Icons = [];
+    private static readonly Dictionary<string, LinkedListNode<(string Key, ImageSource Image)>> Icons = [];
+    private static readonly LinkedList<(string Key, ImageSource Image)> IconOrder = new();
     private static readonly Dictionary<string, LinkedListNode<(string Key, ImageSource Image)>> Thumbnails = [];
     private static readonly LinkedList<(string Key, ImageSource Image)> ThumbnailOrder = new();
     private static readonly Dictionary<string, List<Action<ImageSource?>>> Waiting = [];
@@ -92,9 +94,11 @@ internal static class ImageCache
     {
         string key = IconKey(item.Entry, pixels);
         if (!item.IconRequest.Begin(key, item.Icon is not null)) return;
-        if (Icons.TryGetValue(key, out ImageSource? cached))
+        if (Icons.TryGetValue(key, out var cached))
         {
-            if (item.IconRequest.Complete(key)) item.Icon = cached;
+            IconOrder.Remove(cached);
+            IconOrder.AddFirst(cached);
+            if (item.IconRequest.Complete(key)) item.Icon = cached.Value.Image;
             return;
         }
         // An icon shared by extension serves many rows, so it is fetched even when this row has scrolled away.
@@ -102,7 +106,21 @@ internal static class ImageCache
         Load(key, item.Entry.FullPath, pixels, thumbnail: false, shared ? () => true : () => item.IsRealized, ui, image =>
         {
             if (image is null) return;
-            Icons[key] = image;
+            if (Icons.TryGetValue(key, out var existing))
+            {
+                IconOrder.Remove(existing);
+                existing.Value = (key, image);
+                IconOrder.AddFirst(existing);
+            }
+            else
+            {
+                Icons[key] = IconOrder.AddFirst((key, image));
+                while (IconOrder.Count > IconLimit)
+                {
+                    Icons.Remove(IconOrder.Last!.Value.Key);
+                    IconOrder.RemoveLast();
+                }
+            }
             if (item.IconRequest.Complete(key)) item.Icon = image;
         });
     }

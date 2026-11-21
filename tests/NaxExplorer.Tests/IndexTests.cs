@@ -256,6 +256,51 @@ internal static class IndexTests
             }
             Check.Sequence(before, Snapshot(text, docx), "file state");
         });
+
+        yield return ("chunker_preserves_words_across_bare_cr_line_endings", "Bare carriage-return line endings separate lines instead of concatenating neighboring words.", () =>
+        {
+            string cleaned = Chunker.Clean("alpha\rbeta\r\ngamma\r\rdelta");
+            Check.Equal("alpha\nbeta\ngamma\n\ndelta", cleaned, "bare CR handling");
+        });
+
+        yield return ("removing_non_ascii_folder_matches_unicode_case_insensitively", "Removing a folder with accented characters removes indexed files under a differently cased spelling of that folder.", () =>
+        {
+            using IndexStore store = NewStore(out _);
+            store.Save(@"C:\Äpfel\bericht.txt", 10, 1, FileState.Indexed, Pieces("Apfelkuchen Rezept"));
+            store.Save(@"C:\Birnen\notiz.txt", 10, 1, FileState.Indexed, Pieces("Birnenkompott"));
+            store.RemoveUnder(@"C:\äpfel");
+            Check.Equal(null, store.Find(@"C:\Äpfel\bericht.txt"), "non-ASCII folder child was not removed");
+            Check.That(store.Find(@"C:\Birnen\notiz.txt") is not null, "unrelated folder was removed");
+        });
+
+        yield return ("simd_vector_similarity_matches_scalar_reference", "Hardware-accelerated vector similarity matches the exact scalar dot product divided by 127 across full 384-dimension and tail lengths.", () =>
+        {
+            var random = new Random(42);
+            foreach (int length in new[] { 7, 16, 35, 384 })
+            {
+                var query = new float[length];
+                var stored = new sbyte[length];
+                float expected = 0;
+                for (int i = 0; i < length; i++)
+                {
+                    query[i] = (float)(random.NextDouble() * 2 - 1);
+                    stored[i] = (sbyte)random.Next(-127, 128);
+                    expected += query[i] * stored[i];
+                }
+                expected /= VectorMath.Scale;
+                float actual = VectorMath.Similarity(query, stored);
+                Check.That(MathF.Abs(actual - expected) < 1e-4f, $"length {length}: expected {expected}, got {actual}");
+            }
+            bool similarityRejected = false;
+            try { _ = VectorMath.Similarity(new float[16], new sbyte[8]); }
+            catch (ArgumentException) { similarityRejected = true; }
+            Check.That(similarityRejected, "shorter stored vector must be rejected before SIMD load");
+
+            bool dotRejected = false;
+            try { _ = VectorMath.Dot(new float[16], new float[8]); }
+            catch (ArgumentException) { dotRejected = true; }
+            Check.That(dotRejected, "shorter vector must be rejected by Dot");
+        });
     }
 
     private sealed class DisposalEmbedder : IEmbedder

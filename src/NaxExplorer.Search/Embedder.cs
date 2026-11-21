@@ -79,7 +79,7 @@ public sealed class OnnxEmbedder : IEmbedder
         {
             try
             {
-                var gpu = new SessionOptions
+                using var gpu = new SessionOptions
                 {
                     GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
                     // DirectML needs these two settings.
@@ -97,7 +97,7 @@ public sealed class OnnxEmbedder : IEmbedder
         }
         if (session is null)
         {
-            var cpu = new SessionOptions
+            using var cpu = new SessionOptions
             {
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
                 // Leaves half the cores to the user, since indexing runs in the background.
@@ -178,5 +178,15 @@ public sealed class OnnxEmbedder : IEmbedder
         }
     }
 
-    public void Dispose() => _session.Dispose();
+    private bool _disposed;
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _session.Dispose();
+        }
+    }
 }

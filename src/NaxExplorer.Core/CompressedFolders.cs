@@ -47,8 +47,9 @@ public static class CompressedFolders
             string rest = name[prefix.Length..];
             if (rest.Length == 0) continue;
             string child = rest.Split('/')[0];
-            // Do not hand traversal segments to the shell, including when checking a malformed archive's conflicts.
-            if (child is "." or ".." || child.Contains(':')) throw new InvalidDataException("Invalid ZIP entry name.");
+            // An empty child would have the same shell identity as its parent.
+            if (child.Length == 0 || child is "." or ".." || child.Contains(':'))
+                throw new InvalidDataException("Invalid ZIP entry name.");
             children.Add(Location(file + "\\" + prefix.Replace('/', '\\') + child));
         }
         return folder ? children.ToList() : null;

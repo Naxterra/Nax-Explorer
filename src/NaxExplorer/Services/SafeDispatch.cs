@@ -49,12 +49,14 @@ internal sealed class SafeSynchronizationContext(DispatcherQueue queue) : Synchr
             return;
         }
         using var done = new ManualResetEventSlim();
-        queue.TryEnqueue(() =>
+        if (queue.TryEnqueue(() =>
         {
-            SafeDispatch.Run(() => callback(state));
-            done.Set();
-        });
-        done.Wait();
+            try { SafeDispatch.Run(() => callback(state)); }
+            finally { done.Set(); }
+        }))
+        {
+            done.Wait();
+        }
     }
 
     public override SynchronizationContext CreateCopy() => new SafeSynchronizationContext(queue);

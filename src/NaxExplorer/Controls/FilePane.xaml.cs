@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Numerics;
+using System.Security.Principal;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
@@ -78,11 +79,19 @@ public sealed partial class FilePane : UserControl
         CompositionTarget.Rendering -= TraceSelectionPaint;
         _selectionPaintStarted = 0;
         CancelFolderSizes();
-        _loadCts?.Cancel();
+        CancelOnly(ref _loadCts);
         CancelSearch();
         StopWatcher();
         EndMarquee();
         CancelMouseFileDrag();
+    }
+
+    private static void CancelOnly(ref CancellationTokenSource? cts)
+    {
+        if (cts is not { } current) return;
+        cts = null;
+        try { current.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     public FilePane()
@@ -557,8 +566,8 @@ public sealed partial class FilePane : UserControl
         if (_closed) return;
         _refreshVersion++;
         CancelFolderSizes();
-        _loadCts?.Cancel();
-        var cts = new CancellationTokenSource();
+        CancelOnly(ref _loadCts);
+        using var cts = new CancellationTokenSource();
         _loadCts = cts;
         PaneTab tab = _tab;
         string location = tab.Location;
@@ -593,7 +602,11 @@ public sealed partial class FilePane : UserControl
         finally
         {
             slow.Stop();
-            if (_loadCts == cts) LoadingBar.Visibility = Visibility.Collapsed;
+            if (ReferenceEquals(_loadCts, cts))
+            {
+                _loadCts = null;
+                LoadingBar.Visibility = Visibility.Collapsed;
+            }
         }
         if (cts.IsCancellationRequested || tab != _tab || !ReferenceEquals(location, tab.Location)) return;
         _entries = entries;
@@ -775,6 +788,11 @@ public sealed partial class FilePane : UserControl
     {
         HashSet<string> cut = _owner.CutPaths;
         foreach (FileItem item in _all) item.IsCut = cut.Contains(item.Entry.FullPath);
+    }
+
+    internal void RefreshCloudMarks()
+    {
+        foreach (FileItem item in _all) item.RefreshCloud();
     }
 
     // ---------------------------------------------------------------- live updates
@@ -1937,7 +1955,24 @@ public sealed partial class FilePane : UserControl
         IReadOnlyList<string> paths = SelectedPaths;
         if (paths.Count == 0) return;
         int index = CurrentList.SelectedIndex;
-        if (!await _owner.DeleteAsync(paths, permanently)) return;
+        bool completed = await _owner.DeleteAsync(paths, permanently);
+        if (_tab.Search is not null)
+        {
+            var gone = await Task.Run(() => paths.Where(p => !PathTools.IsShellPlace(p) && !Path.Exists(p)).ToHashSet(StringComparer.OrdinalIgnoreCase));
+            if (gone.Count > 0 && !_closed && _tab.Search is not null)
+            {
+                _all.RemoveAll(i => gone.Contains(i.Entry.FullPath));
+                for (int i = _items.Count - 1; i >= 0; i--)
+                {
+                    if (gone.Contains(_items[i].Entry.FullPath)) _items.RemoveAt(i);
+                }
+                UpdateEmpty();
+                UpdateStatus();
+                if (_items.Count > 0 && CurrentList.SelectedIndex < 0) CurrentList.SelectedIndex = Math.Clamp(index, 0, _items.Count - 1);
+            }
+            return;
+        }
+        if (!completed) return;
         await RefreshAsync();
         // The row after the deleted ones gets the selection, so Delete can be pressed again.
         if (_items.Count > 0 && CurrentList.SelectedIndex < 0) CurrentList.SelectedIndex = Math.Clamp(index, 0, _items.Count - 1);
@@ -1946,7 +1981,7 @@ public sealed partial class FilePane : UserControl
     internal void BeginRename()
     {
         if (_renaming || _renameEdit.IsActive) return;
-        if (SelectedItems is not [var item, ..] || item.Entry.Kind == EntryKind.Drive) return;
+        if (SelectedItems is not [var item, ..] || item.Entry.Kind == EntryKind.Drive || PathTools.IsShellPlace(item.Entry.FullPath)) return;
         CurrentList.SelectedItems.Clear();
         CurrentList.SelectedItem = item;
         CurrentList.ScrollIntoView(item);
@@ -2113,7 +2148,7 @@ public sealed partial class FilePane : UserControl
         if (item.IsRealized)
         {
             ImageCache.RequestIcon(item, IconPixels, DispatcherQueue);
-            if (CurrentList == Thumbs) ImageCache.RequestThumbnail(item, ThumbnailPixels, DispatcherQueue);
+            if (CurrentList == Thumbs && item.Entry.Kind == EntryKind.File) ImageCache.RequestThumbnail(item, ThumbnailPixels, DispatcherQueue);
         }
         _owner.OnPaneContentsChanged(_tab.Location, new FolderChanges([previous], [renamed], []));
         NotifySelectionChanged();
@@ -2215,13 +2250,41 @@ public sealed partial class FilePane : UserControl
     {
         string? folder = FolderOrSearchRoot;
         if (folder is null) return;
+        string windowsApps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "WindowsApps", "wt.exe");
+        using var identity = WindowsIdentity.GetCurrent();
+        bool elevated = new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        if (!elevated && !folder.Contains(';') && File.Exists(windowsApps))
+        {
+            try
+            {
+                var terminal = new ProcessStartInfo(windowsApps) { UseShellExecute = true };
+                terminal.ArgumentList.Add("-d");
+                terminal.ArgumentList.Add(folder);
+                using Process? process = Process.Start(terminal);
+                return;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // The execution alias may have been disabled since the existence check.
+            }
+        }
+
+        string pwsh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe");
+        string shell = File.Exists(pwsh)
+            ? pwsh
+            : Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
         try
         {
-            Process.Start(new ProcessStartInfo("wt.exe", $"-d \"{folder}\"") { UseShellExecute = true });
+            using Process? process = Process.Start(new ProcessStartInfo(shell)
+            {
+                WorkingDirectory = folder,
+                UseShellExecute = false
+            });
         }
-        catch (System.ComponentModel.Win32Exception)
+        catch (System.ComponentModel.Win32Exception exception)
         {
-            Process.Start(new ProcessStartInfo("powershell.exe") { WorkingDirectory = folder, UseShellExecute = true });
+            _owner.ShowMessage(exception.Message, InfoBarSeverity.Warning);
         }
     }
 
@@ -3075,8 +3138,7 @@ public sealed partial class FilePane : UserControl
 
     private void CancelSearch()
     {
-        _searchCts?.Cancel();
-        _searchCts = null;
+        CancelOnly(ref _searchCts);
         _flushTimer.Stop();
         SearchRing.IsActive = false;
         StopSearchButton.Visibility = Visibility.Collapsed;
@@ -3086,27 +3148,36 @@ public sealed partial class FilePane : UserControl
     {
         if (_tab.Search is not { } state) return;
         CancelSearch();
-        var cts = new CancellationTokenSource();
+        using var cts = new CancellationTokenSource();
         _searchCts = cts;
-        PaneTab tab = _tab;
-        _all = [];
-        _items = [];
-        BindList();
-        UpdateHeaders();
-        EmptyPanel.Visibility = Visibility.Collapsed;
-        SearchRing.IsActive = true;
-        StopSearchButton.Visibility = Visibility.Visible;
-        SearchStatus.Text = Loc.T("Searching");
-        UpdateStatus();
-        _searchWatch.Restart();
-        string root = PathTools.IsThisPc(tab.Location) ? "" : tab.Location;
-        Coverage coverage = App.Instance!.Search.CoverageOf(tab.Location);
-        AddToIndexButton.Visibility = Settings.AiSearch && coverage == Coverage.None && root.Length > 0 && !state.Smart ? Visibility.Visible : Visibility.Collapsed;
-        AddToIndexButton.Content = Loc.T("AddFolderToAiIndex");
-        EngineBadge.Visibility = Visibility.Visible;
-        EngineText.Text = state.Smart ? Loc.T("EngineSmart") : Loc.T("EngineLive");
-        if (state.Smart) await RunSmartSearchAsync(state, tab, coverage, cts);
-        else await RunLiveSearchAsync(state, tab, root, cts);
+        try
+        {
+            PaneTab tab = _tab;
+            _all = [];
+            _items = [];
+            BindList();
+            UpdateHeaders();
+            EmptyPanel.Visibility = Visibility.Collapsed;
+            SearchRing.IsActive = true;
+            StopSearchButton.Visibility = Visibility.Visible;
+            SearchStatus.Text = Loc.T("Searching");
+            UpdateStatus();
+            _searchWatch.Restart();
+            bool shellPlace = PathTools.IsShellPlace(tab.Location);
+            string root = PathTools.IsThisPc(tab.Location) || shellPlace ? "" : tab.Location;
+            Coverage coverage = App.Instance!.Search.CoverageOf(tab.Location);
+            AddToIndexButton.Visibility = Settings.AiSearch && coverage == Coverage.None && root.Length > 0 && !state.Smart ? Visibility.Visible : Visibility.Collapsed;
+            AddToIndexButton.Content = Loc.T("AddFolderToAiIndex");
+            EngineBadge.Visibility = Visibility.Visible;
+            EngineText.Text = state.Smart ? Loc.T("EngineSmart") : Loc.T("EngineLive");
+            if (state.Smart) await RunSmartSearchAsync(state, tab, coverage, cts);
+            else if (shellPlace) FinishSearch(cts, null);
+            else await RunLiveSearchAsync(state, tab, root, cts);
+        }
+        finally
+        {
+            if (ReferenceEquals(_searchCts, cts)) _searchCts = null;
+        }
     }
 
     private async Task RunSmartSearchAsync(SearchState state, PaneTab tab, Coverage coverage, CancellationTokenSource cts)
@@ -3171,13 +3242,17 @@ public sealed partial class FilePane : UserControl
         var counters = new SearchCounters();
         _counters = counters;
         _flushTimer.Start();
-        // On "This PC" the exact search looks through every ready local drive.
-        List<string> roots = root.Length > 0 ? [root] : DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady).Select(d => d.RootDirectory.FullName).ToList();
+        // On "This PC" the exact search looks through every ready local drive, resolved off the UI thread.
         try
         {
+            List<string> roots = root.Length > 0
+                ? [root]
+                : await Task.Run(() => DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady).Select(d => d.RootDirectory.FullName).ToList(), cts.Token);
+            if (tab != _tab || _searchCts != cts) return;
             foreach (string folder in roots)
             {
-                var request = new SearchRequest(folder, state.Query, state.InNames, state.InContents, state.Subfolders, Settings.ShowHidden);
+                if (cts.IsCancellationRequested) break;
+                var request = new SearchRequest(folder, state.Query, state.InNames, state.InContents, state.Subfolders, Settings.ShowHidden, Settings.ShowProtectedFiles);
                 // The names Windows shows for the hit's folder are asked here, on the search thread, so the list shows them at once.
                 await LiveSearch.RunAsync(request, hit =>
                 {

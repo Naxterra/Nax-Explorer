@@ -65,17 +65,24 @@ public static class Chunker
         var builder = new StringBuilder(text.Length);
         int newlines = 0;
         bool space = false;
-        foreach (char raw in text)
+        for (int i = 0; i < text.Length; i++)
         {
-            char c = raw == '\r' ? '\n' : raw;
-            if (c == '\n')
+            char raw = text[i];
+            if (raw == '\r')
             {
-                if (raw == '\r') continue;
+                // Treat CRLF as a single line break and bare CR as a line break too.
+                if (i + 1 < text.Length && text[i + 1] == '\n') i++;
                 newlines++;
                 space = false;
                 continue;
             }
-            if (char.IsWhiteSpace(c) || char.IsControl(c))
+            if (raw == '\n')
+            {
+                newlines++;
+                space = false;
+                continue;
+            }
+            if (char.IsWhiteSpace(raw) || char.IsControl(raw))
             {
                 space = true;
                 continue;
@@ -91,7 +98,7 @@ public static class Chunker
                 if (builder.Length > 0) builder.Append(' ');
                 space = false;
             }
-            builder.Append(c);
+            builder.Append(raw);
         }
         return builder.ToString();
     }

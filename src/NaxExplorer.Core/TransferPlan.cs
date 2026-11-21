@@ -157,15 +157,15 @@ public static class TransferPlan
     }
 
     /// <summary>
-    /// A folder that is not a symbolic link or junction, so walking into it stays inside the copied tree. Folders in
-    /// sync folders such as OneDrive are reparse points too, but they have no link target and count as real folders.
+    /// A folder that is not a symbolic link, junction, or unfetched cloud folder, so walking into it stays inside the
+    /// copied tree without forcing a cloud client to fetch online-only listings.
     /// </summary>
     private static bool IsRealFolder(string path)
     {
         try
         {
             var info = new DirectoryInfo(path);
-            return info.Exists && info.LinkTarget is null;
+            return info.Exists && CloudFiles.CanEnterFolder(path, info.Attributes);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {

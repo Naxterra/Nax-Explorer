@@ -174,14 +174,28 @@ public sealed class AppSettings
         return Directory.Exists(setting) ? setting : null;
     }
 
-    /// <summary>Writes the settings through a temporary file, so a crash never leaves a half-written file behind.</summary>
+    private static readonly Lock SaveGate = new();
+
+    /// <summary>Writes the settings through a unique temporary file, so concurrent saves or crashes never leave a half-written file behind.</summary>
     public void Save(string? path = null)
     {
         path ??= DataFolders.Settings;
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        string temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(this, AppSettingsJson.Default.AppSettings));
-        File.Move(temporary, path, overwrite: true);
+        lock (SaveGate)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            string temporary = $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(temporary, JsonSerializer.Serialize(this, AppSettingsJson.Default.AppSettings));
+                File.Move(temporary, path, overwrite: true);
+            }
+            catch
+            {
+                try { if (File.Exists(temporary)) File.Delete(temporary); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                throw;
+            }
+        }
     }
 
     public static List<string> DefaultIndexedFolders()

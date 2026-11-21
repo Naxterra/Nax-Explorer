@@ -28,6 +28,16 @@ public static class IndexRules
         || (attributes & FileAttributes.ReparsePoint) != 0
         || (attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0;
 
+    /// <summary>
+    /// Path-aware folder exclusion: enters locally populated cloud sync folders (which carry
+    /// <see cref="FileAttributes.ReparsePoint"/> without a link target) while skipping junctions, symbolic links,
+    /// unfetched cloud folders, hidden/system folders, and known build/VCS folders.
+    /// </summary>
+    public static bool SkipFolder(string path, string name, FileAttributes attributes) =>
+        SkippedFolders.Contains(name)
+        || (attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0
+        || !CloudFiles.CanEnterFolder(path, attributes);
+
     public static bool SkipFile(FileAttributes attributes) =>
         (attributes & (FileAttributes.Hidden | FileAttributes.System | FileAttributes.Temporary)) != 0
         // Cloud files that are not on the disk would be downloaded just to be read.
@@ -434,8 +444,13 @@ public sealed class Indexer : IDisposable
         try { RunUntilStopped(); }
         finally
         {
-            _wake.Dispose();
-            _stop.Dispose();
+            // Synchronize disposal with RequestStop so setting _stopping cannot race _stop.Cancel() / _wake.Set().
+            lock (_gate)
+            {
+                _stopping = true;
+                _wake.Dispose();
+                _stop.Dispose();
+            }
             _completed.TrySetResult();
         }
     }
@@ -591,7 +606,7 @@ public sealed class Indexer : IDisposable
         var entries = new FileSystemEnumerable<FileEntry>(root, DirectoryReader.ToEntry, options)
         {
             ShouldIncludePredicate = (ref FileSystemEntry entry) => !entry.IsDirectory && !IndexRules.SkipFile(entry.Attributes),
-            ShouldRecursePredicate = (ref FileSystemEntry entry) => !IndexRules.SkipFolder(entry.FileName.ToString(), entry.Attributes),
+            ShouldRecursePredicate = (ref FileSystemEntry entry) => !IndexRules.SkipFolder(entry.ToFullPath(), entry.FileName.ToString(), entry.Attributes),
         };
         IEnumerator<FileEntry> enumerator;
         try
@@ -688,7 +703,7 @@ public sealed class Indexer : IDisposable
         {
             if (!Current(item.Path, generation)) continue;
             Report(IndexerPhase.Indexing, item.Path, null);
-            string? text = TextExtractor.Extract(item.Path, IndexRules.MaxChars);
+            string? text = TextExtractor.Extract(item.Path, IndexRules.MaxChars, token: _stop.Token);
             if (text is null || string.IsNullOrWhiteSpace(text))
             {
                 if (!WaitForResume()) return;
@@ -749,7 +764,11 @@ public sealed class Indexer : IDisposable
         StatusChanged?.Invoke(status);
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Signals the worker thread to stop without blocking the caller. Await <see cref="Completion"/> when waiting for
+    /// the database and model to be released.
+    /// </summary>
+    public void RequestStop()
     {
         lock (_gate)
         {
@@ -760,13 +779,18 @@ public sealed class Indexer : IDisposable
             foreach (FileSystemWatcher watcher in _watchers) watcher.Dispose();
             _watchers.Clear();
         }
-        if (_thread.IsAlive && Thread.CurrentThread != _thread) _thread.Join(TimeSpan.FromSeconds(10));
-        else if ((_thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
+        if ((_thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0)
         {
             _wake.Dispose();
             _stop.Dispose();
             _completed.TrySetResult();
         }
+    }
+
+    public void Dispose()
+    {
+        RequestStop();
+        if (_thread.IsAlive && Thread.CurrentThread != _thread) _thread.Join(TimeSpan.FromSeconds(10));
     }
 
     private bool Current(string path, long generation)
@@ -794,7 +818,7 @@ public sealed class Indexer : IDisposable
                 string? folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
                 while (folder is not null && !PathTools.SameLocation(folder, root))
                 {
-                    if (IndexRules.SkipFolder(Path.GetFileName(folder), File.GetAttributes(folder))) break;
+                    if (IndexRules.SkipFolder(folder, Path.GetFileName(folder), File.GetAttributes(folder))) break;
                     folder = Path.GetDirectoryName(folder);
                 }
                 if (folder is not null && PathTools.SameLocation(folder, root)) return true;

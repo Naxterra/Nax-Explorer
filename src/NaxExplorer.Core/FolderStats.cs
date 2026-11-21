@@ -58,6 +58,12 @@ public static class FolderStats
                 unfetched++;
                 continue;
             }
+            if (skipUnfetchedRoots && (attributes & FileAttributes.Directory) != 0 && CloudFiles.IsLink(path, attributes))
+            {
+                // A selected junction or symbolic link is counted as one folder without walking its target tree.
+                folders++;
+                continue;
+            }
             if ((attributes & FileAttributes.Directory) == 0)
             {
                 long size = SizeOf(path);
@@ -77,7 +83,7 @@ public static class FolderStats
                     : (entry.Length, CloudFiles.IsOnlineOnly(entry.Attributes), false),
                 options)
             {
-                ShouldRecursePredicate = (ref FileSystemEntry entry) => Enters(entry.Attributes),
+                ShouldRecursePredicate = (ref FileSystemEntry entry) => Enters(entry.ToFullPath(), entry.Attributes),
             };
             try
             {
@@ -115,11 +121,17 @@ public static class FolderStats
     }
 
     /// <summary>
-    /// True for a folder the count walks into. Junctions and links are not followed, and neither are cloud folders
-    /// whose list of files is not on this device yet, because looking into them would make the sync app fetch it.
+    /// True for a folder the count walks into when only attributes are known. Junctions and links are not followed,
+    /// and neither are cloud folders whose list of files is not on this device yet.
     /// </summary>
     public static bool Enters(FileAttributes attributes) =>
         (attributes & (FileAttributes.ReparsePoint | CloudFiles.RecallOnOpen | CloudFiles.RecallOnDataAccess)) == 0;
+
+    /// <summary>
+    /// True for a folder the count walks into when the path is known: locally populated cloud sync folders are entered,
+    /// while symbolic links, junctions, and unfetched cloud folders are skipped.
+    /// </summary>
+    public static bool Enters(string path, FileAttributes attributes) => CloudFiles.CanEnterFolder(path, attributes);
 
     /// <summary>
     /// True for a folder on another computer, reached through a share or a network drive. Counting it can keep the

@@ -62,5 +62,16 @@ internal static class ExtractionTests
             Check.Equal(null, TextExtractor.Extract(docx, 1000));
             Check.Equal(null, TextExtractor.Extract(pdf, 1000));
         });
+
+        yield return ("read_plain_streams_in_bounded_chunks_for_large_limits", "Extracting a small RTF or HTML document with a large character limit reads cleanly without integer overflow or excessive upfront buffer allocation.", () =>
+        {
+            string folder = Fixtures.TempFolder("bounded-plain");
+            string rtf = Fixtures.Write(folder, "note.rtf", "{\\rtf1\\ansi Hello bounded world}");
+            string html = Fixtures.Write(folder, "page.html", "<html><body><p>Bounded HTML</p></body></html>");
+            string? rtfText = TextExtractor.Extract(rtf, 8_000_000);
+            string? htmlText = TextExtractor.Extract(html, 8_000_000);
+            Check.That(rtfText is not null && rtfText.Contains("Hello bounded world"), $"unexpected RTF text: {rtfText}");
+            Check.That(htmlText is not null && htmlText.Contains("Bounded HTML"), $"unexpected HTML text: {htmlText}");
+        });
     }
 }

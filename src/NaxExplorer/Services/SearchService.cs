@@ -84,15 +84,19 @@ internal sealed class SearchService : IDisposable
         List<string> roots = settings.IndexedFolders.ToList();
         bool fullScreen = settings.PauseIndexingInFullScreen, battery = settings.PauseIndexingOnBattery;
         long generation;
+        Task priorShutdown;
         lock (_gate)
         {
             if (_search is not null) return;
             generation = ++_generation;
+            priorShutdown = _shutdown;
         }
         Task.Factory.StartNew(() =>
         {
             try
             {
+                // Wait for any previous SQLite store and ONNX session to finish releasing before opening new ones.
+                if (!priorShutdown.IsCompleted) priorShutdown.GetAwaiter().GetResult();
                 lock (_gate)
                 {
                     // Stop or a later settings change may have overtaken this queued startup.
@@ -100,7 +104,12 @@ internal sealed class SearchService : IDisposable
                     _store = IndexStore.Open(IndexPath, EmbeddingModel.Id);
                     _host = new EmbedderHost(() => new OnnxEmbedder(EmbeddingModel.ModelPath, EmbeddingModel.TokenizerPath, useGpu));
                     _indexer = new Indexer(_store, _host) { PauseInFullScreen = fullScreen, PauseOnBattery = battery };
-                    _indexer.StatusChanged += status => StatusChanged?.Invoke(status);
+                    _indexer.StatusChanged += status =>
+                    {
+                        bool current;
+                        lock (_gate) current = generation == _generation;
+                        if (current) StatusChanged?.Invoke(status);
+                    };
                     _search = new HybridSearch(_store, _host);
                     _roots = roots;
                     _indexer.Start(roots);
@@ -206,20 +215,24 @@ internal sealed class SearchService : IDisposable
     /// <summary>Loads the model ahead of a search, so the first query does not wait for it.</summary>
     public void Warm()
     {
-        EmbedderHost? host;
-        lock (_gate) host = _host;
-        if (host is null || host.IsLoaded) return;
-        Task.Run(() =>
+        lock (_gate)
         {
-            try
+            EmbedderHost? host = _host;
+            if (host is null || host.IsLoaded) return;
+            Task task = Task.Run(() =>
             {
-                using EmbedderHost.Lease lease = host.Acquire();
-            }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                CrashLog.Write(ex);
-            }
-        });
+                try
+                {
+                    using EmbedderHost.Lease lease = host.Acquire();
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    CrashLog.Write(ex);
+                }
+            });
+            _searches.Add(task);
+            _ = task.ContinueWith(completed => { lock (_gate) _searches.Remove(completed); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
     }
 
     public void Stop() => Stop(null);
@@ -230,6 +243,7 @@ internal sealed class SearchService : IDisposable
         EmbedderHost? host;
         IndexStore? store;
         Task[] searches;
+        TaskCompletionSource? releaseDone = null;
         lock (_gate)
         {
             if (expectedGeneration is { } expected && expected != _generation) return;
@@ -243,24 +257,36 @@ internal sealed class SearchService : IDisposable
             _host = null;
             _store = null;
             _search = null;
+            if (indexer is not null || host is not null || store is not null || searches.Length > 0)
+            {
+                releaseDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _shutdown = Task.WhenAll(_shutdown, releaseDone.Task);
+            }
         }
-        indexer?.Dispose();
-        // A native inference call may outlive the bounded indexer shutdown. Searches may also still hold the
-        // old snapshot. Retain their resources until every old worker has finished, without blocking the UI.
+        if (releaseDone is null)
+        {
+            AvailabilityChanged?.Invoke();
+            return;
+        }
+        // Never block the caller (which may be the UI thread) waiting for an in-flight PDF parse, GPU call, or WAL checkpoint.
+        indexer?.RequestStop();
         Task finished = Task.WhenAll(searches.Append(indexer?.Completion ?? Task.CompletedTask));
-        void Release()
+        _ = finished.ContinueWith(_ =>
         {
-            host?.Dispose();
-            store?.Dispose();
-        }
-        Task released;
-        if (finished.IsCompleted)
-        {
-            Release();
-            released = Task.CompletedTask;
-        }
-        else released = finished.ContinueWith(_ => Release(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        lock (_gate) _shutdown = Task.WhenAll(_shutdown, released);
+            try
+            {
+                host?.Dispose();
+                store?.Dispose();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                CrashLog.Write(ex);
+            }
+            finally
+            {
+                releaseDone.TrySetResult();
+            }
+        }, CancellationToken.None, TaskContinuationOptions.RunContinuationsAsynchronously, TaskScheduler.Default);
         AvailabilityChanged?.Invoke();
     }
 

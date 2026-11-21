@@ -133,6 +133,80 @@ internal static class ShellTests
             Check.That(cancel.IsCancelled && File.Exists(cancelSource) && !File.Exists(Path.Combine(cancelled, "note.txt")), "cancelled move did not retain its source");
         });
 
+        yield return ("delete_elevation_retry_is_cleared_only_for_the_item_that_was_removed", "Repeated elevation callbacks count once per path. When the retry removes one item, it clears only that item's error even if another item has the same name.", () => OnSta(() =>
+        {
+            string root = Fixtures.TempFolder("delete-retry");
+            string first = Fixtures.Write(root, @"one\Cleanup.dat", "first generated fixture");
+            string second = Fixtures.Write(root, @"two\Cleanup.dat", "second generated fixture");
+            Guid iid = Native.IID_IShellItem;
+            Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(first, IntPtr.Zero, ref iid, out IShellItem firstItem));
+            try
+            {
+                Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(second, IntPtr.Zero, ref iid, out IShellItem secondItem));
+                try
+                {
+                    const int needsElevation = unchecked((int)0x80270002);
+                    var progress = new OperationProgress();
+                    progress.PostDeleteItem(0, firstItem, needsElevation, null);
+                    progress.PostDeleteItem(0, firstItem, needsElevation, null);
+                    progress.PostDeleteItem(0, secondItem, needsElevation, null);
+                    Check.Equal(2, progress.Failures.Count, "repeated callback was counted or same-named paths were merged");
+
+                    // Exercise the real delete completion path after simulating the intermediate shell callbacks.
+                    ShellActions.DeleteAsync([first], IntPtr.Zero, permanently: true, progress).GetAwaiter().GetResult();
+                    Check.That(!File.Exists(first) && File.Exists(second), "only the selected fixture should have been removed");
+                    Check.Equal(1, progress.Failures.Count, "completed retry reported a failure, or the remaining failure was hidden");
+                    Check.Equal(Loc.T("OperationRequiresAdministrator"), progress.Failures[0].Message, "wrong message for the copy engine's elevation result");
+                }
+                finally { Native.Release(secondItem); }
+            }
+            finally { Native.Release(firstItem); }
+        }));
+
+        yield return ("transfer_elevation_retry_clears_only_the_completed_item_and_cancel_clears_pending", "Elevated copy callbacks deduplicate per path, clear when a new copy reaches the destination, keep failed items including pre-existing targets, and clear pending elevation failures on user cancellation.", () => OnSta(() =>
+        {
+            string root = Fixtures.TempFolder("transfer-retry");
+            string first = Fixtures.Write(root, @"src\first.txt", "alpha");
+            string second = Fixtures.Write(root, @"src\second.txt", "beta");
+            string replaceSource = Fixtures.Write(root, @"src\existing.txt", "new");
+            string dest = Path.Combine(root, "dest");
+            Directory.CreateDirectory(dest);
+            Fixtures.Write(dest, "existing.txt", "old");
+            Guid iid = Native.IID_IShellItem;
+            Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(first, IntPtr.Zero, ref iid, out IShellItem firstItem));
+            Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(second, IntPtr.Zero, ref iid, out IShellItem secondItem));
+            Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(replaceSource, IntPtr.Zero, ref iid, out IShellItem replaceItem));
+            Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(dest, IntPtr.Zero, ref iid, out IShellItem destItem));
+            try
+            {
+                const int needsElevation = unchecked((int)0x80270002);
+                var progress = new OperationProgress();
+                progress.PreCopyItem(0, firstItem, destItem, null);
+                progress.PostCopyItem(0, firstItem, destItem, null, needsElevation, null);
+                progress.PostCopyItem(0, firstItem, destItem, null, needsElevation, null);
+                progress.PreCopyItem(0, secondItem, destItem, null);
+                progress.PostCopyItem(0, secondItem, destItem, null, needsElevation, null);
+                progress.PreCopyItem(0, replaceItem, destItem, null);
+                progress.PostCopyItem(0, replaceItem, destItem, null, needsElevation, null);
+                Check.Equal(3, progress.Failures.Count, "expected three unique pending elevation entries");
+
+                File.Copy(first, Path.Combine(dest, "first.txt"));
+                progress.FinishTransfer();
+                Check.Equal(2, progress.Failures.Count, "new completed copy should clear while missing copy and pre-existing target remain");
+
+                progress.Cancel();
+                progress.FinishTransfer();
+                Check.Equal(0, progress.Failures.Count, "cancelled UAC elevation should not remain as a failure");
+            }
+            finally
+            {
+                Native.Release(destItem);
+                Native.Release(replaceItem);
+                Native.Release(secondItem);
+                Native.Release(firstItem);
+            }
+        }));
+
         yield return ("native_transfer_reports_an_unresolvable_source", "A requested source that vanishes before the shell parses it is reported as an error instead of silently dropping it from the batch.", () =>
         {
             string root = Fixtures.TempFolder("missing-source");

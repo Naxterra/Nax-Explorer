@@ -891,6 +891,54 @@ internal static class CoreTests
             }
             Check.That(!File.Exists(path), "the file should be deleted");
         });
+
+        yield return ("google_drive_volumes_and_drivefs_preferences_are_recognized", "Google Drive volumes with account labels, DriveFS format names, and DriveFS registry preferences are all recognized as Google Drive cloud roots.", () =>
+        {
+            CloudFolder? plain = CloudFolders.MatchGoogleDriveVolume(@"G:\", "Google Drive", "FAT32");
+            Check.That(plain is not null && plain.Name == "Google Drive" && plain.Path == @"G:\", "plain Google Drive volume");
+
+            CloudFolder? account = CloudFolders.MatchGoogleDriveVolume(@"H:\", "alice@example.com - Google Drive", "NTFS");
+            Check.That(account is not null && account.Name == "Google Drive (alice@example.com)" && account.Path == @"H:\", "account-labeled Google Drive volume");
+
+            CloudFolder? byFormat = CloudFolders.MatchGoogleDriveVolume(@"I:\", "Cloud", "GoogleDriveFS");
+            Check.That(byFormat is not null && byFormat.Provider == "GoogleDrive" && byFormat.Path == @"I:\", "DriveFS filesystem format");
+
+            Check.Equal(null, CloudFolders.MatchGoogleDriveVolume(@"C:\", "Local Disk", "NTFS"), "ordinary disk should not match");
+            Check.Equal("Google Drive", CloudFolders.NameOf("com.google.drivefs", null), "DriveFS sync root id");
+            Check.Equal("Google Drive", CloudFolders.NameOf("CustomProvider", "Google Drive - Work"), "display name containing Google Drive");
+
+            string json = """{"per_account_preferences":[{"key":"123","value":{"mount_point_path":"g:/","mirror_root_path":"C:/Users/Demo/My Drive/"}}]}""";
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { @"G:\", @"C:\Users\Demo\My Drive", @"J:\" };
+            List<CloudFolder> parsed = CloudFolders.ParseDriveFsPaths(json, [@"j:\\", @"Z:\Missing"], existing.Contains);
+            Check.Sequence([@"G:\", @"C:\Users\Demo\My Drive", @"J:\"], parsed.Select(f => f.Path));
+            Check.Equal(0, CloudFolders.ParseDriveFsPaths("{broken json", [], _ => true).Count, "malformed JSON should not throw");
+        });
+
+        yield return ("cloud_folder_traversal_enters_local_folders_and_skips_unfetched_ones", "Path-aware traversal enters regular folders while refusing unfetched cloud folders without fetching them.", () =>
+        {
+            string folder = Fixtures.TempFolder("cloud-traversal");
+            Check.That(CloudFiles.CanEnterFolder(folder, FileAttributes.Directory), "ordinary folder");
+            Check.That(!CloudFiles.CanEnterFolder(folder, FileAttributes.Directory | CloudFiles.RecallOnOpen), "unfetched cloud folder with RecallOnOpen");
+            Check.That(!CloudFiles.CanEnterFolder(folder, FileAttributes.Directory | CloudFiles.RecallOnDataAccess), "unfetched cloud folder with RecallOnDataAccess");
+            Check.That(CloudFiles.CanEnterFolder(folder, FileAttributes.Directory | FileAttributes.ReparsePoint), "locally populated cloud reparse folder with no link target");
+        });
+
+        yield return ("concurrent_settings_saves_leave_no_temporary_files", "Saving settings from multiple threads concurrently completes cleanly and leaves no temporary files behind.", () =>
+        {
+            string folder = Fixtures.TempFolder("settings-concurrent");
+            string path = Path.Combine(folder, "settings.json");
+            Task[] writers = Enumerable.Range(0, 8).Select(worker => Task.Run(() =>
+            {
+                for (int i = 0; i < 10; i++)
+                {
+                    var settings = new AppSettings { DualPane = true, ShowHidden = true, SidebarWidth = 200 + worker * 10 + i };
+                    settings.Save(path);
+                }
+            })).ToArray();
+            Task.WhenAll(writers).GetAwaiter().GetResult();
+            Check.Equal(0, Directory.GetFiles(folder, "*.tmp").Length, "temporary file left behind");
+            Check.That(AppSettings.Load(path).ShowHidden, "saved setting not read back");
+        });
     }
 
     private static FileEntry Entry(string name, EntryKind kind, long size) => new()

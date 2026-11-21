@@ -118,13 +118,21 @@ internal static class ShellActions
     public static Task TransferAsync(IReadOnlyList<Core.TransferBatch> batches, bool move, IntPtr owner, OperationProgress progress) => RunOnSta(() =>
     {
         var errors = new List<COMException>();
-        for (int i = 0; i < batches.Count && !progress.IsCancelled; i++)
+        try
         {
-            Core.TransferBatch batch = batches[i];
-            // A copy into the folder the items live in is always a copy, also as part of a move request.
-            bool batchMove = move && !batch.Sources.All(s => Core.PathTools.SameLocation(Path.GetDirectoryName(s.TrimEnd('\\')) ?? "", batch.TargetFolder));
-            progress.BeginBatch(i, batches.Count);
-            Attempt(errors, () => Perform(owner, batch.Flags, progress, op => Transfer(op, batch.Sources, batch.TargetFolder, batchMove)));
+            for (int i = 0; i < batches.Count && !progress.IsCancelled; i++)
+            {
+                Core.TransferBatch batch = batches[i];
+                // A copy into the folder the items live in is always a copy, also as part of a move request.
+                bool batchMove = move && !batch.Sources.All(s => Core.PathTools.SameLocation(Path.GetDirectoryName(s.TrimEnd('\\')) ?? "", batch.TargetFolder));
+                bool renameOnCollision = (batch.Flags & Core.OperationFlags.RenameOnCollision) != 0;
+                progress.BeginBatch(i, batches.Count, batchMove, renameOnCollision);
+                Attempt(errors, () => Perform(owner, batch.Flags, progress, op => Transfer(op, batch.Sources, batch.TargetFolder, batchMove)));
+            }
+        }
+        finally
+        {
+            progress.FinishTransfer();
         }
         if (errors.Count == 1) throw errors[0];
         if (errors.Count > 1) throw new COMException(string.Join(" ", errors.Select(e => e.Message).Distinct()), errors[0].ErrorCode);
@@ -164,11 +172,18 @@ internal static class ShellActions
     /// </summary>
     public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently, OperationProgress progress) => RunOnSta(() =>
     {
-        Perform(owner, Core.OperationFlags.ForDelete(permanently), progress, operation =>
+        try
         {
-            using var items = ShellItems.Create(paths, requireAll: true);
-            return items.Array is null ? -1 : operation.DeleteItems(items.Array);
-        });
+            Perform(owner, Core.OperationFlags.ForDelete(permanently), progress, operation =>
+            {
+                using var items = ShellItems.Create(paths, requireAll: true);
+                return items.Array is null ? -1 : operation.DeleteItems(items.Array);
+            });
+        }
+        finally
+        {
+            progress.FinishDelete();
+        }
     });
 
     /// <summary>Renames one item. The caller checks first that the new name is free.</summary>
@@ -218,7 +233,7 @@ internal static class ShellActions
             // Only a failure counts: the copy engine also returns success codes other than S_OK, for example when an
             // item was skipped. Failed items are already listed by the progress; anything else is thrown.
             bool listed = progress is not null && progress.Failures.Count > failuresBefore;
-            if (done < 0 && !IsCancel(done) && !listed) throw new COMException(Marshal.GetExceptionForHR(done)?.Message, done);
+            if (done < 0 && !IsCancel(done) && !listed) throw new COMException(OperationProgress.DescribeShellFailure(done), done);
         }
         finally
         {
@@ -453,9 +468,20 @@ internal static class FileClipboard
                 return false;
             }
             IntPtr effect = Native.GlobalAlloc(Native.GMEM_MOVEABLE, 4);
-            Marshal.WriteInt32(Native.GlobalLock(effect), (int)(cut ? Native.DROPEFFECT_MOVE : Native.DROPEFFECT_COPY));
-            Native.GlobalUnlock(effect);
-            if (Native.SetClipboardData(DropEffectFormat, effect) == IntPtr.Zero) Native.GlobalFree(effect);
+            if (effect != IntPtr.Zero)
+            {
+                IntPtr effectPtr = Native.GlobalLock(effect);
+                if (effectPtr != IntPtr.Zero)
+                {
+                    Marshal.WriteInt32(effectPtr, (int)(cut ? Native.DROPEFFECT_MOVE : Native.DROPEFFECT_COPY));
+                    Native.GlobalUnlock(effect);
+                    if (Native.SetClipboardData(DropEffectFormat, effect) == IntPtr.Zero) Native.GlobalFree(effect);
+                }
+                else
+                {
+                    Native.GlobalFree(effect);
+                }
+            }
             return true;
         }
         finally

@@ -57,6 +57,33 @@ public static class CloudFiles
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="path"/> is a symbolic link or junction rather than a regular directory or a locally
+    /// populated Cloud Files placeholder directory. Cloud folders such as OneDrive, Nextcloud, Dropbox, and Proton
+    /// Drive carry <see cref="FileAttributes.ReparsePoint"/> without a link target.
+    /// </summary>
+    public static bool IsLink(string path, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.ReparsePoint) == 0) return false;
+        try
+        {
+            return new DirectoryInfo(path).LinkTarget is not null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// True when a directory may be entered without following a symbolic link or junction and without triggering a
+    /// cloud sync client to fetch an online-only folder listing.
+    /// </summary>
+    public static bool CanEnterFolder(string path, FileAttributes attributes) =>
+        (attributes & FileAttributes.Directory) != 0
+        && !IsUnfetchedFolder(attributes)
+        && !IsLink(path, attributes);
+
     /// <summary>True for a file whose content is not on this device, so reading it would download it.</summary>
     public static bool IsOnlineOnly(FileAttributes attributes) =>
         (attributes & FileAttributes.Directory) == 0 && (attributes & (RecallOnDataAccess | RecallOnOpen | FileAttributes.Offline)) != 0;

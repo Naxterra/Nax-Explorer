@@ -263,6 +263,7 @@ begin
     begin
       DeleteKeyIfEmpty('Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell');
       DeleteKeyIfEmpty('Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}');
+      DeleteKeyIfEmpty('Software\Classes\CLSID');
     end;
     ReleaseCommand('Software\Classes\Folder\shell\open');
     ReleaseCommand('Software\Classes\Folder\shell\explore');

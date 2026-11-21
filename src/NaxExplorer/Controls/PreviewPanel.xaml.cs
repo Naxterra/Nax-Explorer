@@ -23,6 +23,7 @@ public sealed partial class PreviewPanel : UserControl
     private CancellationTokenSource? _cts;
     private readonly PreviewRefreshState _refresh = new();
     private readonly Dictionary<string, TextBlock> _detailValues = [];
+    private HyperlinkButton? _countNowButton;
     private int _pictureVersion;
     private bool _thumbnailPending, _forceFullRender;
 
@@ -109,6 +110,7 @@ public sealed partial class PreviewPanel : UserControl
         Details.Children.Clear();
         Details.RowDefinitions.Clear();
         _detailValues.Clear();
+        _countNowButton = null;
         Busy.IsActive = false;
         if (item is null)
         {
@@ -209,19 +211,23 @@ public sealed partial class PreviewPanel : UserControl
             TextFormat format = TextExtractor.FormatOf(entry.Extension);
             if (format != TextFormat.None || entry.Size < 4 * 1024 * 1024)
             {
-                string? text = await Task.Run(() => ReadText(entry.FullPath, format), cts.Token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : null, TaskScheduler.Default);
+                string? text = await Task.Run(() => ReadText(entry.FullPath, format, cts.Token), cts.Token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : null, TaskScheduler.Default);
                 if (version != _version || string.IsNullOrWhiteSpace(text)) return;
                 TextContent.Text = text;
                 TextScroller.Visibility = Visibility.Visible;
             }
             return;
         }
-        ShowShellThumbnail(entry.FullPath, 256);
         if (entry.Kind == EntryKind.Folder)
         {
             if (await ShowFolderContentsAsync(entry.FullPath, version, cts.Token))
+            {
+                ShowShellThumbnail(entry.FullPath, 256);
                 await ShowTotalsAsync(new[] { entry.FullPath }, version, cts.Token, selection: true);
+            }
+            return;
         }
+        ShowShellThumbnail(entry.FullPath, 256);
     }
 
     private async Task<bool> ShowFolderContentsAsync(string path, int version, CancellationToken token)
@@ -304,7 +310,9 @@ public sealed partial class PreviewPanel : UserControl
             // A folder on another computer can keep the network busy for minutes, so it is counted only on request.
             total.Text = "";
             size.Text = "";
+            if (_countNowButton is not null) Details.Children.Remove(_countNowButton);
             var start = new HyperlinkButton { Content = Loc.T("CountNow"), Padding = new Thickness(0), MinHeight = 0, FontSize = 12 };
+            _countNowButton = start;
             Grid.SetRow(start, Grid.GetRow(total));
             Grid.SetColumn(start, 1);
             Details.Children.Add(start);
@@ -318,10 +326,13 @@ public sealed partial class PreviewPanel : UserControl
                 }
                 catch (TaskCanceledException)
                 {
+                    Details.Children.Remove(start);
+                    if (ReferenceEquals(_countNowButton, start)) _countNowButton = null;
                     return;
                 }
             }
             Details.Children.Remove(start);
+            if (ReferenceEquals(_countNowButton, start)) _countNowButton = null;
             total.Text = Loc.T("Counting");
             size.Text = "…";
         }
@@ -386,14 +397,14 @@ public sealed partial class PreviewPanel : UserControl
         PreviewImage.Source = source;
     }
 
-    private static string? ReadText(string path, TextFormat format)
+    private static string? ReadText(string path, TextFormat format, CancellationToken token)
     {
         if (format is TextFormat.Plain or TextFormat.None)
         {
             string? text = TextSniffer.ReadPreview(path, TextChars, out bool truncated);
             return text is null ? null : truncated ? text + "\n…" : text;
         }
-        return TextExtractor.Extract(path, TextChars);
+        return TextExtractor.Extract(path, TextChars, token: token);
     }
 
     private static (int Folders, int Files, bool More) Count(string folder)

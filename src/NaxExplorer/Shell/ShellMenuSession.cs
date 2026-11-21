@@ -314,22 +314,30 @@ internal sealed class ShellMenuSession
     /// <summary>Runs a command of the menu on the menu's thread.</summary>
     public void Invoke(uint id, IntPtr owner, Native.POINT point)
     {
+        if (_released) return;
         // Some commands finish after InvokeCommand returns; the thread stays a minute to serve them.
         Interlocked.Exchange(ref _stopAtTicks, DateTime.UtcNow.AddMinutes(1).Ticks);
-        _work.Add(() =>
+        try
         {
-            var invoke = new Native.CMINVOKECOMMANDINFOEX
+            _work.Add(() =>
             {
-                cbSize = Marshal.SizeOf<Native.CMINVOKECOMMANDINFOEX>(),
-                fMask = Native.CMIC_MASK_UNICODE | Native.CMIC_MASK_PTINVOKE | 0x00100000 /* CMIC_MASK_ASYNCOK */,
-                hwnd = owner,
-                lpVerb = (IntPtr)(id - FirstId),
-                lpVerbW = (IntPtr)(id - FirstId),
-                nShow = 1,
-                ptInvoke = point,
-            };
-            ((IContextMenu)_menu!).InvokeCommand(ref invoke);
-        });
+                if (_menu is not IContextMenu menu) return;
+                var invoke = new Native.CMINVOKECOMMANDINFOEX
+                {
+                    cbSize = Marshal.SizeOf<Native.CMINVOKECOMMANDINFOEX>(),
+                    fMask = Native.CMIC_MASK_UNICODE | Native.CMIC_MASK_PTINVOKE | 0x00100000 /* CMIC_MASK_ASYNCOK */,
+                    hwnd = owner,
+                    lpVerb = (IntPtr)(id - FirstId),
+                    lpVerbW = (IntPtr)(id - FirstId),
+                    nShow = 1,
+                    ptInvoke = point,
+                };
+                menu.InvokeCommand(ref invoke);
+            });
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+        {
+        }
     }
 
     /// <summary>The menu was closed. Without a chosen command the thread ends after a short grace time.</summary>
@@ -341,8 +349,12 @@ internal sealed class ShellMenuSession
         _stopping = true;
     }
 
+    private volatile bool _released;
+
     private void Release()
     {
+        _released = true;
+        _work.CompleteAdding();
         if (_menuHandle != IntPtr.Zero) Native.DestroyMenu(_menuHandle);
         _menuHandle = IntPtr.Zero;
         Native.Release(_menu);
@@ -350,5 +362,6 @@ internal sealed class ShellMenuSession
         _items?.Dispose();
         _menu = null;
         _folder = null;
+        _work.Dispose();
     }
 }

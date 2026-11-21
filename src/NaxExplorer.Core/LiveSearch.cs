@@ -203,7 +203,7 @@ public sealed class ContentMatcher
 }
 
 /// <summary>A live search of one folder tree, with no index.</summary>
-public sealed record SearchRequest(string Root, string Query, bool InNames, bool InContents, bool Recursive, bool IncludeHidden);
+public sealed record SearchRequest(string Root, string Query, bool InNames, bool InContents, bool Recursive, bool IncludeHidden, bool IncludeProtectedSystemFiles = false);
 
 public sealed record SearchHit(FileEntry Entry, string? Snippet, bool NameMatched, bool ContentMatched);
 
@@ -244,10 +244,11 @@ public static class LiveSearch
         bool searchNames = request.InNames && !names.IsEmpty;
         bool searchContents = request.InContents && !contents.IsEmpty;
         if (!searchNames && !searchContents) return;
+        if (string.IsNullOrWhiteSpace(request.Root) || PathTools.IsThisPc(request.Root) || PathTools.IsShellPlace(request.Root)) return;
 
         var queue = Channel.CreateBounded<FileEntry>(new BoundedChannelOptions(2048) { SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
-        var listing = new ListingOptions(request.IncludeHidden);
+        var listing = new ListingOptions(request.IncludeHidden, request.IncludeProtectedSystemFiles);
 
         void Report(SearchHit hit)
         {
@@ -271,7 +272,7 @@ public static class LiveSearch
                 {
                     ShouldIncludePredicate = (ref FileSystemEntry entry) => DirectoryReader.IsVisible(entry.Attributes, listing),
                     ShouldRecursePredicate = (ref FileSystemEntry entry) =>
-                        (entry.Attributes & FileAttributes.ReparsePoint) == 0 && DirectoryReader.IsVisible(entry.Attributes, listing),
+                        CloudFiles.CanEnterFolder(entry.ToFullPath(), entry.Attributes) && DirectoryReader.IsVisible(entry.Attributes, listing),
                 };
                 foreach (FileEntry entry in entries)
                 {
@@ -290,7 +291,7 @@ public static class LiveSearch
             catch (OperationCanceledException)
             {
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
                 // The root itself vanished or became unreadable; the matches so far stay.
             }

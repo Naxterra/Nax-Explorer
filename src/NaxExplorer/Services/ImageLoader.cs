@@ -11,7 +11,7 @@ namespace NaxExplorer.Services;
 /// file holds; <see cref="OriginalWidth"/> and <see cref="OriginalHeight"/> are the picture's own size. Both are as shown,
 /// after the camera's orientation tag and any turn in the viewer.
 /// </summary>
-internal sealed record LoadedImage(ImageSource Source, int Width, int Height, int OriginalWidth, int OriginalHeight, bool Animated);
+internal sealed record LoadedImage(ImageSource Source, int Width, int Height, int OriginalWidth, int OriginalHeight, bool Animated, long FileBytes = 0);
 
 /// <summary>
 /// Decodes pictures with the Windows imaging codecs: JPEG, PNG, GIF, BMP, TIFF, ICO and WebP always, and HEIC, AVIF,
@@ -20,6 +20,8 @@ internal sealed record LoadedImage(ImageSource Source, int Width, int Height, in
 /// </summary>
 internal static class ImageLoader
 {
+    private const long MaxAnimatedGifBytes = 64L * 1024 * 1024;
+
     /// <summary>
     /// Loads a picture no larger than <paramref name="maxSide"/> pixels on its longer side (0 for full size, capped at
     /// 16384 pixels). GIF files keep their animation. Call on the UI thread.
@@ -30,17 +32,26 @@ internal static class ImageLoader
         // Opening a network or cold local file can block even when later reads are
         // asynchronous. A selection must never wait for that open on the UI thread.
         await using FileStream file = await Task.Run(() => TextSniffer.OpenShared(path, 1 << 16), token);
+        long fileBytes = file.Length;
         token.ThrowIfCancellationRequested();
-        if (string.Equals(Path.GetExtension(path), ".gif", StringComparison.OrdinalIgnoreCase) && maxSide == 0 && quarterTurns == 0)
+        if (string.Equals(Path.GetExtension(path), ".gif", StringComparison.OrdinalIgnoreCase) && maxSide == 0 && quarterTurns == 0 && fileBytes <= MaxAnimatedGifBytes)
         {
             // An animation reads its frames while it plays, so it gets a copy in memory that lives as long as the image.
             var memory = new InMemoryRandomAccessStream();
-            await RandomAccessStream.CopyAsync(file.AsInputStream(), memory);
-            memory.Seek(0);
-            var gif = new BitmapImage();
-            await gif.SetSourceAsync(memory);
-            token.ThrowIfCancellationRequested();
-            return new LoadedImage(gif, gif.PixelWidth, gif.PixelHeight, gif.PixelWidth, gif.PixelHeight, Animated: true);
+            try
+            {
+                await RandomAccessStream.CopyAsync(file.AsInputStream(), memory).AsTask(token);
+                memory.Seek(0);
+                var gif = new BitmapImage();
+                await gif.SetSourceAsync(memory).AsTask(token);
+                token.ThrowIfCancellationRequested();
+                return new LoadedImage(gif, gif.PixelWidth, gif.PixelHeight, gif.PixelWidth, gif.PixelHeight, Animated: true, FileBytes: fileBytes);
+            }
+            catch
+            {
+                memory.Dispose();
+                throw;
+            }
         }
         using IRandomAccessStream stream = file.AsRandomAccessStream();
         BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
@@ -65,11 +76,10 @@ internal static class ImageLoader
         token.ThrowIfCancellationRequested();
         // Own the copied pixels directly, so retiring a picture cannot leave a
         // SoftwareBitmapSource operation with a closed native image source.
-        token.ThrowIfCancellationRequested();
         var source = new WriteableBitmap(bitmap.PixelWidth, bitmap.PixelHeight);
         bitmap.CopyToBuffer(source.PixelBuffer);
         source.Invalidate();
-        return new LoadedImage(source, bitmap.PixelWidth, bitmap.PixelHeight, originalWidth, originalHeight, Animated: false);
+        return new LoadedImage(source, bitmap.PixelWidth, bitmap.PixelHeight, originalWidth, originalHeight, Animated: false, FileBytes: fileBytes);
     }
 
     /// <summary>A message for a picture that could not be decoded, naming the Store codec when one is known to help.</summary>

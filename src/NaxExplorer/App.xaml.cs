@@ -169,12 +169,15 @@ public partial class App : Application
     {
         if (_quitting) return;
         _quitting = true;
+        Shell.KeyboardHook.Uninstall();
         _catcher?.Dispose();
         _catcher = null;
         _background?.Dispose();
         _background = null;
         foreach (MainWindow window in _windows.ToList()) window.Close();
         Search.Dispose();
+        try { Search.ShutdownCompletion.Wait(TimeSpan.FromSeconds(2)); }
+        catch (AggregateException) { }
         Exit();
     }
 

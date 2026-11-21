@@ -227,6 +227,16 @@ public sealed partial class FileItem : INotifyPropertyChanged
         Notify(nameof(NameBrush));
     }
 
+    /// <summary>Refreshes cloud status bindings after background cloud-root discovery completes.</summary>
+    internal void RefreshCloud()
+    {
+        Notify(nameof(Cloud));
+        Notify(nameof(CloudGlyph));
+        Notify(nameof(CloudBrush));
+        Notify(nameof(CloudVisibility));
+        Notify(nameof(CloudText));
+    }
+
     private void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 

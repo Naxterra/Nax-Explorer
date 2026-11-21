@@ -175,19 +175,21 @@ public sealed class HybridSearch
             float[] queryVector = lease.Embedder.Embed(["query: " + query], token)[0];
             // Scope before limiting and before measuring the background: unrelated folders cannot crowd out
             // the selected folder's matches or raise its relevance threshold.
-            int[] scoped = Enumerable.Range(0, vectors.Count).Where(i => InScope(vectors.FileIds[i])).ToArray();
             var documents = new Dictionary<long, (int Index, float Score)>();
             float highest = 0;
-            for (int i = 0; i < scoped.Length; i++)
+            for (int index = 0; index < vectors.Count; index++)
             {
-                if (i % 256 == 0) token.ThrowIfCancellationRequested();
-                int index = scoped[i];
+                if ((index & 255) == 0) token.ThrowIfCancellationRequested();
+                long fileId = vectors.FileIds[index];
+                if (!InScope(fileId)) continue;
                 float score = VectorMath.Similarity(queryVector, vectors.Vector(index));
                 highest = Math.Max(highest, score);
-                long fileId = vectors.FileIds[index];
                 if (!documents.TryGetValue(fileId, out var previous) || score > previous.Score) documents[fileId] = (index, score);
             }
-            float floor = MeaningFloor(documents.Values.Select(d => d.Score).ToArray(), highest);
+            var docScores = new float[documents.Count];
+            int scoreIndex = 0;
+            foreach (var entry in documents.Values) docScores[scoreIndex++] = entry.Score;
+            float floor = MeaningFloor(docScores, highest);
             // Limit documents after choosing each one's best piece. Hundreds of matching pieces in a single
             // catalog or long PDF must not consume the entire semantic candidate budget.
             var best = documents.Select(d => new { FileId = d.Key, d.Value.Index, d.Value.Score,

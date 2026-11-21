@@ -55,6 +55,8 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimerWrapper _previewTimer;
     private FilePane _active;
     private HashSet<string> _cut = new(StringComparer.OrdinalIgnoreCase);
+    private WindowPlacement? _normalPlacement;
+    private bool _settingsOpen;
 
     public MainWindow(string? startPath)
     {
@@ -66,6 +68,15 @@ public sealed partial class MainWindow : Window
         SystemBackdrop = new MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt };
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         RestorePlacement();
+        AppWindow.Changed += (_, args) =>
+        {
+            if ((args.DidPositionChange || args.DidSizeChange)
+                && AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Restored }
+                && AppWindow.Size.Width > 400 && AppWindow.Size.Height > 300)
+            {
+                _normalPlacement = new WindowPlacement { X = AppWindow.Position.X, Y = AppWindow.Position.Y, Width = AppWindow.Size.Width, Height = AppWindow.Size.Height };
+            }
+        };
         // Shell submenus such as "Send to" are filled only when the window passes menu messages to the shell menu.
         _subclass = (hwnd, message, wParam, lParam, _, _) =>
             ShellContextMenu.TryHandleMessage(message, wParam, lParam, out IntPtr result) ? result : Native.DefSubclassProc(hwnd, message, wParam, lParam);
@@ -113,6 +124,7 @@ public sealed partial class MainWindow : Window
             Preview.StopBackgroundWork();
             LeftPane.StopBackgroundWork();
             RightPane.StopBackgroundWork();
+            Native.RemoveWindowSubclass(Hwnd, _subclass, 1);
         };
         // Listed with Windows' open folder windows, so "Show in folder" in other programs finds this window and the
         // file it names gets selected here.
@@ -200,6 +212,7 @@ public sealed partial class MainWindow : Window
             int width = Math.Min(placement.Width, work.Width), height = Math.Min(placement.Height, work.Height);
             int x = Math.Clamp(placement.X, work.X, work.X + work.Width - width), y = Math.Clamp(placement.Y, work.Y, work.Y + work.Height - height);
             AppWindow.MoveAndResize(new RectInt32(x, y, width, height));
+            _normalPlacement = new WindowPlacement { X = x, Y = y, Width = width, Height = height };
             if (placement.Maximized && AppWindow.Presenter is OverlappedPresenter presenter) presenter.Maximize();
         }
         else
@@ -215,9 +228,18 @@ public sealed partial class MainWindow : Window
         settings.Right = RightPane.Save();
         settings.SidebarWidth = SidebarColumn.ActualWidth;
         if (settings.ShowPreview) settings.PreviewWidth = PreviewColumn.ActualWidth;
-        bool maximized = AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Maximized };
-        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized }) maximized = settings.Window?.Maximized ?? false;
-        else settings.Window = new WindowPlacement { X = AppWindow.Position.X, Y = AppWindow.Position.Y, Width = AppWindow.Size.Width, Height = AppWindow.Size.Height, Maximized = maximized };
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            if (presenter.State == OverlappedPresenterState.Restored)
+            {
+                settings.Window = new WindowPlacement { X = AppWindow.Position.X, Y = AppWindow.Position.Y, Width = AppWindow.Size.Width, Height = AppWindow.Size.Height, Maximized = false };
+            }
+            else if (presenter.State == OverlappedPresenterState.Maximized)
+            {
+                WindowPlacement baseBounds = _normalPlacement ?? settings.Window ?? new WindowPlacement { X = AppWindow.Position.X, Y = AppWindow.Position.Y, Width = AppWindow.Size.Width, Height = AppWindow.Size.Height };
+                settings.Window = new WindowPlacement { X = baseBounds.X, Y = baseBounds.Y, Width = baseBounds.Width, Height = baseBounds.Height, Maximized = true };
+            }
+        }
         App.Instance!.SaveSettings();
     }
 
@@ -604,6 +626,8 @@ public sealed partial class MainWindow : Window
         List<CloudFolder> found = await Task.Run(() => CloudFolders.Find(withDrives: true));
         CloudRoots.Set(found);
         ShowCloud(found);
+        LeftPane.RefreshCloudMarks();
+        RightPane.RefreshCloudMarks();
     }
 
     private void ShowCloud(IReadOnlyList<CloudFolder> folders)
@@ -735,17 +759,32 @@ public sealed partial class MainWindow : Window
     private void Sidebar_DragOver(object sender, DragEventArgs e)
     {
         bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths");
+        string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
         if (files && SidebarEntryAt(sender, e) is { } bin && IsRecycleBin(bin))
         {
+            if (sources is not null && sources.All(PathTools.IsShellPlace))
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
             e.AcceptedOperation = DataPackageOperation.Move;
             e.DragUIOverride.Caption = Loc.T("DropToRecycleBin");
             return;
         }
         if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
         {
-            string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+            if (sources is not null && sources.Any(s => PathTools.IsSameOrInside(entry.Location, s)))
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
             bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11),
                 e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10), sources, entry.Location);
+            if (move && sources is { Length: > 0 } && sources.All(s => Path.GetDirectoryName(s.TrimEnd('\\')) is { } parent && PathTools.SameLocation(parent, entry.Location)))
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", entry.Label);
             return;
@@ -933,7 +972,7 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// Deletes to the Recycle Bin, or for good with <paramref name="permanently"/> after the app asked. Items on a drive
     /// without a Recycle Bin, such as a network share, are never deleted for good without that question either.
-    /// Returns false when nothing was deleted because the user said no.
+    /// Returns true when the operation completed without a reported failure or cancellation.
     /// </summary>
     internal async Task<bool> DeleteAsync(IReadOnlyList<string> paths, bool permanently)
     {
@@ -947,10 +986,19 @@ public sealed partial class MainWindow : Window
             permanently = true;
         }
         string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
-        await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what), progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress));
+        bool completed = await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what),
+            progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress));
         ForgetFolderSizes(paths, withContents: true);
         foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
-        return true;
+        foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            ForgetFolderSizes(new[] { archive }, withContents: false);
+            foreach (MainWindow window in App.Instance!.Windows)
+                foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                    if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+            if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+        }
+        return completed;
     }
 
     /// <summary>
@@ -1044,8 +1092,22 @@ public sealed partial class MainWindow : Window
 
     private async void OpenSettings(bool aiSection)
     {
+        if (_settingsOpen || Root.XamlRoot is null) return;
+        _settingsOpen = true;
         var dialog = new SettingsDialog(Settings, aiSection) { XamlRoot = Root.XamlRoot, RequestedTheme = Root.RequestedTheme };
-        await dialog.ShowAsync();
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidOperationException or ArgumentException)
+        {
+            CrashLog.Write(ex);
+            return;
+        }
+        finally
+        {
+            _settingsOpen = false;
+        }
         bool languageChanged = dialog.LanguageChanged;
         bool themeChanged = dialog.ThemeChanged;
         App.Instance!.SaveSettings();

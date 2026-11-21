@@ -81,9 +81,9 @@ public sealed class IndexStore : IDisposable
         catch (SqliteException)
         {
             SqliteConnection.ClearAllPools();
-            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
             string aside = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(path)!, $"index.damaged-{stamp}.db");
-            if (File.Exists(path)) File.Move(path, aside);
+            if (File.Exists(path)) File.Move(path, aside, overwrite: true);
             foreach (string extra in (ReadOnlySpan<string>)[path + "-wal", path + "-shm"])
             {
                 if (File.Exists(extra)) File.Delete(extra);
@@ -291,9 +291,14 @@ public sealed class IndexStore : IDisposable
         lock (_gate)
         {
             using SqliteTransaction transaction = _connection.BeginTransaction();
-            if (FileId(path, transaction) is { } id) DeleteFile(id, transaction);
+            bool removed = false;
+            if (FileId(path, transaction) is { } id)
+            {
+                DeleteFile(id, transaction);
+                removed = true;
+            }
             transaction.Commit();
-            Interlocked.Increment(ref _version);
+            if (removed) Interlocked.Increment(ref _version);
         }
     }
 
@@ -303,9 +308,14 @@ public sealed class IndexStore : IDisposable
         lock (_gate)
         {
             using SqliteTransaction transaction = _connection.BeginTransaction();
-            foreach (long id in fileIds) DeleteFile(id, transaction);
+            bool removed = false;
+            foreach (long id in fileIds)
+            {
+                DeleteFile(id, transaction);
+                removed = true;
+            }
             transaction.Commit();
-            Interlocked.Increment(ref _version);
+            if (removed) Interlocked.Increment(ref _version);
         }
     }
 
@@ -320,16 +330,15 @@ public sealed class IndexStore : IDisposable
             using (var command = _connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                // "]" follows "\" in character order, so this range is exactly the paths that start with the prefix.
-                command.CommandText = "SELECT id FROM files WHERE path >= $low AND path < $high";
-                command.Parameters.AddWithValue("$low", prefix);
-                command.Parameters.AddWithValue("$high", prefix[..^1] + "]");
+                // Use the Unicode Windows-path collation so non-ASCII folder names (such as umlauts) match case-insensitively.
+                command.CommandText = "SELECT id FROM files WHERE substr(path, 1, length($prefix)) = $prefix COLLATE NAX_PATH";
+                command.Parameters.AddWithValue("$prefix", prefix);
                 using SqliteDataReader reader = command.ExecuteReader();
                 while (reader.Read()) ids.Add(reader.GetInt64(0));
             }
             foreach (long id in ids) DeleteFile(id, transaction);
             transaction.Commit();
-            Interlocked.Increment(ref _version);
+            if (ids.Count > 0) Interlocked.Increment(ref _version);
         }
     }
 

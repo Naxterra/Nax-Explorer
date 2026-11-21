@@ -29,7 +29,9 @@ public sealed partial class ImageViewer : UserControl
     private int _turns;
     private int _version;
     private (string Path, int Turns, Task<LoadedImage> Image)? _ahead;
+    private CancellationTokenSource? _aheadCts;
     private CancellationTokenSource? _cts;
+    private bool _deleting;
     private bool _fit = true;
     private bool _panning;
     private Windows.Foundation.Point _panStart;
@@ -37,6 +39,9 @@ public sealed partial class ImageViewer : UserControl
     private double _panOffsetY;
     private int _pixelWidth;
     private int _pixelHeight;
+    private int _originalWidth;
+    private int _originalHeight;
+    private long _fileBytes;
     private double _imageScale = 1;
     private readonly ViewResetState _viewReset = new();
 
@@ -44,6 +49,7 @@ public sealed partial class ImageViewer : UserControl
     {
         InitializeComponent();
         Canvas.ManipulationMode = ManipulationModes.None;
+        Canvas.PointerCaptureLost += (_, _) => EndPan();
         Unloaded += (_, _) => CancelViewReset();
     }
 
@@ -51,8 +57,10 @@ public sealed partial class ImageViewer : UserControl
 
     internal void Open(IReadOnlyList<string> pictures, int index, FilePane source)
     {
+        if (pictures.Count == 0) return;
         _pictures = [.. pictures];
         _index = Math.Clamp(index, 0, _pictures.Count - 1);
+        _turns = 0;
         _source = source;
         Visibility = Visibility.Visible;
         Root.UpdateLayout();
@@ -69,10 +77,11 @@ public sealed partial class ImageViewer : UserControl
 
     internal void Close()
     {
+        EndPan();
         CancelViewReset();
-        _cts?.Cancel();
+        CancelOnly(ref _cts);
+        CancelAhead();
         _version++;
-        _ahead = null;
         if (_owner.AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen) _owner.AppWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
         FullScreenGlyph.Glyph = "";
         Picture.Source = null;
@@ -80,9 +89,30 @@ public sealed partial class ImageViewer : UserControl
         _owner.OnViewerClosed();
         if (_source is not null && _pictures.Count > 0)
         {
-            _source.Reveal(_pictures[_index]);
+            _source.Reveal(_pictures[Math.Clamp(_index, 0, _pictures.Count - 1)]);
             _source.FocusList();
         }
+    }
+
+    private static void CancelOnly(ref CancellationTokenSource? cts)
+    {
+        if (cts is not { } current) return;
+        cts = null;
+        try { current.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private void CancelAhead()
+    {
+        _ahead = null;
+        CancelOnly(ref _aheadCts);
+    }
+
+    private void EndPan()
+    {
+        if (!_panning) return;
+        _panning = false;
+        ProtectedCursorHelper.Set(Canvas, InputSystemCursorShape.Arrow);
     }
 
     private async Task ShowCurrentAsync()
@@ -94,83 +124,126 @@ public sealed partial class ImageViewer : UserControl
             return;
         }
         int version = ++_version;
-        _cts?.Cancel();
-        var cts = new CancellationTokenSource();
+        CancelOnly(ref _cts);
+        using var cts = new CancellationTokenSource();
         _cts = cts;
-        string path = _pictures[_index];
-        NameText.Text = Path.GetFileName(path);
-        InfoText.Text = $"{_index + 1} / {_pictures.Count}";
-        PreviousButton.Visibility = _index > 0 ? Visibility.Visible : Visibility.Collapsed;
-        NextButton.Visibility = _index < _pictures.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
-        ErrorText.Visibility = Visibility.Collapsed;
-        if (Core.CloudFiles.IsOnlineOnly(path))
-        {
-            // The viewer never downloads a picture that lives only in the cloud; the user does that with "keep on this device".
-            Picture.Source = null;
-            ErrorText.Text = Loc.T("OnlineOnlyNote");
-            ErrorText.Visibility = Visibility.Visible;
-            Busy.IsActive = false;
-            LoadAhead();
-            return;
-        }
-        Busy.IsActive = true;
-        LoadedImage image;
         try
         {
-            Task<LoadedImage> load = _ahead is { } ahead && ahead.Path == path && ahead.Turns == _turns ? ahead.Image : ImageLoader.LoadAsync(path, DecodeLimit, cts.Token, _turns);
-            _ahead = null;
-            image = await load;
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
+            string path = _pictures[_index];
+            _originalWidth = 0;
+            _originalHeight = 0;
+            _fileBytes = 0;
+            NameText.Text = Path.GetFileName(path);
+            InfoText.Text = FormatInfoText();
+            PreviousButton.Visibility = _index > 0 ? Visibility.Visible : Visibility.Collapsed;
+            NextButton.Visibility = _index < _pictures.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
+            ErrorText.Visibility = Visibility.Collapsed;
+            if (Core.CloudFiles.IsOnlineOnly(path))
+            {
+                // The viewer never downloads a picture that lives only in the cloud; the user does that with "keep on this device".
+                Picture.Source = null;
+                ErrorText.Text = Loc.T("OnlineOnlyNote");
+                ErrorText.Visibility = Visibility.Visible;
+                Busy.IsActive = false;
+                LoadAhead();
+                return;
+            }
+            Busy.IsActive = true;
+            LoadedImage image;
+            try
+            {
+                CancellationTokenSource? adoptedAheadCts = null;
+                Task<LoadedImage> load;
+                if (_ahead is { } ahead && ahead.Path == path && ahead.Turns == _turns)
+                {
+                    load = ahead.Image;
+                    adoptedAheadCts = _aheadCts;
+                    _ahead = null;
+                    _aheadCts = null;
+                }
+                else
+                {
+                    CancelAhead();
+                    load = ImageLoader.LoadAsync(path, DecodeLimit, cts.Token, _turns);
+                }
+                using CancellationTokenRegistration cancelAdopted = adoptedAheadCts is null
+                    ? default
+                    : cts.Token.Register(() =>
+                    {
+                        try { adoptedAheadCts.Cancel(); }
+                        catch (ObjectDisposedException) { }
+                    });
+                image = await load;
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                if (version != _version) return;
+                Busy.IsActive = false;
+                Picture.Source = null;
+                ErrorText.Text = ImageLoader.ErrorText(path, ex);
+                ErrorText.Visibility = Visibility.Visible;
+                return;
+            }
             if (version != _version) return;
             Busy.IsActive = false;
-            Picture.Source = null;
-            ErrorText.Text = ImageLoader.ErrorText(path, ex);
-            ErrorText.Visibility = Visibility.Visible;
-            return;
+            _pixelWidth = image.Width;
+            _pixelHeight = image.Height;
+            _originalWidth = image.OriginalWidth;
+            _originalHeight = image.OriginalHeight;
+            _fileBytes = image.FileBytes;
+            ApplyPixelSize();
+            Picture.Source = image.Source;
+            InfoText.Text = FormatInfoText();
+            _fit = true;
+            // A reused ScrollViewer can ignore ChangeView while returning from Collapsed,
+            // especially if DPI changed while it was hidden. Retry after layout/rendering
+            // until its reported view actually matches the new picture's fitted view.
+            RequestViewReset();
+            // The new picture size takes effect in the next layout pass; fitting before it used the old size, which left a
+            // turned picture unfitted and off centre.
+            Stage.UpdateLayout();
+            FitToWindow();
+            DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (version == _version && _fit) FitToWindow();
+            });
+            LoadAhead();
         }
-        if (version != _version) return;
-        Busy.IsActive = false;
-        _pixelWidth = image.Width;
-        _pixelHeight = image.Height;
-        ApplyPixelSize();
-        Picture.Source = image.Source;
-        long size = new FileInfo(path).Exists ? new FileInfo(path).Length : 0;
-        InfoText.Text = $"{_index + 1} / {_pictures.Count}   ·   {image.OriginalWidth} × {image.OriginalHeight}   ·   {SizeFormat.Format(size)}";
-        _fit = true;
-        // A reused ScrollViewer can ignore ChangeView while returning from Collapsed,
-        // especially if DPI changed while it was hidden. Retry after layout/rendering
-        // until its reported view actually matches the new picture's fitted view.
-        RequestViewReset();
-        // The new picture size takes effect in the next layout pass; fitting before it used the old size, which left a
-        // turned picture unfitted and off centre.
-        Stage.UpdateLayout();
-        FitToWindow();
-        DispatcherQueue.SafeEnqueue(DispatcherQueuePriority.Low, () =>
+        finally
         {
-            if (version == _version && _fit) FitToWindow();
-        });
-        LoadAhead();
+            if (ReferenceEquals(_cts, cts)) _cts = null;
+        }
     }
 
     /// <summary>Starts decoding the next picture while this one is looked at.</summary>
     private void LoadAhead()
     {
+        CancelAhead();
         if (_index + 1 >= _pictures.Count) return;
         string next = _pictures[_index + 1];
         // A picture that lives only in the cloud is never read by the viewer, ahead or when shown.
         if (Core.CloudFiles.IsOnlineOnly(next)) return;
+        var aheadCts = new CancellationTokenSource();
         try
         {
-            _ahead = (next, _turns, ImageLoader.LoadAsync(next, DecodeLimit, CancellationToken.None, _turns));
+            // Stepping resets rotation to 0, so prefetch at 0 turns with a cancellable token and observed faults.
+            _aheadCts = aheadCts;
+            Task<LoadedImage> task = ImageLoader.LoadAsync(next, DecodeLimit, aheadCts.Token, quarterTurns: 0);
+            _ = task.ContinueWith(t =>
+            {
+                _ = t.Exception;
+                aheadCts.Dispose();
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+            _ahead = (next, 0, task);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            _aheadCts = null;
+            aheadCts.Dispose();
             _ahead = null;
         }
     }
@@ -344,9 +417,8 @@ public sealed partial class ImageViewer : UserControl
         if (properties.PointerUpdateKind == Microsoft.UI.Input.PointerUpdateKind.XButton1Released) Step(-1);
         else if (properties.PointerUpdateKind == Microsoft.UI.Input.PointerUpdateKind.XButton2Released) Step(1);
         if (!_panning) return;
-        _panning = false;
         Canvas.ReleasePointerCapture(e.Pointer);
-        ProtectedCursorHelper.Set(Canvas, InputSystemCursorShape.Arrow);
+        EndPan();
     }
 
     private void Canvas_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
@@ -387,7 +459,7 @@ public sealed partial class ImageViewer : UserControl
     private void Rotate(int turns)
     {
         _turns = (_turns + turns + 4) % 4;
-        _ahead = null;
+        CancelAhead();
         _ = ShowCurrentAsync();
     }
 
@@ -417,20 +489,46 @@ public sealed partial class ImageViewer : UserControl
     /// </summary>
     private async Task DeleteCurrentAsync(bool permanently)
     {
-        if (_pictures.Count == 0) return;
-        string path = _pictures[_index];
-        if (!await _owner.DeleteAsync(new[] { path }, permanently)) return;
-        if (File.Exists(path)) return;
-        _pictures.RemoveAt(_index);
-        _ahead = null;
-        if (_pictures.Count == 0)
+        if (_deleting || _pictures.Count == 0 || Visibility != Visibility.Visible) return;
+        _deleting = true;
+        try
         {
-            Close();
-            return;
+            string path = _pictures[_index];
+            if (!await _owner.DeleteAsync(new[] { path }, permanently)) return;
+            if (Visibility != Visibility.Visible || File.Exists(path)) return;
+            int removedAt = _pictures.FindIndex(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            if (removedAt < 0) return;
+            bool wasCurrent = removedAt == _index;
+            _pictures.RemoveAt(removedAt);
+            CancelAhead();
+            if (_pictures.Count == 0)
+            {
+                Close();
+                return;
+            }
+            if (removedAt < _index) _index--;
+            else _index = Math.Min(_index, _pictures.Count - 1);
+            if (wasCurrent)
+            {
+                _turns = 0;
+                await ShowCurrentAsync();
+            }
+            else
+            {
+                InfoText.Text = FormatInfoText();
+                PreviousButton.Visibility = _index > 0 ? Visibility.Visible : Visibility.Collapsed;
+                NextButton.Visibility = _index < _pictures.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
+            }
         }
-        _index = Math.Min(_index, _pictures.Count - 1);
-        await ShowCurrentAsync();
+        finally
+        {
+            _deleting = false;
+        }
     }
+
+    private string FormatInfoText() => _originalWidth > 0 && _originalHeight > 0
+        ? $"{_index + 1} / {_pictures.Count}   ·   {_originalWidth} × {_originalHeight}   ·   {SizeFormat.Format(_fileBytes)}"
+        : $"{_index + 1} / {_pictures.Count}";
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 

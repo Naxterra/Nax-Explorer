@@ -60,9 +60,9 @@ public static partial class TextExtractor
             {
                 TextFormat.OfficeOpenXml or TextFormat.OpenDocument => ReadZippedXml(stream, format, maxChars, token),
                 TextFormat.Pdf => ReadPdf(stream, maxChars, token),
-                TextFormat.Rtf => Cut(RtfToText(ReadPlain(stream, maxChars * 4) ?? ""), maxChars),
-                TextFormat.Html => Cut(HtmlToText(ReadPlain(stream, maxChars * 3) ?? ""), maxChars),
-                _ => ReadPlain(stream, maxChars),
+                TextFormat.Rtf => Cut(RtfToText(ReadPlain(stream, BoundedLimit(maxChars, 4), token) ?? ""), maxChars),
+                TextFormat.Html => Cut(HtmlToText(ReadPlain(stream, BoundedLimit(maxChars, 3), token) ?? ""), maxChars),
+                _ => ReadPlain(stream, maxChars, token),
             };
         }
         catch (Exception ex) when (ex is not (OutOfMemoryException or OperationCanceledException))
@@ -75,8 +75,11 @@ public static partial class TextExtractor
 
     private static string Cut(string text, int maxChars) => text.Length > maxChars ? text[..maxChars] : text;
 
-    /// <summary>Reads a stream as text in its detected encoding, or returns null for binary data.</summary>
-    internal static string? ReadPlain(Stream stream, int maxChars)
+    private static int BoundedLimit(int maxChars, int multiplier) =>
+        maxChars <= 0 ? 0 : (int)Math.Min((long)maxChars * multiplier, 32_000_000);
+
+    /// <summary>Reads a stream as text in its detected encoding in bounded chunks, or returns null for binary data.</summary>
+    internal static string? ReadPlain(Stream stream, int maxChars, CancellationToken token = default)
     {
         byte[] sample = new byte[TextSniffer.SampleSize];
         long start = stream.Position;
@@ -86,9 +89,20 @@ public static partial class TextExtractor
         stream.Position = start;
         using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: true, bufferSize: 64 * 1024, leaveOpen: true);
         if (maxChars <= 0) return reader.ReadToEnd();
-        char[] buffer = new char[maxChars];
-        int chars = reader.ReadBlock(buffer, 0, buffer.Length);
-        return new string(buffer, 0, chars);
+        int initialCapacity = stream.CanSeek
+            ? (int)Math.Min(Math.Max(0, stream.Length - start), Math.Min(maxChars, 65_536))
+            : Math.Min(maxChars, 4096);
+        var result = new StringBuilder(initialCapacity);
+        char[] chunk = new char[Math.Min(maxChars, 32_768)];
+        while (result.Length < maxChars)
+        {
+            token.ThrowIfCancellationRequested();
+            int wanted = Math.Min(chunk.Length, maxChars - result.Length);
+            int chars = reader.ReadBlock(chunk, 0, wanted);
+            if (chars == 0) break;
+            result.Append(chunk, 0, chars);
+        }
+        return result.ToString();
     }
 
     private static string ReadZippedXml(Stream stream, TextFormat format, int maxChars, CancellationToken token)

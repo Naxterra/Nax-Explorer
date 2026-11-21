@@ -56,6 +56,7 @@ internal sealed class ExplorerWindowCatcher : IDisposable
     private void OnEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
     {
         if (idObject != ObjIdWindow || idChild != 0 || hwnd == IntPtr.Zero || !IsExplorerWindow(hwnd)) return;
+        _handled.RemoveWhere(h => !IsWindow(h));
         if (!_handled.Add(hwnd)) return;
         if (_handled.Count > 200) _handled.Clear();
         // Explorer lists the window with its place only a moment after showing it, so the place is read a little later.
@@ -69,17 +70,29 @@ internal sealed class ExplorerWindowCatcher : IDisposable
         timer.IsRepeating = false;
         timer.Tick += async (_, _) =>
         {
-            if (_disposed || !IsWindow(hwnd)) return;
+            if (_disposed || !IsWindow(hwnd))
+            {
+                _handled.Remove(hwnd);
+                return;
+            }
             // Shell automation and network-path checks can wait on another process. Keep them off the UI thread.
             List<CaughtPlace>? places = await ShellFolderReader.RunOnSta(() => ReadPlaces(hwnd));
-            if (_disposed || !IsWindow(hwnd)) return;
+            if (_disposed || !IsWindow(hwnd))
+            {
+                _handled.Remove(hwnd);
+                return;
+            }
             if (places is null)
             {
-                // Not listed yet: tried again for about three seconds, then left alone.
+                // Not listed yet: tried again for about three seconds, then left alone while still open.
                 if (attempt < 12) Catch(hwnd, attempt + 1);
                 return;
             }
-            if (places.Count == 0 || places.Any(p => p.Location is { } place && ShellPlaces.OnlyExplorerShows(place))) return;
+            if (places.Count == 0 || places.Any(p => p.Location is { } place && ShellPlaces.OnlyExplorerShows(place)))
+            {
+                // Leave this Explorer window alone for its remaining lifetime.
+                return;
+            }
             // A place the app cannot open itself, such as a view only Explorer has, stays in Explorer: the window is
             // closed only when every one of its places resolves to a place the app shows.
             var resolved = new List<CaughtPlace>();
@@ -100,10 +113,18 @@ internal sealed class ExplorerWindowCatcher : IDisposable
                     CrashLog.Write(ex);
                     return;
                 }
-                if (own is null || ShellPlaces.OnlyExplorerShows(own)) return;
+                if (own is null || ShellPlaces.OnlyExplorerShows(own))
+                {
+                    return;
+                }
                 resolved.Add(place with { Location = own });
             }
-            if (_disposed || !IsWindow(hwnd)) return;
+            if (_disposed || !IsWindow(hwnd))
+            {
+                _handled.Remove(hwnd);
+                return;
+            }
+            // Keep hwnd in _handled until the window is destroyed so a trailing show event cannot open its places twice.
             PostMessage(hwnd, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
             _open(resolved);
         };
@@ -120,17 +141,22 @@ internal sealed class ExplorerWindowCatcher : IDisposable
     private static List<CaughtPlace>? ReadPlaces(IntPtr hwnd)
     {
         dynamic? shell = null;
+        dynamic? windows = null;
         try
         {
             shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application")!);
             if (shell is null) return null;
-            dynamic windows = shell.Windows();
+            windows = shell.Windows();
             int count = windows.Count;
             var places = new List<CaughtPlace>();
             bool listed = false;
             for (int i = 0; i < count; i++)
             {
                 dynamic? browser = null;
+                dynamic? view = null;
+                dynamic? folder = null;
+                dynamic? self = null;
+                dynamic? selected = null;
                 bool matched = false;
                 try
                 {
@@ -138,11 +164,18 @@ internal sealed class ExplorerWindowCatcher : IDisposable
                     if (browser is null || (IntPtr)Convert.ToInt64(browser.HWND) != hwnd) continue;
                     matched = true;
                     listed = true;
-                    dynamic? view = browser.Document;
+                    view = browser.Document;
                     if (view is null) return null;
-                    string parsing = (string)view.Folder.Self.Path;
+                    folder = view.Folder;
+                    self = folder.Self;
+                    string parsing = (string)self.Path;
                     var selection = new List<string>();
-                    foreach (dynamic item in view.SelectedItems()) selection.Add((string)item.Path);
+                    selected = view.SelectedItems();
+                    foreach (dynamic item in selected)
+                    {
+                        try { selection.Add((string)item.Path); }
+                        finally { Native.Release((object)item); }
+                    }
                     places.Add(new CaughtPlace(PlaceFor(parsing), selection));
                 }
                 catch (Exception ex) when (ex is COMException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException or InvalidCastException)
@@ -153,6 +186,10 @@ internal sealed class ExplorerWindowCatcher : IDisposable
                 }
                 finally
                 {
+                    if (selected is not null) Native.Release((object)selected);
+                    if (self is not null) Native.Release((object)self);
+                    if (folder is not null) Native.Release((object)folder);
+                    if (view is not null) Native.Release((object)view);
                     if (browser is not null) Native.Release((object)browser);
                 }
             }
@@ -165,6 +202,7 @@ internal sealed class ExplorerWindowCatcher : IDisposable
         }
         finally
         {
+            if (windows is not null) Native.Release((object)windows);
             if (shell is not null) Native.Release((object)shell);
         }
     }

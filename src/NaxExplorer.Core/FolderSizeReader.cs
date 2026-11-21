@@ -26,7 +26,7 @@ public static class FolderSizeReader
             try
             {
                 FileAttributes attributes = File.GetAttributes(folder);
-                if ((attributes & FileAttributes.Directory) == 0 || !FolderStats.Enters(attributes))
+                if (!FolderStats.Enters(folder, attributes))
                 {
                     if (atRoot) return null;
                     partial = true;
@@ -39,7 +39,7 @@ public static class FolderSizeReader
                     token.ThrowIfCancellationRequested();
                     if (entry.Directory)
                     {
-                        if (FolderStats.Enters(entry.Attributes)) pending.Push(entry.Path);
+                        if (FolderStats.Enters(entry.Path, entry.Attributes)) pending.Push(entry.Path);
                         else partial = true;
                     }
                     else bytes = checked(bytes + entry.Size);

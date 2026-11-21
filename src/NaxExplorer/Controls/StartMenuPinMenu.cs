@@ -18,7 +18,7 @@ internal static class StartMenuPinMenu
     internal static void Add(MenuFlyout menu, string path, MainWindow owner)
     {
         if (!StartMenuPinning.CanPin(path) || !File.Exists(InstalledMenu)) return;
-        var pin = new MenuFlyoutSubItem { Text = Loc.T("PinToNaxStartMenu"), Tag = MenuTag, Icon = new FontIcon { Glyph = "" } };
+        var pin = new MenuFlyoutSubItem { Text = Loc.T("PinToNaxStartMenu"), Tag = MenuTag, Icon = new FontIcon { Glyph = "\uE718" } };
         pin.Items.Add(new MenuFlyoutItem { Text = Loc.T("ShellLoading"), IsEnabled = false });
         menu.Items.Add(pin);
         LoadGroups(pin, path, owner);

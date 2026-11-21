@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using NaxExplorer.Core;
@@ -25,6 +26,9 @@ internal sealed partial class SettingsDialog : ContentDialog
     private readonly ToggleSwitch _aiSwitch = new();
     private readonly StackPanel _aiDetails = new() { Spacing = 10 };
     private CancellationTokenSource? _downloadCts;
+    private Task? _downloadTask;
+    private bool _deletingData;
+    private bool _updatingAiSwitch;
 
     public bool LanguageChanged => _settings.Language != _initialLanguage;
 
@@ -165,8 +169,15 @@ internal sealed partial class SettingsDialog : ContentDialog
             Style = (Style)Application.Current.Resources["TertiaryTextStyle"],
         });
         Content = new ScrollViewer { Content = content, MaxHeight = 640, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        Closing += (_, _) => _downloadCts?.Cancel();
+        Closing += (_, _) => CancelDownload();
         RefreshAi();
+    }
+
+    private void CancelDownload()
+    {
+        if (_downloadCts is not { } cts) return;
+        try { cts.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     private static TextBlock Header(string key) => new() { Text = Loc.T(key), FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
@@ -254,6 +265,7 @@ internal sealed partial class SettingsDialog : ContentDialog
                 t => DispatcherQueue.SafeEnqueue(() => label.Text = t.Result), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
             var remove = new Button { Content = new FontIcon { Glyph = "", FontSize = 11 }, Padding = new Thickness(6) };
             ToolTipService.SetToolTip(remove, Loc.T("RemoveFolder"));
+            AutomationProperties.SetName(remove, Loc.T("RemoveFolder"));
             remove.Click += (_, _) =>
             {
                 _settings.IndexedFolders.Remove(folder);
@@ -268,11 +280,13 @@ internal sealed partial class SettingsDialog : ContentDialog
 
     private async void AiSwitch_Toggled(object sender, RoutedEventArgs e)
     {
+        if (_updatingAiSwitch) return;
         _settings.AiSearch = _aiSwitch.IsOn;
         if (_settings.AiSearch && _settings.IndexedFolders.Count == 0) _settings.IndexedFolders = AppSettings.DefaultIndexedFolders();
         App.Instance!.SaveSettings();
         if (!_settings.AiSearch)
         {
+            CancelDownload();
             App.Instance.Search.Stop();
             RefreshAi();
             return;
@@ -283,36 +297,54 @@ internal sealed partial class SettingsDialog : ContentDialog
     }
 
     /// <summary>Downloads the model with progress in the dialog, then starts AI search.</summary>
-    private async Task DownloadAsync()
+    private Task DownloadAsync()
+    {
+        if (_downloadTask is { IsCompleted: false } running) return running;
+        Task task = RunDownloadAsync();
+        _downloadTask = task;
+        return task;
+    }
+
+    private async Task RunDownloadAsync()
     {
         if (_downloadCts is not null) return;
-        _downloadCts = new CancellationTokenSource();
+        var cts = new CancellationTokenSource();
+        _downloadCts = cts;
         _download.Visibility = Visibility.Visible;
         _download.Value = 0;
         _downloadButton.Visibility = Visibility.Collapsed;
         var progress = new Progress<(long Done, long Total)>(p =>
         {
+            if (cts.IsCancellationRequested || _deletingData) return;
             _download.Value = p.Total > 0 ? (double)p.Done / p.Total : 0;
             _aiState.Text = Loc.F("Downloading", SizeFormat.Format(p.Done), SizeFormat.Format(p.Total));
         });
+        bool failed = false;
         try
         {
-            await EmbeddingModel.DownloadAsync(progress, _downloadCts.Token);
-            App.Instance!.Search.Start(_settings);
+            await EmbeddingModel.DownloadAsync(progress, cts.Token);
+            if (_settings.AiSearch && !_deletingData) App.Instance!.Search.Start(_settings);
         }
         catch (OperationCanceledException)
         {
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or UnauthorizedAccessException)
         {
-            _aiState.Text = Loc.F("DownloadFailed", ex.Message);
-            _downloadCts = null;
+            failed = true;
+            if (!_deletingData) _aiState.Text = Loc.F("DownloadFailed", ex.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_downloadCts, cts)) _downloadCts = null;
+            cts.Dispose();
             _download.Visibility = Visibility.Collapsed;
-            _downloadButton.Visibility = Visibility.Visible;
+        }
+        if (_deletingData) return;
+        if (failed)
+        {
+            _downloadButton.Visibility = _settings.AiSearch ? Visibility.Visible : Visibility.Collapsed;
             return;
         }
-        _downloadCts = null;
-        _download.Visibility = Visibility.Collapsed;
         RefreshAi();
     }
 
@@ -331,23 +363,36 @@ internal sealed partial class SettingsDialog : ContentDialog
 
     private async void DeleteIndex(bool model)
     {
+        _deletingData = true;
+        CancelDownload();
         App.Instance!.Search.Stop();
         IsEnabled = false;
         try
         {
+            if (_downloadTask is { } download)
+            {
+                try { await download; }
+                catch (OperationCanceledException) { }
+            }
             await App.Instance.Search.ShutdownCompletion;
-            SearchService.DeleteData(model);
+            await Task.Run(() => SearchService.DeleteData(model));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _aiState.Text = ex.Message;
             return;
         }
-        finally { IsEnabled = true; }
+        finally
+        {
+            _deletingData = false;
+            IsEnabled = true;
+        }
         if (model)
         {
             _settings.AiSearch = false;
+            _updatingAiSwitch = true;
             _aiSwitch.IsOn = false;
+            _updatingAiSwitch = false;
             App.Instance.SaveSettings();
         }
         else if (_settings.AiSearch)
