@@ -57,6 +57,13 @@ public sealed partial class MainWindow : Window
     private HashSet<string> _cut = new(StringComparer.OrdinalIgnoreCase);
     private WindowPlacement? _normalPlacement;
     private bool _settingsOpen;
+    private bool _closed;
+    private readonly Dictionary<TreeViewNode, Task> _treeLoads = [];
+    private List<CloudFolder> _lastCloudFolders = [];
+    private List<FileEntry> _lastDrives = [];
+    private CancellationTokenSource? _treeLifetimeCts;
+    private CancellationTokenSource? _treeSyncCts;
+    private int _treeGeneration;
 
     public MainWindow(string? startPath)
     {
@@ -114,6 +121,9 @@ public sealed partial class MainWindow : Window
         App.Instance.Search.AvailabilityChanged += availabilityChanged;
         Closed += (_, _) =>
         {
+            _closed = true;
+            CancelTreeSync();
+            ResetTreeLifetime(recreate: false);
             SaveState();
             App.Instance.Search.StatusChanged -= statusChanged;
             App.Instance.Search.AvailabilityChanged -= availabilityChanged;
@@ -297,6 +307,25 @@ public sealed partial class MainWindow : Window
         PreviewColumn.Width = preview ? new GridLength(Math.Clamp(Settings.PreviewWidth, 220, 900)) : new GridLength(0);
         PreviewToggle.IsChecked = preview;
         if (preview) UpdatePreview();
+        bool tree = Settings.ShowFolderTree;
+        FlatSidebar.Visibility = tree ? Visibility.Collapsed : Visibility.Visible;
+        TreeSidebar.Visibility = tree ? Visibility.Visible : Visibility.Collapsed;
+        if (tree)
+        {
+            if (_treeLifetimeCts is null) _treeLifetimeCts = new CancellationTokenSource();
+            if (FolderTree.RootNodes.Count == 0 && (_lastCloudFolders.Count > 0 || _lastDrives.Count > 0)) RebuildFolderTree(reset: false, sync: true);
+            else if (Settings.SyncFolderTree) _ = SyncTreeToLocationAsync(_active.Location);
+            else CancelTreeSync();
+        }
+        else
+        {
+            CancelTreeSync();
+            if (FolderTree.RootNodes.Count > 0 || _treeLifetimeCts is not null)
+            {
+                ResetTreeLifetime(recreate: false);
+                FolderTree.RootNodes.Clear();
+            }
+        }
     }
 
     // ---------------------------------------------------------------- panes
@@ -342,14 +371,31 @@ public sealed partial class MainWindow : Window
     private (string? Target, FrameworkElement? Element, bool RecycleBin) MouseDropTargetAt(Windows.Foundation.Point point)
     {
         if ((LeftPane.MouseDropTarget(point, Root) ?? RightPane.MouseDropTarget(point, Root)) is { } pane) return (pane.Target, pane.Element, false);
-        foreach (ListView list in new[] { QuickList, CloudList, DriveList })
+        if (FlatSidebar.Visibility == Visibility.Visible)
         {
-            if (list.Visibility != Visibility.Visible) continue;
-            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, list))
+            foreach (ListView list in new[] { QuickList, CloudList, DriveList })
+            {
+                if (list.Visibility != Visibility.Visible) continue;
+                foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, list))
+                {
+                    if (element is not SelectorItem { Content: SidebarEntry entry } item) continue;
+                    if (IsRecycleBin(entry)) return (entry.Location, item, true);
+                    return entry.IsShellPlace ? (null, null, false) : (entry.Location, item, false);
+                }
+            }
+        }
+        if (TreeSidebar.Visibility == Visibility.Visible)
+        {
+            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, TreeQuickList))
             {
                 if (element is not SelectorItem { Content: SidebarEntry entry } item) continue;
                 if (IsRecycleBin(entry)) return (entry.Location, item, true);
                 return entry.IsShellPlace ? (null, null, false) : (entry.Location, item, false);
+            }
+            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, FolderTree))
+            {
+                if (element is TreeViewItem item && TreeNodePayload(item) is { } node)
+                    return node.IsShellPlace ? (null, null, false) : (node.Location, item, false);
             }
         }
         return (null, null, false);
@@ -407,6 +453,7 @@ public sealed partial class MainWindow : Window
                 _previewTimer.Restart();
             }
             _shellWindow?.Navigated(pane.Location);
+            if (Settings.ShowFolderTree && Settings.SyncFolderTree) _ = SyncTreeToLocationAsync(pane.Location);
         }
     }
 
@@ -466,6 +513,7 @@ public sealed partial class MainWindow : Window
         // the same folder again when its names arrive. Shell names can arrive after the first preview, so refresh
         // those too rather than leaving a parsing GUID in the heading.
         if (PathTools.IsShellPlace(pane.Location) || !string.Equals(pane.PreviewLocation, _previewFolder, StringComparison.OrdinalIgnoreCase)) _previewTimer.Restart();
+        if (Settings.ShowFolderTree && Settings.SyncFolderTree) _ = SyncTreeToLocationAsync(pane.Location);
     }
 
     /// <summary>The folder the details panel was last filled for.</summary>
@@ -502,6 +550,7 @@ public sealed partial class MainWindow : Window
         foreach (MainWindow window in App.Instance!.Windows)
         {
             window.InvalidatePreviewTotals(folder);
+            if (window.Settings.ShowFolderTree) _ = window.RefreshTreeFolderAsync(folder);
             foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
             {
                 if ((pane.Folder is { } shown && PathTools.SameLocation(shown, folder))
@@ -512,8 +561,15 @@ public sealed partial class MainWindow : Window
 
     internal void OnPaneContentsChanged(string folder, FolderChanges changes)
     {
+        bool folderChanged = changes.Added.Any(e => e.Kind == EntryKind.Folder)
+            || changes.Removed.Any(e => e.Kind == EntryKind.Folder)
+            || changes.Changed.Any(e => e.Kind == EntryKind.Folder);
         // Recursive totals can describe an ancestor of the changed folder, including in another window.
-        foreach (MainWindow window in App.Instance!.Windows) window.InvalidatePreviewTotals(folder, changes);
+        foreach (MainWindow window in App.Instance!.Windows)
+        {
+            window.InvalidatePreviewTotals(folder, changes);
+            if (folderChanged && window.Settings.ShowFolderTree) _ = window.RefreshTreeFolderAsync(folder);
+        }
     }
 
     internal void OnPaneReloaded(FilePane pane)
@@ -575,6 +631,13 @@ public sealed partial class MainWindow : Window
 
     private void BuildSidebar()
     {
+        BuildQuickAccess();
+        _ = LoadCloudAsync();
+        _ = LoadDrivesAsync();
+    }
+
+    private void BuildQuickAccess()
+    {
         bool dark = IsDark;
         Brush Color(byte r, byte g, byte b) => new SolidColorBrush(Windows.UI.Color.FromArgb(255, r, g, b));
         string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -603,17 +666,18 @@ public sealed partial class MainWindow : Window
             quick.Add(new SidebarEntry { Glyph = "", Label = ShellNames.Known(key), Location = key, Brush = folderBrush, QuickKey = key });
         }
         QuickList.ItemsSource = quick;
+        TreeQuickList.ItemsSource = quick;
         if (quick.Any(e => !QuickAccessList.IsKey(e.QuickKey!))) _ = NameQuickFoldersAsync(quick);
-        _ = LoadCloudAsync();
-        _ = LoadDrivesAsync();
     }
 
     private async Task NameQuickFoldersAsync(List<SidebarEntry> quick)
     {
         string[] names = await Task.Run(() => quick.Select(e => QuickAccessList.IsKey(e.QuickKey!) ? e.Label : ShellNames.OfFolder(e.Location)).ToArray());
         if (!ReferenceEquals(QuickList.ItemsSource, quick) || quick.Select(e => e.Label).SequenceEqual(names)) return;
-        QuickList.ItemsSource = quick.Select((e, i) => e.QuickKey is { } key && QuickAccessList.IsKey(key) ? e
+        List<SidebarEntry> named = quick.Select((e, i) => e.QuickKey is { } key && QuickAccessList.IsKey(key) ? e
             : new SidebarEntry { Glyph = e.Glyph, Label = names[i], Location = e.Location, Brush = e.Brush, QuickKey = e.QuickKey }).ToList();
+        QuickList.ItemsSource = named;
+        TreeQuickList.ItemsSource = named;
     }
 
     /// <summary>
@@ -632,6 +696,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowCloud(IReadOnlyList<CloudFolder> folders)
     {
+        _lastCloudFolders = [.. folders];
         CloudList.ItemsSource = folders.Select(f => new SidebarEntry
         {
             Glyph = "",
@@ -640,6 +705,7 @@ public sealed partial class MainWindow : Window
             Brush = new SolidColorBrush(ProviderColor(f.Provider)),
         }).ToList();
         CloudHeader.Visibility = CloudList.Visibility = folders.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (Settings.ShowFolderTree) RebuildFolderTree(reset: false, sync: FolderTree.RootNodes.Count == 0);
     }
 
     /// <summary>The colour each cloud app is known by, so its entry is found at a glance.</summary>
@@ -662,6 +728,8 @@ public sealed partial class MainWindow : Window
     private async Task LoadDrivesAsync()
     {
         List<FileEntry> drives = await Task.Run(DirectoryReader.ReadDrives);
+        if (_closed) return;
+        _lastDrives = drives;
         DriveList.ItemsSource = drives.Select(d =>
         {
             double used = d.Size > 0 ? 1 - (double)d.FreeBytes / d.Size : 0;
@@ -685,6 +753,499 @@ public sealed partial class MainWindow : Window
             Brush = new SolidColorBrush(Palette.Of(FileCategory.DiskImage, IsDark)),
             IsShellPlace = true,
         }).ToList();
+        if (Settings.ShowFolderTree) RebuildFolderTree(reset: false, sync: FolderTree.RootNodes.Count == 0);
+    }
+
+    // ---------------------------------------------------------------- folder tree
+
+    private void ResetTreeLifetime(bool recreate)
+    {
+        _treeGeneration++;
+        _treeLoads.Clear();
+        if (_treeLifetimeCts is { } old)
+        {
+            _treeLifetimeCts = null;
+            try { old.Cancel(); }
+            catch (ObjectDisposedException) { }
+            old.Dispose();
+        }
+        if (recreate && !_closed) _treeLifetimeCts = new CancellationTokenSource();
+    }
+
+    private CancellationToken CurrentTreeToken()
+    {
+        _treeLifetimeCts ??= new CancellationTokenSource();
+        return _treeLifetimeCts.Token;
+    }
+
+    private void CancelTreeSync()
+    {
+        if (_treeSyncCts is not { } cts) return;
+        _treeSyncCts = null;
+        try { cts.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static Models.FolderTreeNode? PayloadOf(TreeViewNode? node) => node?.Content as Models.FolderTreeNode;
+
+    private static TreeViewNode CreateTreeViewNode(Models.FolderTreeNode payload, bool hasUnrealizedChildren) => new()
+    {
+        Content = payload,
+        HasUnrealizedChildren = hasUnrealizedChildren,
+    };
+
+    private void RebuildFolderTree(bool reset, bool sync)
+    {
+        if (_closed || !Settings.ShowFolderTree) return;
+        bool hadZeroRoots = FolderTree.RootNodes.Count == 0;
+        string? previousBestRoot = FolderTreeReader.BestRoot(FolderTree.RootNodes.Select(r => PayloadOf(r)?.Location).OfType<string>(), _active.Location);
+        bool dark = IsDark;
+        Brush diskBrush = new SolidColorBrush(Palette.Of(FileCategory.DiskImage, dark));
+        Brush folderBrush = new SolidColorBrush(Palette.Of(FileCategory.Folder, dark));
+        var existingByLocation = new Dictionary<string, TreeViewNode>(StringComparer.OrdinalIgnoreCase);
+        if (reset)
+        {
+            ResetTreeLifetime(recreate: true);
+            FolderTree.SelectedNode = null;
+            FolderTree.RootNodes.Clear();
+        }
+        else
+        {
+            if (_treeLifetimeCts is null) _treeLifetimeCts = new CancellationTokenSource();
+            foreach (TreeViewNode node in FolderTree.RootNodes)
+            {
+                if (PayloadOf(node) is { } payload) existingByLocation.TryAdd(payload.Location, node);
+            }
+        }
+
+        var desired = new List<TreeViewNode>();
+        var seenLocations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (CloudFolder cloud in _lastCloudFolders)
+        {
+            if (!seenLocations.Add(cloud.Path)) continue;
+            Brush cloudBrush = new SolidColorBrush(ProviderColor(cloud.Provider));
+            if (existingByLocation.TryGetValue(cloud.Path, out TreeViewNode? existing) && PayloadOf(existing) is { } existingPayload)
+            {
+                existingPayload.Label = cloud.Name;
+                existingPayload.Glyph = "";
+                existingPayload.Brush = cloudBrush;
+                existingPayload.Detail = null;
+                UpdateTreeFolderBrushes(existing.Children, folderBrush);
+                desired.Add(existing);
+            }
+            else
+            {
+                desired.Add(CreateTreeViewNode(new Models.FolderTreeNode(cloud.Name, cloud.Path, "", cloudBrush, isRoot: true), hasUnrealizedChildren: true));
+            }
+        }
+        foreach (FileEntry drive in _lastDrives)
+        {
+            if (!seenLocations.Add(drive.FullPath)) continue;
+            string label = drive.Label.Length > 0 ? drive.Label : Loc.Drive(drive.DriveType);
+            string fullLabel = $"{label} ({drive.Name})";
+            string? detail = drive.Size > 0 ? Loc.F("DriveFree", SizeFormat.Format(drive.FreeBytes), SizeFormat.Format(drive.Size)) : null;
+            string glyph = drive.DriveType switch { DriveType.Network => "", DriveType.Removable => "", DriveType.CDRom => "", _ => "" };
+            if (existingByLocation.TryGetValue(drive.FullPath, out TreeViewNode? existing) && PayloadOf(existing) is { } existingPayload)
+            {
+                existingPayload.Label = fullLabel;
+                existingPayload.Glyph = glyph;
+                existingPayload.Brush = diskBrush;
+                existingPayload.Detail = detail;
+                UpdateTreeFolderBrushes(existing.Children, folderBrush);
+                desired.Add(existing);
+            }
+            else
+            {
+                desired.Add(CreateTreeViewNode(new Models.FolderTreeNode(fullLabel, drive.FullPath, glyph, diskBrush, isRoot: true, detail: detail), hasUnrealizedChildren: true));
+            }
+        }
+        string networkLocation = PathTools.ShellPlace(NetworkPlace);
+        if (existingByLocation.TryGetValue(networkLocation, out TreeViewNode? existingNetwork) && PayloadOf(existingNetwork) is { } networkPayload)
+        {
+            networkPayload.Label = Loc.T("Network");
+            networkPayload.Glyph = "";
+            networkPayload.Brush = diskBrush;
+            networkPayload.Detail = null;
+            desired.Add(existingNetwork);
+        }
+        else
+        {
+            desired.Add(CreateTreeViewNode(new Models.FolderTreeNode(Loc.T("Network"), networkLocation, "", diskBrush, isShellPlace: true, isRoot: true), hasUnrealizedChildren: false));
+        }
+
+        ReconcileNodeList(FolderTree.RootNodes, desired);
+        string? newBestRoot = FolderTreeReader.BestRoot(FolderTree.RootNodes.Select(r => PayloadOf(r)?.Location).OfType<string>(), _active.Location);
+        bool rootChanged = !string.Equals(previousBestRoot, newBestRoot, StringComparison.OrdinalIgnoreCase);
+        if (Settings.SyncFolderTree && (sync || hadZeroRoots || rootChanged || (FolderTree.SelectedNode is null && newBestRoot is not null)))
+            _ = SyncTreeToLocationAsync(_active.Location);
+    }
+
+    private static void ReconcileNodeList(IList<TreeViewNode> target, List<TreeViewNode> desired)
+    {
+        var desiredSet = new HashSet<TreeViewNode>(desired);
+        for (int i = target.Count - 1; i >= 0; i--)
+        {
+            if (!desiredSet.Contains(target[i])) target.RemoveAt(i);
+        }
+        for (int i = 0; i < desired.Count; i++)
+        {
+            TreeViewNode wanted = desired[i];
+            if (i < target.Count && ReferenceEquals(target[i], wanted)) continue;
+            int existingIndex = -1;
+            for (int j = i + 1; j < target.Count; j++)
+            {
+                if (ReferenceEquals(target[j], wanted))
+                {
+                    existingIndex = j;
+                    break;
+                }
+            }
+            if (existingIndex >= 0) target.RemoveAt(existingIndex);
+            target.Insert(i, wanted);
+        }
+    }
+
+    private static void UpdateTreeFolderBrushes(IEnumerable<TreeViewNode> nodes, Brush folderBrush)
+    {
+        foreach (TreeViewNode node in nodes)
+        {
+            if (PayloadOf(node) is { } payload) payload.Brush = folderBrush;
+            if (node.Children.Count > 0) UpdateTreeFolderBrushes(node.Children, folderBrush);
+        }
+    }
+
+    private void FolderTree_Expanding(TreeView sender, TreeViewExpandingEventArgs args)
+    {
+        if (args.Node is { } treeNode) _ = EnsureTreeChildrenLoadedAsync(treeNode, CancellationToken.None);
+    }
+
+    private Task EnsureTreeChildrenLoadedAsync(TreeViewNode treeNode, CancellationToken token)
+    {
+        if (_closed || PayloadOf(treeNode) is not { IsShellPlace: false } payload || payload.ChildrenLoaded) return Task.CompletedTask;
+        if (_treeLoads.TryGetValue(treeNode, out Task? existing)) return token.CanBeCanceled ? existing.WaitAsync(token) : existing;
+        Task load = LoadOrRefreshTreeNodeAsync(treeNode, _treeGeneration, CurrentTreeToken());
+        _treeLoads[treeNode] = load;
+        return token.CanBeCanceled ? load.WaitAsync(token) : load;
+    }
+
+    private async Task LoadOrRefreshTreeNodeAsync(TreeViewNode treeNode, int generation, CancellationToken lifetimeToken)
+    {
+        if (_closed || PayloadOf(treeNode) is not { IsShellPlace: false } payload) return;
+        int refreshVersion = ++payload.RefreshVersion;
+        bool showHidden = Settings.ShowHidden;
+        bool showProtected = Settings.ShowProtectedFiles;
+        try
+        {
+            List<FolderTreeItem> items = await Task.Run(() => FolderTreeReader.ReadChildren(payload.Location, showHidden, showProtected, lifetimeToken), lifetimeToken);
+            if (_closed || generation != _treeGeneration || refreshVersion != payload.RefreshVersion) return;
+            Brush folderBrush = new SolidColorBrush(Palette.Of(FileCategory.Folder, IsDark));
+            var existingByExact = new Dictionary<string, TreeViewNode>(StringComparer.Ordinal);
+            var existingByInsensitive = new Dictionary<string, TreeViewNode>(StringComparer.OrdinalIgnoreCase);
+            foreach (TreeViewNode child in treeNode.Children)
+            {
+                if (PayloadOf(child) is not { } childPayload) continue;
+                existingByExact.TryAdd(childPayload.Location, child);
+                existingByInsensitive.TryAdd(childPayload.Location, child);
+            }
+
+            var desired = new List<TreeViewNode>(items.Count);
+            var claimed = new HashSet<TreeViewNode>();
+            foreach (FolderTreeItem item in items)
+            {
+                TreeViewNode? kept = null;
+                if (existingByExact.TryGetValue(item.FullPath, out TreeViewNode? exact) && claimed.Add(exact))
+                    kept = exact;
+                else if (existingByInsensitive.TryGetValue(item.FullPath, out TreeViewNode? ci) && claimed.Add(ci))
+                    kept = ci;
+
+                if (kept is not null && PayloadOf(kept) is { } keptPayload)
+                {
+                    keptPayload.Label = item.Name;
+                    keptPayload.Brush = folderBrush;
+                    if (!keptPayload.ChildrenLoaded) kept.HasUnrealizedChildren = item.HasSubfolders;
+                    desired.Add(kept);
+                }
+                else
+                {
+                    desired.Add(CreateTreeViewNode(new Models.FolderTreeNode(item.Name, item.FullPath, "", folderBrush), hasUnrealizedChildren: item.HasSubfolders));
+                }
+            }
+
+            ReconcileNodeList(treeNode.Children, desired);
+            treeNode.HasUnrealizedChildren = false;
+            payload.ChildrenLoaded = true;
+            if (treeNode.Children.Count == 0) treeNode.IsExpanded = false;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (refreshVersion == payload.RefreshVersion) _treeLoads.Remove(treeNode);
+        }
+    }
+
+    private async Task SyncTreeToLocationAsync(string? location)
+    {
+        if (_closed || !Settings.ShowFolderTree || !Settings.SyncFolderTree || FolderTree.RootNodes.Count == 0) return;
+        CancelTreeSync();
+        using var cts = new CancellationTokenSource();
+        _treeSyncCts = cts;
+        int generation = _treeGeneration;
+        try
+        {
+            string? bestRoot = FolderTreeReader.BestRoot(FolderTree.RootNodes.Select(r => PayloadOf(r)?.Location).OfType<string>(), location);
+            if (bestRoot is null)
+            {
+                FolderTree.SelectedNode = null;
+                return;
+            }
+            TreeViewNode? current = FolderTree.RootNodes.FirstOrDefault(r => PayloadOf(r) is { } p && PathTools.SameLocation(p.Location, bestRoot));
+            if (current is null)
+            {
+                FolderTree.SelectedNode = null;
+                return;
+            }
+            foreach (string ancestor in FolderTreeReader.AncestorsUnder(bestRoot, location))
+            {
+                if (cts.IsCancellationRequested || _closed || generation != _treeGeneration || !Settings.ShowFolderTree || !Settings.SyncFolderTree) return;
+                await EnsureTreeChildrenLoadedAsync(current, cts.Token);
+                if (cts.IsCancellationRequested || _closed || generation != _treeGeneration || !Settings.ShowFolderTree || !Settings.SyncFolderTree) return;
+                if (!current.IsExpanded) current.IsExpanded = true;
+                TreeViewNode? next = current.Children.FirstOrDefault(c => PayloadOf(c) is { } p && PathTools.SameLocation(p.Location, ancestor));
+                if (next is null) break;
+                current = next;
+            }
+            if (cts.IsCancellationRequested || _closed || generation != _treeGeneration || !Settings.ShowFolderTree || !Settings.SyncFolderTree) return;
+            FolderTree.SelectedNode = current;
+            TreeViewNode selected = current;
+            DispatcherQueue.SafeEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (_closed || generation != _treeGeneration || !Settings.ShowFolderTree || !Settings.SyncFolderTree
+                    || !ReferenceEquals(FolderTree.SelectedNode, selected)) return;
+                ScrollTreeNodeIntoView(selected);
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (ReferenceEquals(_treeSyncCts, cts)) _treeSyncCts = null;
+        }
+    }
+
+    private void ScrollTreeNodeIntoView(TreeViewNode node)
+    {
+        if (FindDescendant<ListViewBase>(FolderTree) is { } list)
+        {
+            list.ScrollIntoView(node);
+            return;
+        }
+        if (FolderTree.ContainerFromNode(node) is UIElement container) container.StartBringIntoView();
+    }
+
+    private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) return match;
+            if (FindDescendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+
+    private async Task RefreshTreeFolderAsync(string folder)
+    {
+        if (_closed || !Settings.ShowFolderTree || string.IsNullOrWhiteSpace(folder) || PathTools.IsShellPlace(folder)) return;
+        var matches = new List<TreeViewNode>();
+        CollectMatchingTreeNodes(FolderTree.RootNodes, folder, matches);
+        foreach (TreeViewNode treeNode in matches) await RefreshTreeNodeAsync(treeNode);
+    }
+
+    private static void CollectMatchingTreeNodes(IEnumerable<TreeViewNode> nodes, string folder, List<TreeViewNode> matches)
+    {
+        foreach (TreeViewNode node in nodes)
+        {
+            if (PayloadOf(node) is not { IsShellPlace: false } payload) continue;
+            if (PathTools.SameLocation(payload.Location, folder))
+            {
+                matches.Add(node);
+            }
+            if (payload.ChildrenLoaded && node.Children.Count > 0 && PathTools.IsSameOrInside(folder, payload.Location))
+                CollectMatchingTreeNodes(node.Children, folder, matches);
+        }
+    }
+
+    private async Task RefreshTreeNodeAsync(TreeViewNode treeNode)
+    {
+        if (_closed || PayloadOf(treeNode) is not { IsShellPlace: false } payload) return;
+        int generation = _treeGeneration;
+        CancellationToken lifetimeToken = CurrentTreeToken();
+        if (!payload.ChildrenLoaded)
+        {
+            bool showHidden = Settings.ShowHidden;
+            bool showProtected = Settings.ShowProtectedFiles;
+            try
+            {
+                bool hasChildren = await Task.Run(() =>
+                {
+                    lifetimeToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        FileAttributes attrs = File.GetAttributes(payload.Location);
+                        return FolderTreeReader.HasSubfolders(payload.Location, attrs, showHidden, showProtected);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                    {
+                        return false;
+                    }
+                }, lifetimeToken);
+                if (!_closed && generation == _treeGeneration && !payload.ChildrenLoaded)
+                    treeNode.HasUnrealizedChildren = hasChildren;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            return;
+        }
+
+        if (_treeLoads.TryGetValue(treeNode, out Task? prior))
+        {
+            try { await prior; }
+            catch (OperationCanceledException) { }
+            if (_closed || generation != _treeGeneration) return;
+        }
+        Task refresh = LoadOrRefreshTreeNodeAsync(treeNode, generation, lifetimeToken);
+        _treeLoads[treeNode] = refresh;
+        await refresh;
+    }
+
+    private async void FolderTree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    {
+        Models.FolderTreeNode? node = (args.InvokedItem as TreeViewNode)?.Content as Models.FolderTreeNode
+            ?? args.InvokedItem as Models.FolderTreeNode;
+        if (node is null) return;
+        await _active.NavigateAsync(node.Location);
+    }
+
+    private static (TreeViewNode? TreeNode, Models.FolderTreeNode? Payload) TreePairFromSource(object? source)
+    {
+        for (var current = source as DependencyObject; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is TreeViewItem item)
+            {
+                if (item.DataContext is TreeViewNode tn && tn.Content is Models.FolderTreeNode p) return (tn, p);
+                if (item.Content is Models.FolderTreeNode cp) return (null, cp);
+            }
+            if (current is FrameworkElement { DataContext: TreeViewNode dtn } && dtn.Content is Models.FolderTreeNode dp)
+                return (dtn, dp);
+            if (current is FrameworkElement { DataContext: Models.FolderTreeNode direct })
+                return (null, direct);
+        }
+        return (null, null);
+    }
+
+    private static Models.FolderTreeNode? TreeNodePayload(TreeViewItem item) =>
+        (item.DataContext as TreeViewNode)?.Content as Models.FolderTreeNode ?? item.Content as Models.FolderTreeNode;
+
+    private void Tree_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(null).Properties.IsMiddleButtonPressed) return;
+        if (TreePairFromSource(e.OriginalSource).Payload is { } node)
+        {
+            _active.OpenTab(node.Location);
+            e.Handled = true;
+        }
+    }
+
+    private void Tree_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        (TreeViewNode? treeNode, Models.FolderTreeNode? node) = TreePairFromSource(e.OriginalSource);
+        if (node is null) return;
+        var menu = new MenuFlyout();
+        MenuFlyoutItem Command(string text, string glyph, Action action)
+        {
+            var item = new MenuFlyoutItem { Text = Loc.T(text), Icon = new FontIcon { Glyph = glyph } };
+            item.Click += (_, _) => action();
+            return item;
+        }
+        menu.Items.Add(Command("OpenInNewTab", "", () => _active.OpenTab(node.Location)));
+        if (!node.IsShellPlace)
+        {
+            menu.Items.Add(Command("PinToSidebar", "", () => Pin(node.Location)));
+            if (treeNode is not null)
+            {
+                menu.Items.Add(new MenuFlyoutSeparator());
+                menu.Items.Add(Command("Refresh", "", () => _ = RefreshTreeNodeAsync(treeNode)));
+            }
+        }
+        menu.ShowAt((FrameworkElement)e.OriginalSource);
+        e.Handled = true;
+    }
+
+    private static Models.FolderTreeNode? TreeNodeAt(UIElement tree, DragEventArgs e)
+    {
+        foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(e.GetPosition(null), tree))
+        {
+            if (element is TreeViewItem item && TreeNodePayload(item) is { } node) return node;
+        }
+        return TreePairFromSource(e.OriginalSource).Payload;
+    }
+
+    private void Tree_DragOver(object sender, DragEventArgs e)
+    {
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths");
+        string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+        if (files && TreeNodeAt(FolderTree, e) is { IsShellPlace: false } node)
+        {
+            if (sources is not null && sources.Any(s => PathTools.IsSameOrInside(node.Location, s)))
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
+            bool move = DropPolicy.Moves(e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11),
+                e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10), sources, node.Location);
+            if (move && sources is { Length: > 0 } && sources.All(s => Path.GetDirectoryName(s.TrimEnd('\\')) is { } parent && PathTools.SameLocation(parent, node.Location)))
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
+            e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
+            e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", node.Label);
+            return;
+        }
+        e.AcceptedOperation = DataPackageOperation.None;
+    }
+
+    private async void Tree_Drop(object sender, DragEventArgs e)
+    {
+        if (TreeNodeAt(FolderTree, e) is not { IsShellPlace: false } node) return;
+        DragOperationDeferral deferral = e.GetDeferral();
+        bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
+        bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
+        try
+        {
+            string[]? own = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) ? value as string[] : null;
+            List<string> paths = own is not null ? [.. own] : [];
+            if (paths.Count == 0 && e.DataView.Contains(StandardDataFormats.StorageItems))
+            {
+                paths = (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
+            }
+            bool move = DropPolicy.Moves(control, shift, own, node.Location);
+            if (paths.Count == 0 || TransferCheck.Check(paths, node.Location, move) != TransferProblem.None) return;
+            await TransferAsync(paths, node.Location, move);
+        }
+        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
+        {
+            ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     /// <summary>The parsing name of Network, the computers and shares of the local network.</summary>
@@ -740,7 +1301,7 @@ public sealed partial class MainWindow : Window
     {
         change(App.Instance!.Settings);
         App.Instance.SaveSettings();
-        foreach (MainWindow window in App.Instance.Windows) window.BuildSidebar();
+        foreach (MainWindow window in App.Instance.Windows) window.BuildQuickAccess();
     }
 
     /// <summary>The sidebar entry under the pointer, found by hit-testing, because the event's source is not reliably the row.</summary>
@@ -1112,12 +1673,13 @@ public sealed partial class MainWindow : Window
         bool themeChanged = dialog.ThemeChanged;
         App.Instance!.SaveSettings();
         ApplyTheme();
-        ApplyLayout();
         foreach (MainWindow window in App.Instance.Windows)
         {
+            window.ApplyLayout();
             window.LeftPane.ApplyDisplaySettings(reload: true);
             window.RightPane.ApplyDisplaySettings(reload: true);
             window.BuildSidebar();
+            if (window.Settings.ShowFolderTree) window.RebuildFolderTree(reset: true, sync: true);
             window.UpdateAiCard();
         }
         if (languageChanged || themeChanged) ShowMessage(Loc.T(languageChanged ? "LanguageAfterRestart" : "ThemeAfterRestart"), InfoBarSeverity.Informational);
@@ -1155,6 +1717,9 @@ public sealed partial class MainWindow : Window
         HiddenItem.IsChecked = Settings.ShowHidden;
         ExtensionsItem.IsChecked = Settings.ShowExtensions;
         ColorfulItem.IsChecked = Settings.ColorfulNames;
+        FolderTreeItem.IsChecked = Settings.ShowFolderTree;
+        SyncTreeItem.IsChecked = Settings.SyncFolderTree;
+        SyncTreeItem.IsEnabled = Settings.ShowFolderTree;
     }
 
     private void ViewDetails_Click(object sender, RoutedEventArgs e) => _active.SetView("details");
@@ -1167,6 +1732,24 @@ public sealed partial class MainWindow : Window
 
     private void Colorful_Click(object sender, RoutedEventArgs e) => ToggleSetting(s => s.ColorfulNames = !s.ColorfulNames, reload: false);
 
+    private void FolderTree_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.ShowFolderTree = !Settings.ShowFolderTree;
+        App.Instance!.SaveSettings();
+        foreach (MainWindow window in App.Instance.Windows) window.ApplyLayout();
+    }
+
+    private void SyncTree_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.SyncFolderTree = !Settings.SyncFolderTree;
+        App.Instance!.SaveSettings();
+        foreach (MainWindow window in App.Instance.Windows)
+        {
+            if (!Settings.SyncFolderTree) window.CancelTreeSync();
+            else if (window.Settings.ShowFolderTree) _ = window.SyncTreeToLocationAsync(window._active.Location);
+        }
+    }
+
     private void ToggleSetting(Action<AppSettings> change, bool reload)
     {
         change(Settings);
@@ -1175,6 +1758,7 @@ public sealed partial class MainWindow : Window
         {
             window.LeftPane.ApplyDisplaySettings(reload);
             window.RightPane.ApplyDisplaySettings(reload);
+            if (reload && window.Settings.ShowFolderTree) window.RebuildFolderTree(reset: true, sync: true);
         }
     }
 

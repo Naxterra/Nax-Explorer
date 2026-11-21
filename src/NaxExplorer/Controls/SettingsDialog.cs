@@ -57,6 +57,14 @@ internal sealed partial class SettingsDialog : ContentDialog
         general.Children.Add(Switch("ShowProtectedFiles", settings.ShowProtectedFiles, on => settings.ShowProtectedFiles = on));
         general.Children.Add(Switch("ShowExtensions", settings.ShowExtensions, on => settings.ShowExtensions = on));
         general.Children.Add(Switch("ColorfulNames", settings.ColorfulNames, on => settings.ColorfulNames = on));
+        ToggleSwitch syncTree = Switch("SyncFolderTree", settings.SyncFolderTree, on => settings.SyncFolderTree = on);
+        syncTree.IsEnabled = settings.ShowFolderTree;
+        general.Children.Add(Switch("ShowFolderTree", settings.ShowFolderTree, on =>
+        {
+            settings.ShowFolderTree = on;
+            syncTree.IsEnabled = on;
+        }));
+        general.Children.Add(syncTree);
         general.Children.Add(Switch("OpenPicturesInViewer", settings.OpenImagesInViewer, on => settings.OpenImagesInViewer = on));
         ToggleSwitch replace = null!;
         bool reverting = false;

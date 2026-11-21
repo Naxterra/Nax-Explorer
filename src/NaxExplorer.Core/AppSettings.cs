@@ -60,6 +60,10 @@ public sealed class AppSettings
 
     public bool ShowPreview { get; set; } = true;
 
+    public bool ShowFolderTree { get; set; }
+
+    public bool SyncFolderTree { get; set; } = true;
+
     public bool ShowHidden { get; set; }
 
     /// <summary>Shows items that are both hidden and system, such as desktop.ini, as Explorer's "protected operating system files".</summary>

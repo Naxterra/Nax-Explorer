@@ -940,6 +940,61 @@ internal static class CoreTests
             Check.Equal(0, Directory.GetFiles(folder, "*.tmp").Length, "temporary file left behind");
             Check.That(AppSettings.Load(path).ShowHidden, "saved setting not read back");
         });
+
+        yield return ("folder_tree_reads_sorted_subfolders_respects_visibility_and_detects_children", "The folder tree lists direct subfolders in natural order, skips files, respects hidden and protected system visibility, and detects whether each subfolder has children.", () =>
+        {
+            string root = Fixtures.TempFolder("tree-children");
+            string f10 = Directory.CreateDirectory(Path.Combine(root, "Folder 10")).FullName;
+            string f2 = Directory.CreateDirectory(Path.Combine(root, "Folder 2")).FullName;
+            Directory.CreateDirectory(Path.Combine(f2, "Nested"));
+            string hidden = Directory.CreateDirectory(Path.Combine(root, "Secret")).FullName;
+            File.SetAttributes(hidden, FileAttributes.Directory | FileAttributes.Hidden);
+            string protectedDir = Directory.CreateDirectory(Path.Combine(root, "Protected")).FullName;
+            File.SetAttributes(protectedDir, FileAttributes.Directory | FileAttributes.Hidden | FileAttributes.System);
+            Fixtures.Write(root, "plain.txt", "ignore files");
+
+            List<FolderTreeItem> normal = FolderTreeReader.ReadChildren(root, showHidden: false, showProtected: false);
+            Check.Sequence(["Folder 2", "Folder 10"], normal.Select(i => i.Name), "default visibility natural order");
+            Check.That(normal[0].HasSubfolders && !normal[1].HasSubfolders, "child subfolder detection");
+
+            List<FolderTreeItem> withHidden = FolderTreeReader.ReadChildren(root, showHidden: true, showProtected: false);
+            Check.Sequence(["Folder 2", "Folder 10", "Secret"], withHidden.Select(i => i.Name), "hidden visible without protected");
+
+            List<FolderTreeItem> withProtected = FolderTreeReader.ReadChildren(root, showHidden: true, showProtected: true);
+            Check.Sequence(["Folder 2", "Folder 10", "Protected", "Secret"], withProtected.Select(i => i.Name), "hidden and protected visible");
+
+            _ = f10;
+        });
+
+        yield return ("folder_tree_skips_unfetched_cloud_folders_and_defers_network_probes", "Folder tree probing never enters unfetched cloud folders or shell places, and treats network paths as expandable on demand without contacting the share.", () =>
+        {
+            string root = Fixtures.TempFolder("tree-cloud");
+            Directory.CreateDirectory(Path.Combine(root, "Child"));
+            Check.That(!FolderTreeReader.HasSubfolders(root, FileAttributes.Directory | CloudFiles.RecallOnOpen, false, false), "unfetched RecallOnOpen folder");
+            Check.That(!FolderTreeReader.HasSubfolders(root, FileAttributes.Directory | CloudFiles.RecallOnDataAccess, false, false), "unfetched RecallOnDataAccess folder");
+            Check.That(!FolderTreeReader.HasSubfolders(PathTools.ShellPlace("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}"), FileAttributes.Directory, false, false), "shell place");
+            Check.That(FolderTreeReader.HasSubfolders(@"\\offline-server.invalid\share\folder", FileAttributes.Directory, false, false), "network path defers probing until expand");
+        });
+
+        yield return ("folder_tree_resolves_best_root_and_ancestor_chain_including_zip_paths", "Tree synchronization picks the deepest matching cloud or drive root, walks every intermediate folder in order, and maps ZIP archive views to the archive's parent folder.", () =>
+        {
+            string[] roots = [@"C:\", @"C:\Users\Demo\OneDrive", @"G:\", PathTools.ShellPlace("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}")];
+            Check.Equal(@"C:\Users\Demo\OneDrive", FolderTreeReader.BestRoot(roots, @"C:\Users\Demo\OneDrive\Work\2026"), "prefers cloud root over C:");
+            Check.Equal(@"C:\", FolderTreeReader.BestRoot(roots, @"C:\Windows\System32"), "matches drive root");
+            Check.Equal(null, FolderTreeReader.BestRoot(roots, PathTools.ThisPc), "This PC has no tree target");
+
+            Check.Sequence(
+                [@"C:\Users\Demo\OneDrive\Work", @"C:\Users\Demo\OneDrive\Work\2026"],
+                FolderTreeReader.AncestorsUnder(@"C:\Users\Demo\OneDrive", @"C:\Users\Demo\OneDrive\Work\2026"),
+                "ancestors under cloud root");
+            string zipLocation = CompressedFolders.Location(@"C:\Users\Demo\Downloads\archive.zip\nested\dir");
+            Check.Equal(@"C:\", FolderTreeReader.BestRoot(roots, zipLocation), "ZIP location resolves to its containing drive root");
+            Check.Sequence(
+                [@"C:\Users", @"C:\Users\Demo", @"C:\Users\Demo\Downloads"],
+                FolderTreeReader.AncestorsUnder(@"C:\", zipLocation),
+                "ZIP path resolves to archive parent folder");
+            Check.Equal(0, FolderTreeReader.AncestorsUnder(@"G:\", @"G:\").Count, "root itself has no sub-ancestors");
+        });
     }
 
     private static FileEntry Entry(string name, EntryKind kind, long size) => new()

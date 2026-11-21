@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:NaxExplorer"
     xmlns:controls="using:NaxExplorer.Controls"
+    xmlns:models="using:NaxExplorer.Models"
     Title="Nax Explorer">
 
     <Grid x:Name="Root" KeyDown="Root_KeyDown" PreviewKeyDown="Root_PreviewKeyDown">
@@ -22,6 +23,20 @@
                         <TextBlock Visibility="{x:Bind UsageVisibility}" Text="{x:Bind Detail}" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                     </StackPanel>
                 </Grid>
+            </DataTemplate>
+            <DataTemplate x:Key="FolderTreeTemplate" x:DataType="TreeViewNode">
+                <TreeViewItem ToolTipService.ToolTip="{x:Bind ((models:FolderTreeNode)Content).Detail, Mode=OneWay}">
+                    <Grid ColumnSpacing="8" Padding="0,3">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="18" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Glyph="{x:Bind ((models:FolderTreeNode)Content).Glyph, Mode=OneWay}" FontSize="15"
+                                  Foreground="{x:Bind ((models:FolderTreeNode)Content).Brush, Mode=OneWay}" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind ((models:FolderTreeNode)Content).Label, Mode=OneWay}"
+                                   FontSize="13" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    </Grid>
+                </TreeViewItem>
             </DataTemplate>
         </Grid.Resources>
         <Grid.RowDefinitions>
@@ -121,6 +136,9 @@
                             <ToggleMenuFlyoutItem x:Name="HiddenItem" Text="{local:T Key=ShowHidden}" Click="Hidden_Click" KeyboardAcceleratorTextOverride="Ctrl+H" />
                             <ToggleMenuFlyoutItem x:Name="ExtensionsItem" Text="{local:T Key=ShowExtensions}" Click="Extensions_Click" />
                             <ToggleMenuFlyoutItem x:Name="ColorfulItem" Text="{local:T Key=ColorfulNames}" Click="Colorful_Click" />
+                            <MenuFlyoutSeparator />
+                            <ToggleMenuFlyoutItem x:Name="FolderTreeItem" Text="{local:T Key=ShowFolderTree}" Click="FolderTree_Click" />
+                            <ToggleMenuFlyoutItem x:Name="SyncTreeItem" Text="{local:T Key=SyncFolderTree}" Click="SyncTree_Click" />
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
@@ -159,7 +177,7 @@
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ScrollViewer x:Name="FlatSidebar" VerticalScrollBarVisibility="Auto">
                     <StackPanel Padding="0,0,0,8">
                         <TextBlock Text="{local:T Key=QuickAccess}" Style="{StaticResource SectionHeaderStyle}" Margin="12,4,0,4" />
                         <ListView x:Name="QuickList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
@@ -174,6 +192,27 @@
                                   ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed" />
                     </StackPanel>
                 </ScrollViewer>
+                <Grid x:Name="TreeSidebar" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" MaxHeight="240" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock Text="{local:T Key=QuickAccess}" Style="{StaticResource SectionHeaderStyle}" Margin="12,4,0,4" />
+                            <ListView x:Name="TreeQuickList" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Sidebar_ItemClick" ItemTemplate="{StaticResource SidebarTemplate}"
+                                      ItemContainerStyle="{StaticResource SidebarItemStyle}" AllowDrop="True" DragOver="Sidebar_DragOver" Drop="Sidebar_Drop" PointerPressed="Sidebar_PointerPressed"
+                                      RightTapped="QuickList_RightTapped" />
+                        </StackPanel>
+                    </ScrollViewer>
+                    <TextBlock Grid.Row="1" Text="{local:T Key=FoldersHeader}" Style="{StaticResource SectionHeaderStyle}" Margin="12,10,0,4" />
+                    <TreeView x:Name="FolderTree" Grid.Row="2" SelectionMode="Single" CanDragItems="False" CanReorderItems="False"
+                              AllowDrop="True" DragOver="Tree_DragOver" Drop="Tree_Drop"
+                              Expanding="FolderTree_Expanding" ItemInvoked="FolderTree_ItemInvoked"
+                              PointerPressed="Tree_PointerPressed" RightTapped="Tree_RightTapped"
+                              ItemTemplate="{StaticResource FolderTreeTemplate}" Padding="0,0,0,8" />
+                </Grid>
 
                 <!-- The AI index at a glance. -->
                 <Border x:Name="AiCard" Grid.Row="1" Margin="8,4,4,0" Padding="12,10" CornerRadius="10" BorderThickness="1"
