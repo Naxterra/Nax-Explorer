@@ -83,19 +83,137 @@ internal sealed class OperationProgress : IFileOperationProgressSink
         return _cancel ? Cancelled : 0;
     }
 
-    private int After(IShellItem item, int result)
+    private int After(IShellItem item, int result, string? lockingPath = null)
     {
         // Success codes such as "skipped" are no failure, and a cancel is not reported per item.
         if (result < 0 && result != Cancelled && result != unchecked((int)0x80270000))
         {
-            lock (_failures) _failures.Add(new OperationFailure(NameOf(item) ?? "?", DescribeShellFailure(result)));
+            string? path = lockingPath ?? NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */);
+            lock (_failures) _failures.Add(new OperationFailure(NameOf(item) ?? "?", DescribeShellFailure(result, path)));
         }
         return _cancel ? Cancelled : 0;
     }
 
-    internal static string DescribeShellFailure(int result) => result == RequiresElevation
-        ? Loc.T("OperationRequiresAdministrator")
-        : Marshal.GetExceptionForHR(result)?.Message ?? $"0x{result:X8}";
+    internal static string DescribeShellFailure(int result, string? path = null)
+    {
+        switch (unchecked((uint)result))
+        {
+            case 0x80270002u: // COPYENGINE_E_REQUIRES_ELEVATION
+                return Loc.T("OperationRequiresAdministrator");
+            case 0x80270003u: // COPYENGINE_E_SAME_FILE
+                return Loc.T("OperationSameFile");
+            case 0x80270009u: // COPYENGINE_E_DEST_SUBTREE
+            case 0x8027000Au: // COPYENGINE_E_DEST_SAME_TREE
+                return Loc.T("OperationDestSubtree");
+            case 0x8027000Du: // COPYENGINE_E_FILE_TOO_LARGE
+                return Loc.T("OperationFileTooLarge");
+            case 0x8027000Eu: // COPYENGINE_E_REMOVABLE_FULL
+            case 0x80270032u: // COPYENGINE_E_DISK_FULL
+            case 0x80270033u: // COPYENGINE_E_DISK_FULL_CLEAN
+                return Loc.T("OperationDiskFull");
+            case 0x8027001Du: // COPYENGINE_E_PATH_TOO_DEEP_SRC
+            case 0x8027001Eu: // COPYENGINE_E_PATH_TOO_DEEP_DEST
+            case 0x80270038u: // COPYENGINE_E_RECYCLE_PATH_TOO_LONG
+            case 0x8027003Bu: // COPYENGINE_E_NEWFILE_NAME_TOO_LONG
+            case 0x8027003Cu: // COPYENGINE_E_NEWFOLDER_NAME_TOO_LONG
+                return Loc.T("OperationPathTooLong");
+            case 0x80270021u: // COPYENGINE_E_ACCESS_DENIED_SRC
+            case 0x80270022u: // COPYENGINE_E_ACCESS_DENIED_DEST
+            case 0x8027003Fu: // COPYENGINE_E_ACCESSDENIED_READONLY
+                return Loc.T("OperationAccessDenied");
+            case 0x80270023u: // COPYENGINE_E_PATH_NOT_FOUND_SRC
+            case 0x80270024u: // COPYENGINE_E_PATH_NOT_FOUND_DEST
+            case 0x80270035u: // COPYENGINE_E_CANT_REACH_SOURCE
+                return Loc.T("OperationPathNotFound");
+            case 0x80270025u: // COPYENGINE_E_NET_DISCONNECT_SRC
+            case 0x80270026u: // COPYENGINE_E_NET_DISCONNECT_DEST
+                return Loc.T("OperationNetworkUnavailable");
+            case 0x80270027u: // COPYENGINE_E_SHARING_VIOLATION_SRC
+            case 0x80270028u: // COPYENGINE_E_SHARING_VIOLATION_DEST
+            case 0x80070020u: // ERROR_SHARING_VIOLATION
+                return FindLockingApps(path) is { Length: > 0 } apps
+                    ? Loc.F("OperationFileInUseBy", apps)
+                    : Loc.T("OperationFileInUse");
+            case 0x80270029u: // COPYENGINE_E_ALREADY_EXISTS_NORMAL
+            case 0x8027002Au: // COPYENGINE_E_ALREADY_EXISTS_READONLY
+            case 0x8027002Bu: // COPYENGINE_E_ALREADY_EXISTS_SYSTEM
+            case 0x8027002Cu: // COPYENGINE_E_ALREADY_EXISTS_FOLDER
+                return Loc.T("OperationAlreadyExists");
+            case 0x80270037u: // COPYENGINE_E_RECYCLE_SIZE_TOO_BIG
+                return Loc.T("OperationTooLargeForRecycleBin");
+            case 0x8027003Du: // COPYENGINE_E_DIR_NOT_EMPTY
+                return Loc.T("OperationDirNotEmpty");
+            default:
+                return Marshal.GetExceptionForHR(result)?.Message ?? $"0x{result:X8}";
+        }
+    }
+
+    private static string? FindLockingApps(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || Core.PathTools.IsShellPlace(path) || !File.Exists(path)) return null;
+        try
+        {
+            var sessionKey = new char[33]; // CCH_RM_SESSION_KEY + 1
+            if (RmStartSession(out uint handle, 0, sessionKey) != 0) return null;
+            try
+            {
+                if (RmRegisterResources(handle, 1, [path], 0, IntPtr.Zero, 0, null) != 0) return null;
+                uint needed = 0, count = 0, reasons = 0;
+                int status = RmGetList(handle, out needed, ref count, null, ref reasons);
+                if (status != 234 /* ERROR_MORE_DATA */ || needed == 0) return null;
+                var info = new RM_PROCESS_INFO[needed];
+                count = needed;
+                if (RmGetList(handle, out needed, ref count, info, ref reasons) != 0 || count == 0) return null;
+                List<string> names = info.Take((int)count)
+                    .Select(p => p.strAppName?.Trim())
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(3)
+                    .Cast<string>()
+                    .ToList();
+                return names.Count > 0 ? string.Join(", ", names) : null;
+            }
+            finally
+            {
+                RmEndSession(handle);
+            }
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or SEHException or ExternalException)
+        {
+            return null;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RM_UNIQUE_PROCESS
+    {
+        public int dwProcessId;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct RM_PROCESS_INFO
+    {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string strAppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string strServiceShortName;
+        public int ApplicationType;
+        public uint AppStatus;
+        public uint TSSessionId;
+        [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+    }
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmStartSession(out uint pSessionHandle, int dwSessionFlags, [Out] char[] strSessionKey);
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmRegisterResources(uint dwSessionHandle, uint nFiles, string[] rgsFileNames, uint nApplications, IntPtr rgApplications, uint nServices, string[]? rgsServiceNames);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmGetList(uint dwSessionHandle, out uint pnProcInfoNeeded, ref uint pnProcInfo, [In, Out] RM_PROCESS_INFO[]? rgAffectedApps, ref uint lpdwRebootReasons);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmEndSession(uint dwSessionHandle);
 
     // The shell can report this result more than once while arranging an elevated retry. Keep one entry for the
     // exact path and decide whether it was a failure only after Windows has finished the delete.
@@ -153,7 +271,11 @@ internal sealed class OperationProgress : IFileOperationProgressSink
         {
             lock (_failures) _pendingTransferElevation.Remove(sourcePath);
         }
-        return After(item, result);
+        // For COPYENGINE_E_SHARING_VIOLATION_DEST during copy/move, query Restart Manager on the destination file.
+        string? lockingPath = result == unchecked((int)0x80270028) && sourcePath is not null
+            ? ExpectedTargetOf(sourcePath, destination, newName)
+            : null;
+        return After(item, result, lockingPath);
     }
 
     internal void FinishDelete()

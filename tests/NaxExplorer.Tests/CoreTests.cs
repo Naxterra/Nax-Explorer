@@ -908,8 +908,9 @@ internal static class CoreTests
             Check.Equal("Google Drive", CloudFolders.NameOf("CustomProvider", "Google Drive - Work"), "display name containing Google Drive");
 
             string json = """{"per_account_preferences":[{"key":"123","value":{"mount_point_path":"g:/","mirror_root_path":"C:/Users/Demo/My Drive/"}}]}""";
-            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { @"G:\", @"C:\Users\Demo\My Drive", @"J:\" };
-            List<CloudFolder> parsed = CloudFolders.ParseDriveFsPaths(json, [@"j:\\", @"Z:\Missing"], existing.Contains);
+            string driveFsCache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "DriveFS");
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { @"G:\", @"C:\Users\Demo\My Drive", @"J:\", driveFsCache };
+            List<CloudFolder> parsed = CloudFolders.ParseDriveFsPaths(json, [@"j:\\", driveFsCache, @"Z:\Missing"], existing.Contains);
             Check.Sequence([@"G:\", @"C:\Users\Demo\My Drive", @"J:\"], parsed.Select(f => f.Path));
             Check.Equal(0, CloudFolders.ParseDriveFsPaths("{broken json", [], _ => true).Count, "malformed JSON should not throw");
         });

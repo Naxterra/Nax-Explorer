@@ -11,6 +11,8 @@ namespace NaxExplorer.Controls;
 /// </summary>
 internal sealed class OperationCard : UserControl
 {
+    private const int MaxFinishedCards = 3;
+
     private readonly TextBlock _title = new() { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock _detail = new() { FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly ProgressBar _bar = new() { Maximum = 1, IsIndeterminate = true };
@@ -18,12 +20,19 @@ internal sealed class OperationCard : UserControl
     private readonly StackPanel _failures = new() { Spacing = 2, Visibility = Visibility.Collapsed };
     private readonly OperationProgress _progress;
     private readonly StackPanel _host;
+    private readonly string _operationTitle;
     private bool _ended;
 
     public OperationCard(StackPanel host, string title, OperationProgress progress)
     {
         _host = host;
+        _operationTitle = title;
         _progress = progress;
+        // Retrying the same operation replaces any earlier finished error card for it instead of stacking duplicates.
+        foreach (OperationCard prior in host.Children.OfType<OperationCard>().Where(c => c._ended && string.Equals(c._operationTitle, title, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            host.Children.Remove(prior);
+        }
         _title.Text = title;
         _detail.Style = (Style)Application.Current.Resources["SecondaryTextStyle"];
         _detail.Text = Loc.T("OperationPreparing");
@@ -80,7 +89,11 @@ internal sealed class OperationCard : UserControl
             return;
         }
         _bar.Visibility = Visibility.Collapsed;
-        _detail.Text = failures.Count > 0 ? Loc.F("OperationFailedItems", failures.Count) : error!;
+        _detail.Text = failures.Count == 1
+            ? Loc.T("OperationFailedItem")
+            : failures.Count > 1
+                ? Loc.F("OperationFailedItems", failures.Count)
+                : error!;
         _detail.Style = null;
         _detail.TextWrapping = TextWrapping.Wrap;
         foreach (OperationFailure failure in failures.Take(50))
@@ -88,6 +101,13 @@ internal sealed class OperationCard : UserControl
             _failures.Children.Add(new TextBlock { Text = $"{failure.Name}: {failure.Message}", FontSize = 12, TextWrapping = TextWrapping.Wrap, Style = (Style)Application.Current.Resources["SecondaryTextStyle"] });
         }
         _failures.Visibility = Visibility.Visible;
+        // Deduplicate any concurrent finished error card for the same operation and cap older finished cards without evicting this one.
+        foreach (OperationCard duplicate in _host.Children.OfType<OperationCard>().Where(c => c._ended && !ReferenceEquals(c, this) && string.Equals(c._operationTitle, _operationTitle, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            _host.Children.Remove(duplicate);
+        }
+        List<OperationCard> priorFinished = _host.Children.OfType<OperationCard>().Where(c => c._ended && !ReferenceEquals(c, this)).ToList();
+        for (int i = 0; i <= priorFinished.Count - MaxFinishedCards; i++) _host.Children.Remove(priorFinished[i]);
     }
 
     private void Close() => _host.Children.Remove(this);

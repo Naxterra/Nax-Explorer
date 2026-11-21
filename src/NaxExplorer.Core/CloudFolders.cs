@@ -127,8 +127,10 @@ public static class CloudFolders
             if (NormalizeDriveFsPath(raw) is { } normalized) paths.Add(normalized);
         }
         var result = new List<CloudFolder>();
+        string internalCache = NormalizePath(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "DriveFS"));
         foreach (string path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (internalCache.Length > 0 && PathTools.IsSameOrInside(path, internalCache)) continue;
             if (exists(path)) result.Add(new CloudFolder("GoogleDrive", "Google Drive", path));
         }
         return result;
@@ -193,7 +195,6 @@ public static class CloudFolders
             [
                 driveFs?.GetValue("DefaultMountPoint") as string,
                 share?.GetValue("MountPoint") as string,
-                share?.GetValue("BasePath") as string,
             ];
             return ParseDriveFsPaths(perAccount, explicitPaths, Directory.Exists);
         }

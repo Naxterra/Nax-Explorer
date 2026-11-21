@@ -586,7 +586,7 @@ public sealed partial class ImageViewer : UserControl
                 ToggleFullScreen();
                 break;
             case ViewerCommand.Delete:
-                await DeleteCurrentAsync(shift);
+                if (!e.KeyStatus.WasKeyDown) await DeleteCurrentAsync(shift);
                 break;
             case ViewerCommand.OpenExternal:
                 OpenExternal_Click(this, e);

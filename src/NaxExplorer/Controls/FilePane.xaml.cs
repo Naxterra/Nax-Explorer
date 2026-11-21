@@ -1712,7 +1712,7 @@ public sealed partial class FilePane : UserControl
                 GoUp();
                 break;
             case VirtualKey.Delete:
-                Delete(permanently: shift);
+                if (!e.KeyStatus.WasKeyDown) Delete(permanently: shift);
                 break;
             case VirtualKey.F2:
                 BeginRename();

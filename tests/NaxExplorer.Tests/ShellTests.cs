@@ -240,6 +240,72 @@ internal static class ShellTests
             Check.That(failed || progress.Failures.Count > 0, "locked source was reported as successful");
             Check.That(File.Exists(source) && Directory.GetFileSystemEntries(target).Length == 0, "failed copy changed a source or left a partial destination");
         });
+
+        yield return ("shell_bitmap_premultiplies_straight_alpha_and_preserves_opaque_and_premultiplied", "Straight-alpha shell bitmaps with white transparent corners are premultiplied for WinUI, while opaque thumbnails and already-premultiplied PARGB32 bitmaps keep their intended colors.", () =>
+        {
+            byte[] straight =
+            [
+                255, 255, 255, 0,
+                240, 251, 255, 16,
+                115, 218, 255, 255,
+            ];
+            BgraPixels.Normalize(straight);
+            Check.Sequence<byte>([0, 0, 0, 0, 15, 16, 16, 16, 115, 218, 255, 255], straight, "straight-alpha premultiplication");
+
+            byte[] opaque = [10, 20, 30, 0, 40, 50, 60, 0];
+            BgraPixels.Normalize(opaque);
+            Check.Sequence<byte>([10, 20, 30, 255, 40, 50, 60, 255], opaque, "opaque bitmap alpha fill");
+
+            byte[] premultiplied = [32, 64, 96, 128, 0, 0, 0, 0];
+            BgraPixels.Normalize(premultiplied);
+            Check.Sequence<byte>([32, 64, 96, 128, 0, 0, 0, 0], premultiplied, "already-premultiplied bitmap preserved");
+        });
+
+        yield return ("copy_engine_error_codes_produce_localized_messages_and_identify_locking_process", "Windows shell copy-engine error codes map to readable localized explanations instead of raw hex, and sharing violations safely check Restart Manager for the locking app.", () =>
+        {
+            Check.Equal(Loc.T("OperationFileInUse"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270028)), "sharing violation dest");
+            Check.Equal(Loc.T("OperationFileInUse"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270027)), "sharing violation src");
+            Check.Equal(Loc.T("OperationAccessDenied"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270021)), "access denied");
+            Check.Equal(Loc.T("OperationPathNotFound"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270023)), "path not found");
+            Check.Equal(Loc.T("OperationDiskFull"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270032)), "disk full");
+            Check.Equal(Loc.T("OperationTooLargeForRecycleBin"), OperationProgress.DescribeShellFailure(unchecked((int)0x80270037)), "too large for recycle bin");
+            Check.Equal(Loc.T("OperationPathTooLong"), OperationProgress.DescribeShellFailure(unchecked((int)0x8027001D)), "path too long");
+            Check.Equal(Loc.T("OperationDirNotEmpty"), OperationProgress.DescribeShellFailure(unchecked((int)0x8027003D)), "dir not empty");
+
+            string root = Fixtures.TempFolder("rm-lock");
+            string file = Fixtures.Write(root, "locked.bin", "payload");
+            using (var stream = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                string message = OperationProgress.DescribeShellFailure(unchecked((int)0x80270028), file);
+                Check.That(!message.Contains("0x8027", StringComparison.OrdinalIgnoreCase), $"unexpected raw hex message: {message}");
+                Check.That(message != Loc.T("OperationFileInUse"), $"Restart Manager should identify the locking process, got generic fallback: {message}");
+            }
+
+            // A destination sharing violation during copy must query Restart Manager on the destination file, not the unlocked source.
+            string srcFile = Fixtures.Write(root, @"src\report.txt", "new content");
+            string destDir = Path.Combine(root, "dest");
+            Directory.CreateDirectory(destDir);
+            string destFile = Fixtures.Write(destDir, "report.txt", "locked target");
+            OnSta(() =>
+            {
+                Guid iid = Native.IID_IShellItem;
+                Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(srcFile, IntPtr.Zero, ref iid, out IShellItem srcItem));
+                Marshal.ThrowExceptionForHR(Native.SHCreateItemFromParsingName(destDir, IntPtr.Zero, ref iid, out IShellItem destItem));
+                try
+                {
+                    using var destLock = new FileStream(destFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    var progress = new OperationProgress();
+                    progress.PostCopyItem(0, srcItem, destItem, null, unchecked((int)0x80270028), null);
+                    Check.Equal(1, progress.Failures.Count, "expected one sharing violation failure");
+                    Check.That(progress.Failures[0].Message != Loc.T("OperationFileInUse"), $"destination lock should name the locking process, got: {progress.Failures[0].Message}");
+                }
+                finally
+                {
+                    Native.Release(destItem);
+                    Native.Release(srcItem);
+                }
+            });
+        });
     }
 
     private static void OnSta(Action body)

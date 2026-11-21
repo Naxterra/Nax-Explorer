@@ -131,20 +131,7 @@ internal static class ShellImages
         {
             Native.ReleaseDC(IntPtr.Zero, dc);
         }
-        // Images without an alpha channel, such as many photo thumbnails, come back fully transparent: make them opaque.
-        bool anyAlpha = false;
-        for (int i = 3; i < pixels.Length; i += 4)
-        {
-            if (pixels[i] != 0)
-            {
-                anyAlpha = true;
-                break;
-            }
-        }
-        if (!anyAlpha)
-        {
-            for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
-        }
+        Core.BgraPixels.Normalize(pixels);
         return new ImagePixels(width, height, pixels);
     }
 

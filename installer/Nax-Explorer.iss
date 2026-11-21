@@ -41,9 +41,8 @@ WizardStyle=modern
 CloseApplications=yes
 ; Uninstall restores folder verbs from code; Explorer must discard its cached association information afterward.
 ChangesAssociations=yes
-; The app holds these mutexes while it runs, the global one also visible from other Windows sessions. Setup and the
-; uninstaller wait until it is closed, so no locked program file is left behind.
-AppMutex=NaxExplorer.Running,Global\NaxExplorer.Running
+; The app holds NaxExplorer.Running and Global\NaxExplorer.Running while running. They are checked in InitializeSetup
+; and InitializeUninstall AFTER CloseBackgroundApp asks any hidden background instance to exit cleanly.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -218,23 +217,46 @@ begin
   // The hidden window goes first; the app still saves its state and closes its index after it. Setup waits until the
   // app's mutex is free as well, so no program file or index file is still open when setup goes on.
   Tries := 0;
-  while CheckForMutexes('NaxExplorer.Running') and (Tries < 100) do
+  while CheckForMutexes('NaxExplorer.Running,Global\NaxExplorer.Running') and (Tries < 100) do
   begin
     Sleep(100);
     Tries := Tries + 1;
   end;
 end;
 
-function InitializeSetup: Boolean;
+function EnsureAppClosed(const MessageId: TSetupMessageID): Boolean;
+var
+  Prompt: String;
 begin
   CloseBackgroundApp;
+  while CheckForMutexes('NaxExplorer.Running,Global\NaxExplorer.Running') do
+  begin
+    Prompt := FmtMessage(SetupMessage(MessageId), ['{#AppName}']);
+    if SuppressibleMsgBox(Prompt, mbError, MB_OKCANCEL, IDCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+    CloseBackgroundApp;
+  end;
   Result := True;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := EnsureAppClosed(msgSetupAppRunningError);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not EnsureAppClosed(msgSetupAppRunningError) then
+    Result := FmtMessage(SetupMessage(msgSetupAppRunningError), ['{#AppName}']);
 end;
 
 function InitializeUninstall: Boolean;
 begin
-  CloseBackgroundApp;
-  Result := True;
+  Result := EnsureAppClosed(msgUninstallAppRunningError);
 end;
 
 // Removes the sign-in entry, but only the app's own: a value of the same name another program wrote stays.
@@ -272,6 +294,8 @@ begin
     DeleteKeyIfEmpty('Software\Classes\CompressedFolder');
     DeleteKeyIfEmpty('Software\Classes\Folder\shell');
     DeleteKeyIfEmpty('Software\Classes\Folder');
+    // Close any background instance that was relaunched via Explorer verbs while the uninstall confirmation was open.
+    CloseBackgroundApp;
     Exit;
   end;
   if (CurUninstallStep <> usPostUninstall) or not DirExists(DataFolder) then Exit;
