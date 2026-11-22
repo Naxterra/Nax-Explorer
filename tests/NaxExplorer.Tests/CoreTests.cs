@@ -995,6 +995,115 @@ internal static class CoreTests
                 "ZIP path resolves to archive parent folder");
             Check.Equal(0, FolderTreeReader.AncestorsUnder(@"G:\", @"G:\").Count, "root itself has no sub-ancestors");
         });
+
+        yield return ("fast_permanent_delete_removes_nested_readonly_trees_and_spares_junction_targets", "Fast permanent deletion removes nested trees including read-only files and large batches, deletes a directory junction without touching its target, and defers cloud and shell paths to the shell fallback.", () =>
+        {
+            string root = Fixtures.TempFolder("fast-delete");
+            string tree = Path.Combine(root, "tree");
+            Directory.CreateDirectory(Path.Combine(tree, "sub"));
+            for (int i = 0; i < 48; i++)
+            {
+                string file = Fixtures.Write(tree, $"file-{i:D2}.txt", "payload");
+                if (i % 5 == 0) File.SetAttributes(file, FileAttributes.ReadOnly);
+            }
+            string nestedReadOnly = Fixtures.Write(tree, @"sub\pack.idx", "git object");
+            File.SetAttributes(nestedReadOnly, FileAttributes.ReadOnly);
+
+            string outsideTarget = Path.Combine(root, "outside");
+            string keepFile = Fixtures.Write(outsideTarget, "precious.txt", "do not touch");
+            string junction = Path.Combine(tree, "link-to-outside");
+            var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{outsideTarget}\"") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!;
+            mklink.WaitForExit();
+            Check.That(Directory.Exists(junction), "junction fixture was not created");
+
+            string cloudFile = Fixtures.Write(root, @"cloud\doc.txt", "cloud");
+            string shellPlace = PathTools.ShellPlace("::{645FF040-5081-101B-9F08-00AA002F954E}");
+
+            FastDeleteResult result = FastPermanentDelete.Delete(
+                [tree, cloudFile, shellPlace],
+                isCloudPath: p => PathTools.IsSameOrInside(p, Path.Combine(root, "cloud")),
+                isCancelled: () => false);
+
+            Check.That(!result.Cancelled, "should not be cancelled");
+            Check.Equal(0, result.Failures.Count, "unexpected failures");
+            Check.That(!Directory.Exists(tree), "tree should be deleted");
+            Check.That(File.Exists(keepFile), "symlink target contents must remain untouched");
+            Check.Sequence([cloudFile, shellPlace], result.FallbackToShell, "cloud and shell paths must defer to IFileOperation");
+        });
+
+        yield return ("fast_permanent_delete_reports_locked_file_and_preserves_parent", "When a nested file is locked open by another process, fast permanent deletion records its Win32 sharing error without throwing and leaves its parent folder intact.", () =>
+        {
+            string root = Fixtures.TempFolder("fast-delete-locked");
+            string folder = Path.Combine(root, "work");
+            string locked = Fixtures.Write(folder, "busy.bin", "locked");
+            Fixtures.Write(folder, "free.txt", "removable");
+
+            FastDeleteResult result;
+            using (var stream = new FileStream(locked, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                result = FastPermanentDelete.Delete([folder], isCloudPath: null, isCancelled: () => false);
+            }
+            Check.Equal(1, result.Failures.Count, "locked file should be reported");
+            Check.Equal(32, result.Failures[0].Win32Error, "expected ERROR_SHARING_VIOLATION (32)");
+            Check.That(File.Exists(locked) && Directory.Exists(folder), "locked file and parent must stay");
+            Check.That(!File.Exists(Path.Combine(folder, "free.txt")), "unlocked sibling should be removed");
+        });
+
+        yield return ("fast_permanent_delete_preserves_trailing_dot_siblings_readonly_on_failure_and_nested_cloud_roots", "Fast permanent deletion preserves trailing-dot paths without touching siblings or handing them to shell normalization, restores ReadOnly attributes if deletion fails, defers nested cloud roots, and never escalates non-empty deferred parents.", () =>
+        {
+            string root = Fixtures.TempFolder("fast-delete-safety");
+            string sibling = Fixtures.Write(root, "notes", "keep sibling");
+            string trailingDot = Path.Combine(root, "notes.");
+            Check.That(FastPermanentDelete.TryToExtendedPath(trailingDot, out string extTrailing) && extTrailing.EndsWith("notes.", StringComparison.Ordinal), "extended path must preserve trailing dot");
+            Check.That(FastPermanentDelete.HasTrailingDotOrSpaceSegment(trailingDot), "trailing dot segment must be detected");
+            Check.That(FastPermanentDelete.HasTrailingDotOrSpaceSegment(@"C:\Work\dir \child.txt"), "trailing space parent segment must be detected");
+            Check.That(FastPermanentDelete.HasTrailingDotOrSpaceSegment(@"\\server\share\notes."), "UNC trailing dot segment must be detected");
+            Check.That(!FastPermanentDelete.HasTrailingDotOrSpaceSegment(@"C:\Work\notes.txt"), "normal path must not be flagged");
+            Check.That(!FastPermanentDelete.ExistsExact(trailingDot) && FastPermanentDelete.ExistsExact(sibling), "ExistsExact must distinguish trailing-dot path from sibling");
+
+            FastDeleteResult dotResult = FastPermanentDelete.Delete([trailingDot], isCloudPath: null, isCancelled: () => false);
+            Check.Equal(0, dotResult.Failures.Count, "missing trailing-dot target should not fail");
+            Check.Equal(0, dotResult.FallbackToShell.Count, "missing trailing-dot target must not defer to shell");
+            Check.That(File.Exists(sibling), "sibling without trailing dot must never be deleted");
+
+            // Even when matched by isCloudPath, a trailing-dot path must never be handed to SHParseDisplayName.
+            FastDeleteResult cloudDotResult = FastPermanentDelete.Delete([trailingDot], isCloudPath: _ => true, isCancelled: () => false);
+            Check.Equal(0, cloudDotResult.FallbackToShell.Count, "trailing-dot path must never be added to shell fallback");
+            Check.Equal(1, cloudDotResult.Failures.Count, "trailing-dot path deferred by cloud filter must record a failure");
+
+            // A read-only locked file must keep its ReadOnly attribute when deletion fails.
+            string lockedReadOnly = Fixtures.Write(root, "ro-locked.txt", "protected");
+            File.SetAttributes(lockedReadOnly, FileAttributes.ReadOnly);
+            using (var stream = new FileStream(lockedReadOnly, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                FastDeleteResult roResult = FastPermanentDelete.Delete([lockedReadOnly], isCloudPath: null, isCancelled: () => false);
+                Check.Equal(1, roResult.Failures.Count, "locked read-only file should fail");
+            }
+            Check.That((File.GetAttributes(lockedReadOnly) & FileAttributes.ReadOnly) != 0, "ReadOnly attribute must be restored on failed delete");
+            File.SetAttributes(lockedReadOnly, FileAttributes.Normal);
+
+            // A nested cloud sync root inside a regular parent must defer to IFileOperation.
+            string parent = Path.Combine(root, "sync-parent");
+            string nestedCloud = Path.Combine(parent, "GoogleDriveMirror");
+            string nestedCloudFile = Fixtures.Write(nestedCloud, "cloud.txt", "stay");
+            FastDeleteResult cloudResult = FastPermanentDelete.Delete(
+                [parent],
+                isCloudPath: p => PathTools.IsSameOrInside(p, nestedCloud),
+                isCancelled: () => false);
+            Check.Sequence([nestedCloud], cloudResult.FallbackToShell, "nested cloud root must defer to shell");
+            Check.Sequence([parent], cloudResult.DeferredParents, "parent of deferred cloud root must be recorded");
+            Check.That(File.Exists(nestedCloudFile), "nested cloud root contents must not be deleted directly");
+
+            // Non-empty deferred parents must never escalate to shell elevation and must report ERROR_DIR_NOT_EMPTY when no prior failures exist.
+            var (elevNoPrior, failNoPrior) = FastPermanentDelete.TryRemoveEmptyDirectories([parent], priorFailuresExist: false);
+            Check.Equal(0, elevNoPrior.Count, "non-empty parent must not be queued for shell elevation");
+            Check.Equal(1, failNoPrior.Count, "non-empty parent without prior failure must report error");
+            Check.Equal(145, failNoPrior[0].Win32Error, "expected ERROR_DIR_NOT_EMPTY (145)");
+
+            var (elevWithPrior, failWithPrior) = FastPermanentDelete.TryRemoveEmptyDirectories([parent], priorFailuresExist: true);
+            Check.Equal(0, elevWithPrior.Count, "non-empty parent with prior failure must not escalate");
+            Check.Equal(0, failWithPrior.Count, "duplicate ERROR_DIR_NOT_EMPTY should be suppressed when prior failure exists");
+        });
     }
 
     private static FileEntry Entry(string name, EntryKind kind, long size) => new()

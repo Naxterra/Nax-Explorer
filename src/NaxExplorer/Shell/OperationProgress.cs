@@ -43,7 +43,11 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     private readonly Dictionary<string, PendingTransfer> _pendingTransferElevation = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _targetExistedBefore = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _cancel;
+    private volatile bool _hasPendingDeleteElevation;
+    private volatile bool _hasPendingTransferElevation;
+    private bool _batchMove;
     private bool _batchRenameOnCollision;
+    private long _lastStepReport;
 
     /// <summary>Raised on the operation's thread with the share done, from 0 to 1, and the current item's name.</summary>
     public event Action<double, string?>? Changed;
@@ -66,20 +70,43 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     /// <summary>The batches of one request run one after another; each covers its own part of the whole bar.</summary>
     public void BeginBatch(int index, int count, bool move = false, bool renameOnCollision = false)
     {
-        _ = move;
         _batchStart = count == 0 ? 0 : (double)index / count;
         _batchSize = count == 0 ? 1 : 1.0 / count;
+        _batchMove = move;
         _batchRenameOnCollision = renameOnCollision;
         lock (_failures) _targetExistedBefore.Clear();
     }
 
+    internal void Report(double share, string? current)
+    {
+        _share = share;
+        if (current is not null) _current = current;
+        Changed?.Invoke(_share, _current);
+    }
+
+    internal void AddFailure(string name, string message)
+    {
+        lock (_failures) _failures.Add(new OperationFailure(name, message));
+    }
+
+    internal static int HResultFromWin32(int win32Error) => unchecked((int)(0x80070000u | ((uint)win32Error & 0xFFFFu)));
+
     private double _batchStart;
     private double _batchSize = 1;
 
-    private int Step(IShellItem? item)
+    private int Step(IShellItem? item, bool force = false)
     {
-        if (item is not null) _current = NameOf(item);
-        Changed?.Invoke(_share, _current);
+        Action<double, string?>? handler = Changed;
+        if (handler is not null)
+        {
+            long now = Environment.TickCount64;
+            if (force || _lastStepReport == 0 || now - _lastStepReport >= 100)
+            {
+                _lastStepReport = now;
+                if (item is not null) _current = NameOf(item);
+                handler(_share, _current);
+            }
+        }
         return _cancel ? Cancelled : 0;
     }
 
@@ -221,19 +248,32 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     {
         if (result == RequiresElevation && NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */) is { } path)
         {
-            lock (_failures) _pendingDeleteElevation.TryAdd(path, new OperationFailure(NameOf(item) ?? path, DescribeShellFailure(result)));
+            lock (_failures)
+            {
+                _pendingDeleteElevation.TryAdd(path, new OperationFailure(NameOf(item) ?? path, DescribeShellFailure(result)));
+                _hasPendingDeleteElevation = true;
+            }
             return _cancel ? Cancelled : 0;
         }
-        if (result >= 0 && NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */) is { } okPath)
+        if (result >= 0)
         {
-            lock (_failures) _pendingDeleteElevation.Remove(okPath);
+            if (_hasPendingDeleteElevation && NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */) is { } okPath)
+            {
+                lock (_failures)
+                {
+                    _pendingDeleteElevation.Remove(okPath);
+                    _hasPendingDeleteElevation = _pendingDeleteElevation.Count > 0;
+                }
+            }
+            return _cancel ? Cancelled : 0;
         }
         return After(item, result);
     }
 
     private int BeforeTransfer(IShellItem item, IShellItem destination, string? newName)
     {
-        if (NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */) is { } sourcePath
+        // Only copies need to remember whether the target pre-existed (moves confirm via source disappearance).
+        if (!_batchMove && NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */) is { } sourcePath
             && ExpectedTargetOf(sourcePath, destination, newName) is { } expectedTarget)
         {
             lock (_failures) _targetExistedBefore.TryAdd(sourcePath, Path.Exists(expectedTarget));
@@ -252,6 +292,10 @@ internal sealed class OperationProgress : IFileOperationProgressSink
 
     private int AfterTransfer(IShellItem item, IShellItem destination, string? newName, int result, IShellItem? created, bool isMove)
     {
+        if (result >= 0 && !_hasPendingTransferElevation && _batchMove)
+        {
+            return _cancel ? Cancelled : 0;
+        }
         string? sourcePath = NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */);
         if (result == RequiresElevation && sourcePath is not null)
         {
@@ -264,12 +308,25 @@ internal sealed class OperationProgress : IFileOperationProgressSink
                 _pendingTransferElevation.TryAdd(sourcePath,
                     new PendingTransfer(expectedTarget, isMove, existedBefore, _batchRenameOnCollision,
                         new OperationFailure(NameOf(item) ?? sourcePath, DescribeShellFailure(result))));
+                _hasPendingTransferElevation = true;
             }
             return _cancel ? Cancelled : 0;
         }
-        if (result >= 0 && sourcePath is not null)
+        if (sourcePath is not null && !_batchMove)
         {
-            lock (_failures) _pendingTransferElevation.Remove(sourcePath);
+            lock (_failures) _targetExistedBefore.Remove(sourcePath);
+        }
+        if (result >= 0)
+        {
+            if (_hasPendingTransferElevation && sourcePath is not null)
+            {
+                lock (_failures)
+                {
+                    _pendingTransferElevation.Remove(sourcePath);
+                    _hasPendingTransferElevation = _pendingTransferElevation.Count > 0;
+                }
+            }
+            return _cancel ? Cancelled : 0;
         }
         // For COPYENGINE_E_SHARING_VIOLATION_DEST during copy/move, query Restart Manager on the destination file.
         string? lockingPath = result == unchecked((int)0x80270028) && sourcePath is not null
@@ -282,16 +339,25 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     {
         if (_cancel)
         {
-            lock (_failures) _pendingDeleteElevation.Clear();
+            lock (_failures)
+            {
+                _pendingDeleteElevation.Clear();
+                _hasPendingDeleteElevation = false;
+            }
             return;
         }
+        if (!_hasPendingDeleteElevation) return;
         string[] paths;
         lock (_failures) paths = [.. _pendingDeleteElevation.Keys];
         foreach (string path in paths)
         {
             if (IsConfirmedMissing(path))
             {
-                lock (_failures) _pendingDeleteElevation.Remove(path);
+                lock (_failures)
+                {
+                    _pendingDeleteElevation.Remove(path);
+                    _hasPendingDeleteElevation = _pendingDeleteElevation.Count > 0;
+                }
             }
         }
     }
@@ -300,9 +366,14 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     {
         if (_cancel)
         {
-            lock (_failures) _pendingTransferElevation.Clear();
+            lock (_failures)
+            {
+                _pendingTransferElevation.Clear();
+                _hasPendingTransferElevation = false;
+            }
             return;
         }
+        if (!_hasPendingTransferElevation) return;
         KeyValuePair<string, PendingTransfer>[] pending;
         lock (_failures) pending = [.. _pendingTransferElevation];
         foreach (var (sourcePath, entry) in pending)
@@ -315,7 +386,11 @@ internal sealed class OperationProgress : IFileOperationProgressSink
                 : !entry.ExistedBefore && !entry.RenameOnCollision && entry.ExpectedTarget is not null && Path.Exists(entry.ExpectedTarget);
             if (succeeded)
             {
-                lock (_failures) _pendingTransferElevation.Remove(sourcePath);
+                lock (_failures)
+                {
+                    _pendingTransferElevation.Remove(sourcePath);
+                    _hasPendingTransferElevation = _pendingTransferElevation.Count > 0;
+                }
             }
         }
     }
@@ -357,7 +432,7 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     public int UpdateProgress(uint total, uint done)
     {
         _share = _batchStart + (total == 0 ? 0 : Math.Clamp((double)done / total, 0, 1)) * _batchSize;
-        return Step(null);
+        return Step(null, force: total > 0 && done >= total);
     }
 
     public int ResetTimer() => 0;

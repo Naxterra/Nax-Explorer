@@ -594,9 +594,60 @@ public sealed partial class MainWindow : Window
         RightPane.UpdateCutMarks();
     }
 
+    private static readonly Lock ActiveMutationsGate = new();
+    private static readonly List<string[]> ActiveMutations = [];
+
+    internal static bool OverlapsActiveMutation(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || PathTools.IsShellPlace(path)) return false;
+        lock (ActiveMutationsGate)
+        {
+            foreach (string[] batch in ActiveMutations)
+            {
+                foreach (string target in batch)
+                {
+                    if (PathTools.IsSameOrInside(path, target) || PathTools.IsSameOrInside(target, path)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static string[] BeginActiveMutation(IReadOnlyList<string> paths)
+    {
+        string[] tracked = paths.Where(p => !string.IsNullOrWhiteSpace(p) && !PathTools.IsShellPlace(p)).ToArray();
+        if (tracked.Length == 0) return tracked;
+        lock (ActiveMutationsGate) ActiveMutations.Add(tracked);
+        foreach (MainWindow window in App.Instance!.Windows)
+        {
+            window.LeftPane.CancelFolderSizesFor(tracked);
+            window.RightPane.CancelFolderSizesFor(tracked);
+            if (OverlapsActiveMutation(window._active.PreviewLocation)
+                || window._active.SelectedItems.Any(i => OverlapsActiveMutation(i.Entry.FullPath)))
+            {
+                window._previewTimer.Stop();
+                window.Preview.StopBackgroundWork();
+            }
+        }
+        return tracked;
+    }
+
+    private static void EndActiveMutation(string[] tracked)
+    {
+        if (tracked.Length == 0) return;
+        lock (ActiveMutationsGate) ActiveMutations.Remove(tracked);
+        foreach (MainWindow window in App.Instance!.Windows)
+        {
+            window.LeftPane.ResumeFolderSizesAfterMutation();
+            window.RightPane.ResumeFolderSizesAfterMutation();
+            window._previewTimer.Restart();
+        }
+    }
+
     private void UpdatePreview()
     {
         if (!Settings.ShowPreview || _active.IsSelectingWithMouse || LeftPane.IsDraggingItems || RightPane.IsDraggingItems || IsViewerOpen) return;
+        if (OverlapsActiveMutation(_active.PreviewLocation) || _active.SelectedItems.Any(i => OverlapsActiveMutation(i.Entry.FullPath))) return;
         _previewFolder = _active.PreviewLocation;
         Preview.Show(_active.SelectedItems, _previewFolder);
     }
@@ -1507,25 +1558,33 @@ public sealed partial class MainWindow : Window
         }
         if (batches.Count == 0) return true;
         string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
-        bool completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
-        // The target and the folders above it grew, and an item of the same name there may have been replaced. Moved
-        // items are gone from where they were, with everything inside them. The target's other folders are unchanged.
-        ForgetFolderSizes(new[] { target }, withContents: false);
-        ForgetFolderSizes(paths.Select(p => Path.GetFileName(p.TrimEnd('\\'))).Where(n => n.Length > 0).Select(n => Path.Combine(target, n)), withContents: true);
-        if (move) ForgetFolderSizes(paths, withContents: true);
-        RefreshPanesShowing(target);
-        if (move)
+        string[] mutation = move ? BeginActiveMutation(paths) : [];
+        bool completed;
+        try
         {
-            foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
-            foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+            completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
+        }
+        finally
+        {
+            // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
+            ForgetFolderSizes(new[] { target }, withContents: false);
+            ForgetFolderSizes(paths.Select(p => Path.GetFileName(p.TrimEnd('\\'))).Where(n => n.Length > 0).Select(n => Path.Combine(target, n)), withContents: true);
+            if (move) ForgetFolderSizes(paths, withContents: true);
+            RefreshPanesShowing(target);
+            if (move)
             {
-                ForgetFolderSizes(new[] { archive }, withContents: false);
-                // ZIP namespace views have no filesystem watcher. A move changes their listings and archive metadata.
-                foreach (MainWindow window in App.Instance!.Windows)
-                    foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
-                        if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
-                if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+                foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+                foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    ForgetFolderSizes(new[] { archive }, withContents: false);
+                    // ZIP namespace views have no filesystem watcher. A move changes their listings and archive metadata.
+                    foreach (MainWindow window in App.Instance!.Windows)
+                        foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                            if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+                    if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+                }
             }
+            EndActiveMutation(mutation);
         }
         return completed;
     }
@@ -1547,17 +1606,27 @@ public sealed partial class MainWindow : Window
             permanently = true;
         }
         string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
-        bool completed = await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what),
-            progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress));
-        ForgetFolderSizes(paths, withContents: true);
-        foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
-        foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        string[] mutation = BeginActiveMutation(paths);
+        bool completed;
+        try
         {
-            ForgetFolderSizes(new[] { archive }, withContents: false);
-            foreach (MainWindow window in App.Instance!.Windows)
-                foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
-                    if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
-            if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+            completed = await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what),
+                progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress, CloudRoots.Contains));
+        }
+        finally
+        {
+            // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
+            ForgetFolderSizes(paths, withContents: true);
+            foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+            foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                ForgetFolderSizes(new[] { archive }, withContents: false);
+                foreach (MainWindow window in App.Instance!.Windows)
+                    foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                        if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+                if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+            }
+            EndActiveMutation(mutation);
         }
         return completed;
     }
@@ -1598,6 +1667,11 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
         {
+            error = ex.Message;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            CrashLog.Write(ex);
             error = ex.Message;
         }
         finally

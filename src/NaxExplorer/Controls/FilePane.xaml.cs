@@ -1061,7 +1061,7 @@ public sealed partial class FilePane : UserControl
         }
         foreach (FileItem item in visible)
         {
-            if (item.HasFolderSize || _folderSizeRequests.ContainsKey(item)) continue;
+            if (item.HasFolderSize || _folderSizeRequests.ContainsKey(item) || MainWindow.OverlapsActiveMutation(item.Entry.FullPath)) continue;
             // A folder counted a few minutes ago is not counted again.
             if (FolderSizeCache.Shared.TryGet(item.Entry.FullPath, DateTime.UtcNow, out FolderSizeResult? known))
             {
@@ -1084,6 +1084,25 @@ public sealed partial class FilePane : UserControl
         }
         _folderSizeRequests.Clear();
         _folderSizeRange = (-1, -1);
+    }
+
+    internal void CancelFolderSizesFor(IReadOnlyList<string> paths)
+    {
+        foreach (FileItem item in _folderSizeRequests.Keys.ToArray())
+        {
+            string itemPath = item.Entry.FullPath;
+            if (!paths.Any(p => PathTools.IsSameOrInside(itemPath, p) || PathTools.IsSameOrInside(p, itemPath))) continue;
+            _folderSizeRequests[item].Cancel();
+            _folderSizeRequests.Remove(item);
+            item.SetCountingSize(false);
+        }
+    }
+
+    internal void ResumeFolderSizesAfterMutation()
+    {
+        if (_closed) return;
+        _folderSizeRange = (-1, -1);
+        UpdateVisibleFolderSizes();
     }
 
     /// <param name="startedAt">The cache's stamp before the count started, so a count overtaken by a change, such as a

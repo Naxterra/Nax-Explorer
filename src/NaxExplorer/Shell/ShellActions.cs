@@ -168,21 +168,116 @@ internal static class ShellActions
 
     /// <summary>
     /// Deletes to the Recycle Bin, or permanently with <paramref name="permanently"/>, after the user confirmed it in the
-    /// app. An item that cannot go to the Recycle Bin still brings up Windows' warning first.
+    /// app. Permanent deletion of local filesystem paths uses a fast direct Win32 pass (handling read-only files and
+    /// long paths without traversing junctions or cloud placeholders) and falls back to Windows' IFileOperation for
+    /// Recycle Bin deletes, cloud folders, shell places, and items requiring administrator elevation.
     /// </summary>
-    public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently, OperationProgress progress) => RunOnSta(() =>
+    public static Task DeleteAsync(IReadOnlyList<string> paths, IntPtr owner, bool permanently, OperationProgress progress, Func<string, bool>? isCloudPath = null)
     {
+        if (!permanently)
+        {
+            return RunOnSta(() =>
+            {
+                try
+                {
+                    Perform(owner, Core.OperationFlags.ForDelete(permanently: false), progress, operation =>
+                    {
+                        using var items = ShellItems.Create(paths, requireAll: true);
+                        return items.Array is null ? -1 : operation.DeleteItems(items.Array);
+                    });
+                }
+                finally
+                {
+                    progress.FinishDelete();
+                }
+            });
+        }
+
+        return Task.Run(async () =>
+        {
+            try
+            {
+                Core.FastDeleteResult fast = Core.FastPermanentDelete.Delete(
+                    paths,
+                    isCloudPath,
+                    () => progress.IsCancelled,
+                    name => progress.Report(0, name));
+                foreach (Core.FastDeleteFailure failure in fast.Failures)
+                {
+                    progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path));
+                }
+                if (!progress.IsCancelled && fast.FallbackToShell.Count > 0)
+                {
+                    await DeleteFallbackInShellAsync(fast.FallbackToShell, owner, progress);
+                    // Reconcile any UAC-elevated items that succeeded before checking whether prior failures exist.
+                    progress.FinishDelete();
+                }
+                if (!progress.IsCancelled && fast.DeferredParents.Count > 0)
+                {
+                    var (needsElevation, parentFailures) = Core.FastPermanentDelete.TryRemoveEmptyDirectories(
+                        fast.DeferredParents,
+                        priorFailuresExist: progress.Failures.Count > 0);
+                    foreach (Core.FastDeleteFailure failure in parentFailures)
+                    {
+                        progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path));
+                    }
+                    if (!progress.IsCancelled && needsElevation.Count > 0)
+                    {
+                        await DeleteFallbackInShellAsync(needsElevation, owner, progress);
+                    }
+                }
+            }
+            finally
+            {
+                progress.FinishDelete();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Deletes shell-deferred permanent items individually so one unparseable or vanished path never blocks valid items.
+    /// </summary>
+    private static Task DeleteFallbackInShellAsync(IReadOnlyList<string> paths, IntPtr owner, OperationProgress progress) => RunOnSta(() =>
+    {
+        var parsed = new List<IntPtr>(paths.Count);
         try
         {
-            Perform(owner, Core.OperationFlags.ForDelete(permanently), progress, operation =>
+            foreach (string path in paths)
             {
-                using var items = ShellItems.Create(paths, requireAll: true);
-                return items.Array is null ? -1 : operation.DeleteItems(items.Array);
-            });
+                if (!Core.PathTools.IsShellPlace(path) && Core.FastPermanentDelete.HasTrailingDotOrSpaceSegment(path))
+                {
+                    if (!Core.FastPermanentDelete.ExistsExact(path)) continue;
+                    string unsafeName = Path.GetFileName(path.TrimEnd('\\'));
+                    progress.AddFailure(unsafeName.Length > 0 ? unsafeName : path, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(50), path));
+                    continue;
+                }
+                int hr = Native.SHParseDisplayName(Core.PathTools.ParsingName(path), IntPtr.Zero, out IntPtr pidl, 0, out _);
+                if (hr == 0 && pidl != IntPtr.Zero)
+                {
+                    parsed.Add(pidl);
+                    continue;
+                }
+                // If the item already vanished between passes, treat it as deleted; otherwise report the failure.
+                if (!Core.PathTools.IsShellPlace(path) && !Core.FastPermanentDelete.ExistsExact(path)) continue;
+                string name = Path.GetFileName(path.TrimEnd('\\'));
+                progress.AddFailure(name.Length > 0 ? name : path, OperationProgress.DescribeShellFailure(hr != 0 ? hr : unchecked((int)0x80004005), path));
+            }
+            if (parsed.Count == 0) return;
+            IntPtr[] list = [.. parsed];
+            Marshal.ThrowExceptionForHR(Native.SHCreateShellItemArrayFromIDLists((uint)list.Length, list, out IShellItemArray? array));
+            if (array is null) return;
+            try
+            {
+                Perform(owner, Core.OperationFlags.ForDelete(permanently: true), progress, operation => operation.DeleteItems(array));
+            }
+            finally
+            {
+                Native.Release(array);
+            }
         }
         finally
         {
-            progress.FinishDelete();
+            foreach (IntPtr pidl in parsed) Native.ILFree(pidl);
         }
     });
 
