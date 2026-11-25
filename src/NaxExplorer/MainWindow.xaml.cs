@@ -162,14 +162,28 @@ public sealed partial class MainWindow : Window
         KeyboardHook.Install(App.OnHookedKey);
     }
 
-    /// <summary>F7 from the keyboard hook: copy to the other pane, unless a text box or the viewer has the focus.</summary>
+    /// <summary>F7 from the keyboard hook: copy to the other pane, unless a modal dialog, text box, or the viewer has the focus.</summary>
     internal bool HandleHookedKey(int virtualKey)
     {
-        if (virtualKey != 0x76 || Viewer.Visibility == Visibility.Visible || Root.XamlRoot is null) return false;
+        if (virtualKey != 0x76 || Viewer.Visibility == Visibility.Visible || Root.XamlRoot is null || HasOpenDialog()) return false;
         if (FocusManager.GetFocusedElement(Root.XamlRoot) is TextBox or AutoSuggestBox or PasswordBox) return false;
         if (Native.IsKeyDown(0x11) || Native.IsKeyDown(0x12)) return false;
         DispatcherQueue.SafeEnqueue(() => _active.TransferToOtherPane(move: false));
         return true;
+    }
+
+    private bool HasOpenDialog()
+    {
+        if (_settingsOpen || Root.XamlRoot is null) return _settingsOpen;
+        foreach (var popup in VisualTreeHelper.GetOpenPopupsForXamlRoot(Root.XamlRoot))
+        {
+            if (popup.Child is ContentDialog) return true;
+        }
+        for (var node = FocusManager.GetFocusedElement(Root.XamlRoot) as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
+        {
+            if (node is ContentDialog) return true;
+        }
+        return false;
     }
 
     internal IntPtr Hwnd { get; }

@@ -153,7 +153,7 @@ public sealed partial class PreviewPanel : UserControl
         PictureArea.Visibility = Visibility.Visible;
         SetPicture(item.Icon);
         Actions.Visibility = Visibility.Visible;
-        bool picture = entry.Kind == EntryKind.File && FileTypes.IsViewerImage(entry.Extension);
+        bool picture = entry.Kind == EntryKind.File && !PathTools.IsShellPlace(entry.FullPath) && FileTypes.IsViewerImage(entry.Extension);
         ViewButton.Visibility = picture ? Visibility.Visible : Visibility.Collapsed;
         OpenButton.Content = entry.IsContainer ? Loc.T("OpenFolder") : Loc.T("Open");
 
@@ -232,8 +232,27 @@ public sealed partial class PreviewPanel : UserControl
 
     private async Task<bool> ShowFolderContentsAsync(string path, int version, CancellationToken token)
     {
-        // Recheck the live attributes before enumerating, including on a totals-only refresh.
-        bool unfetched = await Task.Run(() => CloudFiles.IsUnfetchedFolder(path), token);
+        // Network folders are counted only on explicit request, never automatically on selection.
+        if (FolderStats.IsNetworkPath(path))
+        {
+            SetDetailVisible("DetailContains", false);
+            SetDetailVisible("DetailNote", false);
+            return true;
+        }
+        // Recheck live attributes before enumerating, skipping both unfetched cloud folders and links (which could
+        // point to an unfetched cloud folder or create a traversal loop).
+        (bool readable, bool unfetched, bool canEnter) = await Task.Run(() =>
+        {
+            try
+            {
+                FileAttributes attrs = File.GetAttributes(path);
+                return (true, CloudFiles.IsUnfetchedFolder(attrs), CloudFiles.CanEnterFolder(path, attrs));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return (false, false, false);
+            }
+        }, token);
         if (version != _version) return false;
         if (unfetched)
         {
@@ -242,7 +261,18 @@ public sealed partial class PreviewPanel : UserControl
             foreach (string key in new[] { "DetailContains", "DetailTotal", "DetailSize", "DetailOnlineOnly" }) SetDetailVisible(key, false);
             return false;
         }
-        (int folders, int files, bool more) = await Task.Run(() => Count(path), token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : (0, 0, false), TaskScheduler.Default);
+        if (!readable)
+        {
+            SetDetailVisible("DetailContains", false);
+            return false;
+        }
+        if (!canEnter)
+        {
+            SetDetailVisible("DetailContains", false);
+            SetDetailVisible("DetailNote", false);
+            return true;
+        }
+        (int folders, int files, bool more) = await Task.Run(() => Count(path, token), token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : (0, 0, false), TaskScheduler.Default);
         if (version != _version) return false;
         ExistingOrAddDetail("DetailContains", "").Text = Loc.F(more ? "ContainsMore" : "Contains", folders, files);
         SetDetailVisible("DetailContains", true);
@@ -407,12 +437,17 @@ public sealed partial class PreviewPanel : UserControl
         return TextExtractor.Extract(path, TextChars, token: token);
     }
 
-    private static (int Folders, int Files, bool More) Count(string folder)
+    private static (int Folders, int Files, bool More) Count(string folder, CancellationToken token)
     {
         int folders = 0, files = 0;
-        foreach (string entry in Directory.EnumerateFileSystemEntries(folder, "*", new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = FileAttributes.Hidden | FileAttributes.System }))
+        var entries = new System.IO.Enumeration.FileSystemEnumerable<bool>(
+            folder,
+            (ref System.IO.Enumeration.FileSystemEntry entry) => entry.IsDirectory,
+            new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = FileAttributes.Hidden | FileAttributes.System });
+        foreach (bool isDirectory in entries)
         {
-            if (Directory.Exists(entry)) folders++;
+            token.ThrowIfCancellationRequested();
+            if (isDirectory) folders++;
             else files++;
             if (folders + files >= 10_000) return (folders, files, true);
         }
@@ -458,6 +493,6 @@ public sealed partial class PreviewPanel : UserControl
 
     private void PictureArea_Tapped(object sender, TappedRoutedEventArgs e)
     {
-        if (_item is { Entry.Kind: EntryKind.File } item && FileTypes.IsViewerImage(item.Entry.Extension)) _owner.ActivePane.ShowInViewer(item);
+        if (_item is { Entry.Kind: EntryKind.File } item && !PathTools.IsShellPlace(item.Entry.FullPath) && FileTypes.IsViewerImage(item.Entry.Extension)) _owner.ActivePane.ShowInViewer(item);
     }
 }

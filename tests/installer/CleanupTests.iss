@@ -38,6 +38,7 @@ procedure Seed(const Folder: String);
 begin
   Put(Folder + '\settings.json', 'settings');
   Put(Folder + '\settings.json.tmp', 'incomplete settings');
+  Put(Folder + '\settings.json.12345.0123456789abcdef0123456789abcdef.tmp', 'atomic settings temp');
   Put(Folder + '\crash.log', 'crash');
   Put(Folder + '\handoff.txt', 'handoff');
   Put(Folder + '\shellwindow-trace.log', 'legacy trace');
@@ -64,6 +65,7 @@ begin
   Seed(Folder);
   CleanupAppData(Folder, False);
   Check(not FileExists(Folder + '\settings.json') and not FileExists(Folder + '\settings.json.tmp') and
+    not FileExists(Folder + '\settings.json.12345.0123456789abcdef0123456789abcdef.tmp') and
     not FileExists(Folder + '\crash.log') and not FileExists(Folder + '\handoff.txt') and
     not FileExists(Folder + '\shellwindow-trace.log'), 'keep_ai_data_still_removes_settings_and_all_owned_logs');
   Check((Contents(Folder + '\index\index.db') = 'index bytes') and

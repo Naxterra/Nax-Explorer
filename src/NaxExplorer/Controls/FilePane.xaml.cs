@@ -1754,7 +1754,7 @@ public sealed partial class FilePane : UserControl
         if (e.Handled || _owner.IsViewerOpen) return;
         if (KeyIsInsideEditor(e.OriginalSource as DependencyObject, sender as DependencyObject)) return;
         if (e.Key != VirtualKey.Space || Native.IsKeyDown(0x11) || _typed.Length > 0 && DateTime.UtcNow - _typedAt < TimeSpan.FromSeconds(1)) return;
-        if (SelectedItems is [{ Entry.Kind: EntryKind.File } item] && FileTypes.IsViewerImage(item.Entry.Extension))
+        if (SelectedItems is [{ Entry.Kind: EntryKind.File } item] && !PathTools.IsShellPlace(item.Entry.FullPath) && FileTypes.IsViewerImage(item.Entry.Extension))
         {
             ShowInViewer(item);
             e.Handled = true;
@@ -1835,7 +1835,8 @@ public sealed partial class FilePane : UserControl
 
     internal void ShowInViewer(FileItem item)
     {
-        List<string> pictures = _items.Where(i => i.Entry.Kind == EntryKind.File && FileTypes.IsViewerImage(i.Entry.Extension)).Select(i => i.Entry.FullPath).ToList();
+        if (PathTools.IsShellPlace(item.Entry.FullPath)) return;
+        List<string> pictures = _items.Where(i => i.Entry.Kind == EntryKind.File && !PathTools.IsShellPlace(i.Entry.FullPath) && FileTypes.IsViewerImage(i.Entry.Extension)).Select(i => i.Entry.FullPath).ToList();
         int index = pictures.FindIndex(p => string.Equals(p, item.Entry.FullPath, StringComparison.OrdinalIgnoreCase));
         if (index < 0) return;
         _owner.ShowViewer(pictures, index, this);
@@ -2396,7 +2397,7 @@ public sealed partial class FilePane : UserControl
         var menu = new MenuFlyout();
         bool container = item.Entry.IsContainer;
         bool drive = item.Entry.Kind == EntryKind.Drive;
-        bool picture = !container && FileTypes.IsViewerImage(item.Entry.Extension);
+        bool picture = !container && !PathTools.IsShellPlace(item.Entry.FullPath) && FileTypes.IsViewerImage(item.Entry.Extension);
         bool several = SelectedItems.Count > 1;
         var open = Item("Open", "", OpenSelected, "Enter");
         open.FontWeight = FontWeights.SemiBold;
@@ -2428,7 +2429,7 @@ public sealed partial class FilePane : UserControl
                 menu.Items.Add(Item(onePane ? "MoveToFolder" : "MoveToOther", "", () => TransferToOtherPane(true), "F8", otherFolder));
                 menu.Items.Add(new MenuFlyoutSeparator());
             }
-            menu.Items.Add(Item("Delete", "", () => Delete(permanently: false), "Del"));
+            menu.Items.Add(Item("Delete", "", () => Delete(permanently: Native.IsKeyDown(0x10)), "Del"));
             menu.Items.Add(Tagged(Item("Properties", "", ShowProperties, "Alt+Enter"), ShellMenuMerge.PropertiesTag));
             return menu;
         }
@@ -2450,7 +2451,7 @@ public sealed partial class FilePane : UserControl
             menu.Items.Add(Item(onePane ? "MoveToFolder" : "MoveToOther","", () => TransferToOtherPane(move: true), "F8", otherFolder));
             menu.Items.Add(new MenuFlyoutSeparator());
             menu.Items.Add(Item("Rename", "", BeginRename, "F2", !several));
-            menu.Items.Add(Item("Delete", "", () => Delete(permanently: false), "Del"));
+            menu.Items.Add(Item("Delete", "", () => Delete(permanently: Native.IsKeyDown(0x10)), "Del"));
         }
         if (container && !several)
         {
@@ -3001,7 +3002,9 @@ public sealed partial class FilePane : UserControl
             if (expanded.Length < 2 || !Path.IsPathFullyQualified(expanded)) return [];
             string parent = expanded.EndsWith('\\') ? expanded : Path.GetDirectoryName(expanded) ?? "";
             string prefix = expanded.EndsWith('\\') ? "" : Path.GetFileName(expanded);
-            if (!Directory.Exists(parent)) return [];
+            if (string.IsNullOrEmpty(parent) || FolderStats.IsNetworkPath(parent)) return [];
+            FileAttributes parentAttrs = File.GetAttributes(parent);
+            if ((parentAttrs & FileAttributes.Directory) == 0 || !CloudFiles.CanEnterFolder(parent, parentAttrs)) return [];
             return new DirectoryInfo(parent).EnumerateDirectories(prefix + "*", new EnumerationOptions { IgnoreInaccessible = true, AttributesToSkip = FileAttributes.Hidden | FileAttributes.System })
                 .Take(15).Select(d => d.FullName).ToList();
         }

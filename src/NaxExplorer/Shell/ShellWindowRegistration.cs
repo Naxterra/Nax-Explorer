@@ -434,6 +434,37 @@ internal sealed class ShellWindowRegistration : IDisposable
     public void Navigated(string location)
     {
         if (_failed) return;
+        if (Core.FolderStats.IsNetworkPath(location))
+        {
+            // Resolving a UNC PIDL can block the UI thread until an offline share times out; revoke any stale local registration instead.
+            if (_windows is not null)
+            {
+                try
+                {
+                    if (_fromPath.Cookie != 0)
+                    {
+                        _windows.Revoke(_fromPath.Cookie);
+                        _fromPath.Cookie = 0;
+                    }
+                    if (_parsed.Cookie != 0)
+                    {
+                        _windows.Revoke(_parsed.Cookie);
+                        _parsed.Cookie = 0;
+                    }
+                }
+                catch (Exception ex) when (ex is COMException or InvalidCastException or ArgumentException)
+                {
+                    Fail(ex);
+                }
+            }
+            if (_pidl != IntPtr.Zero)
+            {
+                Native.ILFree(_pidl);
+                _pidl = IntPtr.Zero;
+                _host.FolderPidl = IntPtr.Zero;
+            }
+            return;
+        }
         string parsing = Core.PathTools.IsThisPc(location) ? "::" + Core.ShellPlaces.ThisPcClsid : location;
         if (Native.SHParseDisplayName(parsing, IntPtr.Zero, out IntPtr pidl, 0, out _) != 0 || pidl == IntPtr.Zero) return;
         try

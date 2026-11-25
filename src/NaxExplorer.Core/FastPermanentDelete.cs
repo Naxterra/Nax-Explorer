@@ -580,7 +580,7 @@ public static class FastPermanentDelete
                 if (!pendingElevation.Contains(childPath)) return true;
             }
             while (FindNextFileW(handle, out data));
-            return false;
+            return Marshal.GetLastWin32Error() != ErrorNoMoreFiles;
         }
         finally
         {

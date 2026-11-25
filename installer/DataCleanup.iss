@@ -12,11 +12,27 @@ begin
     end;
 end;
 
+procedure DeleteSettingsTempFiles(const Folder: String);
+var
+  Find: TFindRec;
+begin
+  if FindFirst(Folder + '\settings.json.*.tmp', Find) then
+  try
+    repeat
+      if (Find.Attributes and (FILE_ATTRIBUTE_DIRECTORY or FILE_ATTRIBUTE_REPARSE_POINT)) = 0 then
+        DeleteFile(Folder + '\' + Find.Name);
+    until not FindNext(Find);
+  finally
+    FindClose(Find);
+  end;
+end;
+
 procedure CleanupAppData(const Folder: String; const RemoveAiData: Boolean);
 begin
   // Only files owned by the app are removed. In particular, include the trace produced by earlier builds.
   DeleteFile(Folder + '\settings.json');
   DeleteFile(Folder + '\settings.json.tmp');
+  DeleteSettingsTempFiles(Folder);
   DeleteFile(Folder + '\crash.log');
   DeleteFile(Folder + '\handoff.txt');
   DeleteFile(Folder + '\shellwindow-trace.log');
