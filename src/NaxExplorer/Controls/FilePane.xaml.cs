@@ -83,7 +83,7 @@ public sealed partial class FilePane : UserControl
         CancelSearch();
         StopWatcher();
         EndMarquee();
-        CancelMouseFileDrag();
+        ResetItemGesture();
     }
 
     private static void CancelOnly(ref CancellationTokenSource? cts)
@@ -130,10 +130,11 @@ public sealed partial class FilePane : UserControl
         ContentArea.AddHandler(PointerPressedEvent, new PointerEventHandler(Marquee_PointerPressed), handledEventsToo: true);
         ContentArea.AddHandler(PointerMovedEvent, new PointerEventHandler(Marquee_PointerMoved), handledEventsToo: true);
         ContentArea.AddHandler(PointerReleasedEvent, new PointerEventHandler(Marquee_PointerReleased), handledEventsToo: true);
-        ContentArea.PointerCanceled += (_, e) =>
+        ContentArea.AddHandler(PointerCanceledEvent, new PointerEventHandler((_, e) =>
         {
-            if (ReferenceEquals(e.OriginalSource, ContentArea)) { EndMarquee(); CancelMouseFileDrag(); }
-        };
+            if (ReferenceEquals(e.OriginalSource, ContentArea)) EndMarquee();
+            ResetItemGesture();
+        }), handledEventsToo: true);
         ContentArea.PointerCaptureLost += (_, e) =>
         {
             // Taking capture from a child also raises its lost event through this parent.
@@ -142,7 +143,6 @@ public sealed partial class FilePane : UserControl
             {
                 _selectionTrace?.Record("capture-lost", Stopwatch.GetTimestamp());
                 EndMarquee();
-                CancelMouseFileDrag();
             }
         };
     }
@@ -670,6 +670,7 @@ public sealed partial class FilePane : UserControl
     private void BindList()
     {
         EndMarquee();
+        ResetItemGesture();
         CancelFolderSizes();
         _headerRowWidth = -1;
         bool thisPc = PathTools.IsThisPc(_tab.Location) && _tab.Search is null;
@@ -1298,11 +1299,7 @@ public sealed partial class FilePane : UserControl
     private bool _marqueeClearPending;
     private readonly SelectionGesture _itemGesture = new();
     private ListViewBase? _itemGestureList;
-    private DependencyObject? _itemPressedSource;
     private SelectorItem? _itemPressedRow;
-    private FileDragSession? _mouseFileDrag;
-    private Windows.Foundation.Point _mouseFileDragPoint;
-    private DispatcherTimer? _fileDragTimer;
     private string[]? _nativeDragPaths;
     internal bool IsDraggingItems { get; private set; }
     private bool _refreshAfterSelection;
@@ -1334,36 +1331,33 @@ public sealed partial class FilePane : UserControl
     /// <summary>A left press on the empty part of the list starts a selection box, as in Explorer.</summary>
     private void Marquee_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        if (IsDraggingItems) return;
+        // A previous pending click may have lost its child capture outside the
+        // window. Retire it before classifying this press, including touch/pen input.
+        EndMarquee();
+        ResetItemGesture();
         if (e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
         ListViewBase list = CurrentList;
         PointerPoint point = e.GetCurrentPoint(ContentArea);
         if (!point.Properties.IsLeftButtonPressed) return;
-        // A previous pending click may have lost its child capture outside the
-        // window. Retire it before classifying this press, including a name drag.
-        EndMarquee();
-        CancelMouseFileDrag();
         bool nativeRow = OnRowOrScrollBar(e.OriginalSource as DependencyObject, list, point.Position);
         if (InteractionTrace.Enabled)
             InteractionTrace.Record("mouse-press", data: new { X = point.Position.X, Y = point.Position.Y, NativeRow = nativeRow, Source = e.OriginalSource?.GetType().Name });
         if (nativeRow)
         {
-            if (_owner.Settings.DualPane)
+            for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
             {
-                for (var node = e.OriginalSource as DependencyObject; node is not null && node != list; node = VisualTreeHelper.GetParent(node))
+                if (node is TextBox or ButtonBase) break;
+                if (node is SelectorItem { Content: FileItem item } row)
                 {
-                    if (node is TextBox or ButtonBase) break;
-                    if (node is SelectorItem { Content: FileItem item } row)
+                    if (item.Entry.Kind != EntryKind.Drive && !item.IsRenaming && (!PathTools.IsShellPlace(item.Entry.FullPath) || CompressedFolders.IsEntry(item.Entry.FullPath)))
                     {
-                        if (item.Entry.Kind != EntryKind.Drive && !item.IsRenaming && (!PathTools.IsShellPlace(item.Entry.FullPath) || CompressedFolders.IsEntry(item.Entry.FullPath)))
-                        {
-                            _itemGesture.Press(point.Position.X, point.Position.Y);
-                            _itemGestureList = list;
-                            _itemPressedSource = e.OriginalSource as DependencyObject;
-                            _itemPressedRow = row;
-                            list.CanDragItems = false;
-                        }
-                        break;
+                        _itemGesture.Press(point.Position.X, point.Position.Y);
+                        _itemGestureList = list;
+                        _itemPressedRow = row;
+                        list.CanDragItems = false;
                     }
+                    break;
                 }
             }
             return;
@@ -1416,7 +1410,8 @@ public sealed partial class FilePane : UserControl
 
     private void Marquee_PointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_itemGestureList is not null) { MoveMouseFileDrag(e); return; }
+        if (IsDraggingItems) return;
+        if (_itemGestureList is not null) { MoveItemDrag(e); return; }
         if (_marqueeStart is null || _marqueeList is null) return;
         _selectionTrace?.Input();
         long inputStart = Stopwatch.GetTimestamp();
@@ -1629,7 +1624,8 @@ public sealed partial class FilePane : UserControl
 
     private void Marquee_PointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        if (_itemGestureList is not null) { ReleaseMouseFileDrag(e); return; }
+        if (IsDraggingItems) return;
+        if (_itemGestureList is not null) { ResetItemGesture(); return; }
         if (_marqueeStart is null) return;
         bool dragged = _marqueeGesture.Dragging;
         if (dragged)
@@ -1696,12 +1692,13 @@ public sealed partial class FilePane : UserControl
             if (node is SelectorItem item)
             {
                 if (list != List || item.ContentTemplateRoot is not Grid row) return true;
-                // As in Explorer, a file is dragged by its icon and its name. The blank space after the name and the
-                // other columns start a selection box when dragged, and select the row when clicked.
+                // As in Explorer, an unselected file is dragged by its icon and its name so blank space starts a selection
+                // box. Once a row is already selected, the full icon and Name column can grab the selection without losing it.
                 var name = row.Children.OfType<TextBlock>().FirstOrDefault(child => Grid.GetColumn(child) == 1);
                 if (name is null || name.Visibility != Visibility.Visible) return true;
                 double textLeft = name.TransformToVisual(ContentArea).TransformPoint(new(0, 0)).X;
-                return point.X <= textLeft + Math.Min(name.ActualWidth, name.DesiredSize.Width) + 8;
+                double limit = item.IsSelected ? name.ActualWidth : Math.Min(name.ActualWidth, name.DesiredSize.Width) + 8;
+                return point.X <= textLeft + limit;
             }
         }
         return false;
@@ -2526,140 +2523,70 @@ public sealed partial class FilePane : UserControl
 
     // ---------------------------------------------------------------- drag and drop
 
-    /// <summary>
-    /// The folder a mouse drag would drop into at <paramref name="point"/>, with the element to frame: the folder row
-    /// under the pointer, or otherwise the list of the folder this pane shows. Null outside this pane.
-    /// </summary>
-    internal (string Target, FrameworkElement Element)? MouseDropTarget(Windows.Foundation.Point point, UIElement relativeTo)
-    {
-        if (Visibility != Visibility.Visible || CurrentList.Visibility != Visibility.Visible) return null;
-        var bounds = CurrentList.TransformToVisual(relativeTo).TransformBounds(new(0, 0, CurrentList.ActualWidth, CurrentList.ActualHeight));
-        if (!bounds.Contains(point)) return null;
-        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(point, CurrentList))
-        {
-            if (element is SelectorItem { Content: FileItem { Entry.IsContainer: true } item } row) return (item.Entry.FullPath, row);
-            if (element is SelectorItem) break;
-        }
-        return Folder is { } folder ? (folder, CurrentList) : null;
-    }
-
-    private async void MoveMouseFileDrag(PointerRoutedEventArgs e)
+    private async void MoveItemDrag(PointerRoutedEventArgs e)
     {
         var point = e.GetCurrentPoint(ContentArea);
-        if (!point.Properties.IsLeftButtonPressed) { CancelMouseFileDrag(); return; }
-        if (_itemGesture.Move(point.Position.X, point.Position.Y))
+        if (!point.Properties.IsLeftButtonPressed) { ResetItemGesture(); return; }
+        if (!_itemGesture.Move(point.Position.X, point.Position.Y)) return;
+        if (_itemGestureList is not { } list || _itemPressedRow is not { Content: FileItem pressed } container)
         {
-            if (_itemPressedRow?.Content is not FileItem pressed) { CancelMouseFileDrag(); return; }
-            if (!_itemGestureList!.SelectedItems.Contains(pressed))
-            {
-                // As in Explorer, dragging a row that is not selected selects it, alone or with Ctrl added to the
-                // others, so what moves is what the list shows as selected.
-                _adjustingSelection = true;
-                try
-                {
-                    if (!(e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || Native.IsPhysicalKeyDown(0x11))) _itemGestureList.SelectedItems.Clear();
-                    _itemGestureList.SelectedItems.Add(pressed);
-                }
-                finally { _adjustingSelection = false; }
-            }
-            var paths = SelectedPaths;
-            _mouseFileDrag = new(paths);
-            IsDraggingItems = true;
-            _owner.OnPaneMouseSelectionStarted(this);
-            CancelFolderSizes();
-            for (var node = _itemPressedSource; node is not null && node != ContentArea; node = VisualTreeHelper.GetParent(node))
-                if (node is UIElement element) element.ReleasePointerCaptures();
-            if (!ContentArea.CapturePointer(e.Pointer)) { CancelMouseFileDrag(); return; }
-            _fileDragTimer ??= CreateFileDragTimer();
-            _fileDragTimer.Start();
-            InteractionTrace.Record("mouse-file-drag-start", data: new { Count = paths.Count });
+            ResetItemGesture();
+            return;
         }
-        if (_mouseFileDrag is not { } drag) return;
-        _mouseFileDragPoint = _owner.MouseDragPoint(e);
-        bool outside = _owner.UpdateMouseFileDrag(this, drag, _mouseFileDragPoint);
-        e.Handled = true;
-        if (outside && _itemPressedRow is { } container)
+        if (!list.SelectedItems.Contains(pressed))
         {
-            // Hand an outgoing drag to Windows; between-pane drags stay in this
-            // pointer route and do not depend on the native drop message loop.
-            _nativeDragPaths = drag.Sources.ToArray();
-            var nativePoint = e.GetCurrentPoint(container);
-            // The drag goes on in Windows' hands, so it is not finished here: folder counting and a deferred refresh
-            // keep waiting until the native drag ends.
-            EndMouseFileGesture(handOff: true);
-            try { FinishItemDrag(await container.StartDragAsync(nativePoint) == DataPackageOperation.Move); }
-            catch (Exception ex)
+            // As in Explorer, dragging a row that is not selected selects it first, alone or added with Ctrl, so what
+            // drags matches what the list shows as selected.
+            _adjustingSelection = true;
+            try
             {
-                // This handler is async void, so every failure of the native drag ends here instead of ending the app.
-                if (ex is not System.Runtime.InteropServices.COMException) CrashLog.Write(ex);
-                FinishItemDrag(moved: false);
-                if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+                if (!(e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || Native.IsPhysicalKeyDown(0x11))) list.SelectedItems.Clear();
+                list.SelectedItems.Add(pressed);
             }
-            finally { _nativeDragPaths = null; }
+            finally { _adjustingSelection = false; }
         }
-    }
-
-    private DispatcherTimer CreateFileDragTimer()
-    {
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-        timer.Tick += (_, _) => SafeDispatch.Run(() =>
+        string[] paths = SelectedPaths.ToArray();
+        PointerPoint dragPoint = e.GetCurrentPoint(container);
+        if (paths.Length == 0 || IsDraggingItems || paths.Any(p => PathTools.IsShellPlace(p) && !CompressedFolders.IsEntry(p)))
         {
-            if (_mouseFileDrag is { } drag) _owner.UpdateMouseFileDrag(this, drag, _mouseFileDragPoint, modifiersOnly: true);
-        });
-        return timer;
-    }
-
-    private async void ReleaseMouseFileDrag(PointerRoutedEventArgs e)
-    {
-        var drag = _mouseFileDrag;
-        if (drag is null) { EndMouseFileGesture(); return; }
-        _owner.UpdateMouseFileDrag(this, drag, _owner.MouseDragPoint(e));
-        // Preserve the modifiers attached to mouse-up even if the key was
-        // released before the queued event reaches this UI thread.
-        bool control = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
-        bool shift = e.KeyModifiers.HasFlag(VirtualKeyModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
-        var choice = drag.Release(control, shift);
-        EndMouseFileGesture();
+            ResetItemGesture();
+            return;
+        }
+        // Keep list.CanDragItems disabled until StartDragAsync finishes so ListViewBase cannot start a competing
+        // DragItemsStarting while Item_DragStarting is resolving its deferral.
+        ResetItemGesture(restoreCanDrag: false);
+        _nativeDragPaths = paths;
+        IsDraggingItems = true;
+        _owner.OnPaneMouseSelectionStarted(this);
+        CancelFolderSizes();
         e.Handled = true;
-        if (choice is not { } drop) return;
-        InteractionTrace.Record("mouse-file-drop", data: new { drop.Target, drop.Move, Count = drag.Sources.Count });
+        InteractionTrace.Record("item-drag-start", data: new { Count = paths.Length });
         try
         {
-            // The Recycle Bin in the sidebar deletes what is dropped on it, as a drag from another program does there.
-            bool completed = drop.Recycle
-                ? await _owner.DeleteAsync(drag.Sources, permanently: false)
-                : await CheckedTransfer(drag.Sources, drop.Target, drop.Move);
-            InteractionTrace.Record("mouse-file-drop-complete", data: new { Completed = completed, drop.Move, drop.Recycle });
+            // Start WinUI's native drag operation immediately while the pointer is still live inside the container.
+            // Windows then owns the entire drag across panes, sidebar, overlapping windows, and external apps.
+            DataPackageOperation result = await container.StartDragAsync(dragPoint);
+            FinishItemDrag(moved: result == DataPackageOperation.Move);
         }
         catch (Exception ex)
         {
-            // This handler is async void, so every failure of the drop ends here instead of ending the app.
-            if (ex is not (IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)) CrashLog.Write(ex);
+            if (ex is not System.Runtime.InteropServices.COMException) CrashLog.Write(ex);
+            FinishItemDrag(moved: false);
             if (!_closed) _owner.ShowMessage(ex.Message, InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _nativeDragPaths = null;
+            if (!_closed) list.CanDragItems = true;
         }
     }
 
-    internal void CancelMouseFileDrag()
+    private void ResetItemGesture(bool restoreCanDrag = true)
     {
-        _mouseFileDrag?.Cancel();
-        EndMouseFileGesture();
-    }
-
-    /// <param name="handOff">True when the drag continues as Windows' own drag, which finishes it when it ends.</param>
-    private void EndMouseFileGesture(bool handOff = false)
-    {
-        bool dragging = _mouseFileDrag is not null;
-        _mouseFileDrag = null;
         _itemGesture.Reset();
-        if (_itemGestureList is { } list) list.CanDragItems = true;
+        if (restoreCanDrag && _itemGestureList is { } list) list.CanDragItems = true;
         _itemGestureList = null;
         _itemPressedRow = null;
-        _itemPressedSource = null;
-        _fileDragTimer?.Stop();
-        _owner?.EndMouseFileDrag(this);
-        if (!dragging) return;
-        ContentArea.ReleasePointerCaptures();
-        if (!handOff) FinishItemDrag(moved: false);
     }
 
     private async void Item_DragStarting(UIElement sender, DragStartingEventArgs e)
@@ -2675,7 +2602,7 @@ public sealed partial class FilePane : UserControl
         {
             string[] paths = e.Data.Properties.TryGetValue(InternalDragFormat, out object? value) && value is string[] own
                 ? own : _nativeDragPaths ?? SelectedPaths.ToArray();
-            if (paths.Length == 0)
+            if (paths.Length == 0 || paths.Any(path => PathTools.IsShellPlace(path) && !CompressedFolders.IsEntry(path)))
             {
                 e.Cancel = true;
                 return;
@@ -2691,7 +2618,7 @@ public sealed partial class FilePane : UserControl
             }
             IStorageItem[]? items = await FileDragPayload.ReadWithinAsync(paths, TimeSpan.FromSeconds(1));
             if (_closed) { e.Cancel = true; return; }
-            if (items is not null) e.Data.SetStorageItems(items);
+            if (items is not null) e.Data.SetStorageItems(items, readOnly: false);
             else e.Data.SetDataProvider(StandardDataFormats.StorageItems, request => ProvideStorageItems(request, paths));
             e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
             InteractionTrace.Record("drag-ready", started, new { Count = paths.Length, Ready = items is not null, Allowed = e.AllowedOperations.ToString(), Requested = e.Data.RequestedOperation.ToString() });
@@ -2734,9 +2661,27 @@ public sealed partial class FilePane : UserControl
         }
     }
 
+    /// <summary>Supplies Shell IDList Array bytes for touch/pen drags of ZIP archive entries.</summary>
+    private static async void ProvideShellIds(DataProviderRequest request, string[] paths)
+    {
+        DataProviderDeferral? deferral = null;
+        try
+        {
+            deferral = request.GetDeferral();
+            request.SetData(await ShellClipboardIds.DragDataAsync(paths));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException) { }
+        catch (Exception ex) { CrashLog.Write(ex); }
+        finally
+        {
+            try { deferral?.Complete(); }
+            catch (Exception ex) { CrashLog.Write(ex); }
+        }
+    }
+
     private void List_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
-        if (_marqueeStart is not null) { e.Cancel = true; return; }
+        if (_marqueeStart is not null || IsDraggingItems) { e.Cancel = true; return; }
         string[] paths = e.Items.OfType<FileItem>().Where(i => i.Entry.Kind != EntryKind.Drive).Select(i => i.Entry.FullPath).ToArray();
         // Items of the Recycle Bin or a phone have no path another folder could take; they are restored or copied
         // through their context menu instead.
@@ -2746,6 +2691,10 @@ public sealed partial class FilePane : UserControl
             return;
         }
         e.Data.Properties.Add(InternalDragFormat, paths);
+        if (paths.Any(CompressedFolders.IsEntry))
+            e.Data.SetDataProvider(ShellClipboardIds.Format, request => ProvideShellIds(request, paths));
+        else
+            e.Data.SetDataProvider(StandardDataFormats.StorageItems, request => ProvideStorageItems(request, paths));
         e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
         IsDraggingItems = true;
         _owner.OnPaneMouseSelectionStarted(this);
@@ -2796,17 +2745,20 @@ public sealed partial class FilePane : UserControl
     private static bool AllAlreadyIn(string[]? sources, string target) =>
         sources is { Length: > 0 } && sources.All(s => Path.GetDirectoryName(s.TrimEnd('\\')) is { } parent && PathTools.SameLocation(parent, target));
 
+    internal static string[]? InternalDragPaths(DataPackageView data) =>
+        data.Properties.TryGetValue(InternalDragFormat, out object? value) && value is string[] own ? own : null;
+
     private void Content_DragOver(object sender, DragEventArgs e)
     {
         e.Handled = true;
         string? target = DropTarget(e);
-        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey(InternalDragFormat);
+        string[]? internalPaths = InternalDragPaths(e.DataView);
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || internalPaths is not null;
         if (target is null || PathTools.IsShellPlace(target) || !files)
         {
             e.AcceptedOperation = DataPackageOperation.None;
             return;
         }
-        string[]? internalPaths = e.DataView.Properties.TryGetValue(InternalDragFormat, out object? value) ? value as string[] : null;
         if (internalPaths is not null && internalPaths.Any(p => PathTools.IsSameOrInside(target, p)))
         {
             e.AcceptedOperation = DataPackageOperation.None;
@@ -2826,7 +2778,7 @@ public sealed partial class FilePane : UserControl
             if (traceChoice != _lastDropTrace)
             {
                 _lastDropTrace = traceChoice;
-                InteractionTrace.Record("drag-over", data: new { Target = target, Allowed = e.AllowedOperations.ToString(), Operation = e.AcceptedOperation.ToString(), Modifiers = e.Modifiers.ToString(), Control = Native.IsPhysicalKeyDown(0x11), Shift = Native.IsPhysicalKeyDown(0x10), InternalType = value?.GetType().FullName, Sources = internalPaths?.Length });
+                InteractionTrace.Record("drag-over", data: new { Target = target, Allowed = e.AllowedOperations.ToString(), Operation = e.AcceptedOperation.ToString(), Modifiers = e.Modifiers.ToString(), Control = Native.IsPhysicalKeyDown(0x11), Shift = Native.IsPhysicalKeyDown(0x10), Sources = internalPaths?.Length });
             }
         }
         e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", PlaceName(target));
@@ -2846,7 +2798,11 @@ public sealed partial class FilePane : UserControl
     {
         e.Handled = true;
         string? target = DropTarget(e);
-        if (target is null) return;
+        if (target is null)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
         DragOperationDeferral deferral = e.GetDeferral();
         // Capture the user's choice before awaiting external storage-item resolution.
         bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
@@ -2855,7 +2811,7 @@ public sealed partial class FilePane : UserControl
         InteractionTrace.Record("drop-input", data: new { Target = target, Control = control, Shift = shift, Modifiers = e.Modifiers.ToString(), Accepted = e.AcceptedOperation.ToString() });
         try
         {
-            string[]? internalPaths = e.DataView.Properties.TryGetValue(InternalDragFormat, out object? value) ? value as string[] : null;
+            string[]? internalPaths = InternalDragPaths(e.DataView);
             List<string> paths = internalPaths?.ToList() ?? [];
             if (paths.Count == 0 && e.DataView.Contains(StandardDataFormats.StorageItems))
             {
@@ -2871,6 +2827,10 @@ public sealed partial class FilePane : UserControl
                 bool completed = await CheckedTransfer(paths, target, move);
                 e.AcceptedOperation = completed ? (move ? DataPackageOperation.Move : DataPackageOperation.Copy) : DataPackageOperation.None;
                 InteractionTrace.Record("drop-complete", dropStarted, new { Completed = completed, Move = move });
+            }
+            else
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
             }
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)

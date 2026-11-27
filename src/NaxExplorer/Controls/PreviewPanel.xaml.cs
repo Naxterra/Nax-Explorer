@@ -211,7 +211,12 @@ public sealed partial class PreviewPanel : UserControl
             TextFormat format = TextExtractor.FormatOf(entry.Extension);
             if (format != TextFormat.None || entry.Size < 4 * 1024 * 1024)
             {
-                string? text = await Task.Run(() => ReadText(entry.FullPath, format, cts.Token), cts.Token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : null, TaskScheduler.Default);
+                string? text = await Task.Run(() => ReadText(entry.FullPath, format, cts.Token), cts.Token).ContinueWith(t =>
+                {
+                    if (t.IsCompletedSuccessfully) return t.Result;
+                    _ = t.Exception;
+                    return null;
+                }, TaskScheduler.Default);
                 if (version != _version || string.IsNullOrWhiteSpace(text)) return;
                 TextContent.Text = text;
                 TextScroller.Visibility = Visibility.Visible;
@@ -272,7 +277,12 @@ public sealed partial class PreviewPanel : UserControl
             SetDetailVisible("DetailNote", false);
             return true;
         }
-        (int folders, int files, bool more) = await Task.Run(() => Count(path, token), token).ContinueWith(t => t.IsCompletedSuccessfully ? t.Result : (0, 0, false), TaskScheduler.Default);
+        (int folders, int files, bool more) = await Task.Run(() => Count(path, token), token).ContinueWith(t =>
+        {
+            if (t.IsCompletedSuccessfully) return t.Result;
+            _ = t.Exception;
+            return (0, 0, false);
+        }, TaskScheduler.Default);
         if (version != _version) return false;
         ExistingOrAddDetail("DetailContains", "").Text = Loc.F(more ? "ContainsMore" : "Contains", folders, files);
         SetDetailVisible("DetailContains", true);

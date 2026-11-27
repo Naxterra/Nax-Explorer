@@ -24,7 +24,7 @@ internal static class ShellTests
             {
                 RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy,
             };
-            package.SetStorageItems(items);
+            package.SetStorageItems(items, readOnly: false);
             var view = package.GetView();
             Check.That(view.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems), "storage format was not ready when the drag began");
             Check.Sequence(paths, view.GetStorageItemsAsync().AsTask().GetAwaiter().GetResult().Select(item => item.Path));

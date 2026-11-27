@@ -344,112 +344,6 @@ public sealed partial class MainWindow : Window
 
     // ---------------------------------------------------------------- panes
 
-    private FilePane? _mouseDragSource;
-
-    internal Windows.Foundation.Point MouseDragPoint(PointerRoutedEventArgs e) => e.GetCurrentPoint(Root).Position;
-
-    /// <summary>The element the pointer is over during a mouse drag, which the highlight frames.</summary>
-    private FrameworkElement? _mouseDropElement;
-    private bool _mouseDropRecycle;
-    private SolidColorBrush? _mouseDropFill;
-
-    internal bool UpdateMouseFileDrag(FilePane source, FileDragSession drag, Windows.Foundation.Point point, bool modifiersOnly = false)
-    {
-        _mouseDragSource = source;
-        bool outside = point.X < 0 || point.Y < 0 || point.X > Root.ActualWidth || point.Y > Root.ActualHeight;
-        string? target = drag.Target;
-        if (!modifiersOnly)
-        {
-            (target, _mouseDropElement, _mouseDropRecycle) = outside ? (null, null, false) : MouseDropTargetAt(point);
-        }
-        drag.Hover(outside ? null : target, Native.IsPhysicalKeyDown(0x11), Native.IsPhysicalKeyDown(0x10), _mouseDropRecycle);
-        string count = Loc.F("ItemCount", drag.Sources.Count);
-        string caption = drag.Choice switch
-        {
-            { Recycle: true } => Loc.T("DropToRecycleBin") + "  ·  " + count,
-            { } choice => Loc.F(choice.Move ? "DropMove" : "DropCopy", FilePane.PlaceName(choice.Target)) + "  ·  " + count,
-            null => "×  " + count,
-        };
-        if (MouseDragText.Text != caption) MouseDragText.Text = caption;
-        MouseDragTransform.X = Math.Clamp(point.X + 14, 0, Math.Max(0, Root.ActualWidth - Math.Max(160, MouseDragBadge.ActualWidth)));
-        MouseDragTransform.Y = Math.Clamp(point.Y + 18, 0, Math.Max(0, Root.ActualHeight - 45));
-        MouseDragBadge.Visibility = outside ? Visibility.Collapsed : Visibility.Visible;
-        ShowMouseDropHighlight(drag.Choice is not null && !outside ? _mouseDropElement : null);
-        return outside;
-    }
-
-    /// <summary>
-    /// The place a mouse drag would drop into at <paramref name="point"/>: a folder row or the folder of either pane,
-    /// or a folder, drive or the Recycle Bin in the sidebar, as for drags that come from another program.
-    /// </summary>
-    private (string? Target, FrameworkElement? Element, bool RecycleBin) MouseDropTargetAt(Windows.Foundation.Point point)
-    {
-        if ((LeftPane.MouseDropTarget(point, Root) ?? RightPane.MouseDropTarget(point, Root)) is { } pane) return (pane.Target, pane.Element, false);
-        if (FlatSidebar.Visibility == Visibility.Visible)
-        {
-            foreach (ListView list in new[] { QuickList, CloudList, DriveList })
-            {
-                if (list.Visibility != Visibility.Visible) continue;
-                foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, list))
-                {
-                    if (element is not SelectorItem { Content: SidebarEntry entry } item) continue;
-                    if (IsRecycleBin(entry)) return (entry.Location, item, true);
-                    return entry.IsShellPlace ? (null, null, false) : (entry.Location, item, false);
-                }
-            }
-        }
-        if (TreeSidebar.Visibility == Visibility.Visible)
-        {
-            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, TreeQuickList))
-            {
-                if (element is not SelectorItem { Content: SidebarEntry entry } item) continue;
-                if (IsRecycleBin(entry)) return (entry.Location, item, true);
-                return entry.IsShellPlace ? (null, null, false) : (entry.Location, item, false);
-            }
-            foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(point, FolderTree))
-            {
-                if (element is TreeViewItem item && TreeNodePayload(item) is { } node)
-                    return node.IsShellPlace ? (null, null, false) : (node.Location, item, false);
-            }
-        }
-        return (null, null, false);
-    }
-
-    private void ShowMouseDropHighlight(FrameworkElement? element)
-    {
-        if (element is null || element.XamlRoot is null || element.ActualWidth <= 0)
-        {
-            MouseDropHighlight.Visibility = Visibility.Collapsed;
-            return;
-        }
-        var bounds = element.TransformToVisual(Root).TransformBounds(new(0, 0, element.ActualWidth, element.ActualHeight));
-        // A folder row or sidebar entry is filled lightly; a whole pane, which takes the drop into its own folder,
-        // only gets the frame, so its rows stay readable.
-        if (element is ListViewBase) MouseDropHighlight.Background = null;
-        else
-        {
-            // The accent differs between light and dark theme, so the fill follows the frame's current colour.
-            Windows.UI.Color accent = (MouseDropHighlight.BorderBrush as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.DodgerBlue;
-            if (_mouseDropFill?.Color != accent) _mouseDropFill = new SolidColorBrush(accent) { Opacity = 0.18 };
-            MouseDropHighlight.Background = _mouseDropFill;
-        }
-        Canvas.SetLeft(MouseDropHighlight, bounds.X);
-        Canvas.SetTop(MouseDropHighlight, bounds.Y);
-        MouseDropHighlight.Width = bounds.Width;
-        MouseDropHighlight.Height = bounds.Height;
-        MouseDropHighlight.Visibility = Visibility.Visible;
-    }
-
-    internal void EndMouseFileDrag(FilePane source)
-    {
-        if (_mouseDragSource != source) return;
-        _mouseDragSource = null;
-        _mouseDropElement = null;
-        _mouseDropRecycle = false;
-        MouseDragBadge.Visibility = Visibility.Collapsed;
-        MouseDropHighlight.Visibility = Visibility.Collapsed;
-    }
-
     internal void SetActivePane(FilePane pane)
     {
         if (pane.Visibility != Visibility.Visible) return;
@@ -1262,8 +1156,8 @@ public sealed partial class MainWindow : Window
 
     private void Tree_DragOver(object sender, DragEventArgs e)
     {
-        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths");
-        string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+        string[]? sources = FilePane.InternalDragPaths(e.DataView);
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || sources is not null;
         if (files && TreeNodeAt(FolderTree, e) is { IsShellPlace: false } node)
         {
             if (sources is not null && sources.Any(s => PathTools.IsSameOrInside(node.Location, s)))
@@ -1280,6 +1174,7 @@ public sealed partial class MainWindow : Window
             }
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", node.Label);
+            e.DragUIOverride.IsCaptionVisible = true;
             return;
         }
         e.AcceptedOperation = DataPackageOperation.None;
@@ -1287,24 +1182,34 @@ public sealed partial class MainWindow : Window
 
     private async void Tree_Drop(object sender, DragEventArgs e)
     {
-        if (TreeNodeAt(FolderTree, e) is not { IsShellPlace: false } node) return;
+        if (TreeNodeAt(FolderTree, e) is not { IsShellPlace: false } node)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
         DragOperationDeferral deferral = e.GetDeferral();
         bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
         bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
         try
         {
-            string[]? own = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) ? value as string[] : null;
+            string[]? own = FilePane.InternalDragPaths(e.DataView);
             List<string> paths = own is not null ? [.. own] : [];
             if (paths.Count == 0 && e.DataView.Contains(StandardDataFormats.StorageItems))
             {
                 paths = (await e.DataView.GetStorageItemsAsync()).Select(i => i.Path).Where(p => !string.IsNullOrEmpty(p)).ToList();
             }
             bool move = DropPolicy.Moves(control, shift, own, node.Location);
-            if (paths.Count == 0 || TransferCheck.Check(paths, node.Location, move) != TransferProblem.None) return;
-            await TransferAsync(paths, node.Location, move);
+            if (paths.Count == 0 || TransferCheck.Check(paths, node.Location, move) != TransferProblem.None)
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
+            bool completed = await TransferAsync(paths, node.Location, move);
+            e.AcceptedOperation = completed ? (move ? DataPackageOperation.Move : DataPackageOperation.Copy) : DataPackageOperation.None;
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
         {
+            e.AcceptedOperation = DataPackageOperation.None;
             ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
         finally
@@ -1384,8 +1289,8 @@ public sealed partial class MainWindow : Window
 
     private void Sidebar_DragOver(object sender, DragEventArgs e)
     {
-        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Properties.ContainsKey("NaxExplorer.Paths");
-        string[]? sources = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? ownValue) ? ownValue as string[] : null;
+        string[]? sources = FilePane.InternalDragPaths(e.DataView);
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems) || sources is not null;
         if (files && SidebarEntryAt(sender, e) is { } bin && IsRecycleBin(bin))
         {
             if (sources is not null && sources.All(PathTools.IsShellPlace))
@@ -1395,6 +1300,7 @@ public sealed partial class MainWindow : Window
             }
             e.AcceptedOperation = DataPackageOperation.Move;
             e.DragUIOverride.Caption = Loc.T("DropToRecycleBin");
+            e.DragUIOverride.IsCaptionVisible = true;
             return;
         }
         if (SidebarEntryAt(sender, e) is { IsShellPlace: false } entry && files)
@@ -1413,6 +1319,7 @@ public sealed partial class MainWindow : Window
             }
             e.AcceptedOperation = move ? DataPackageOperation.Move : DataPackageOperation.Copy;
             e.DragUIOverride.Caption = Loc.F(move ? "DropMove" : "DropCopy", entry.Label);
+            e.DragUIOverride.IsCaptionVisible = true;
             return;
         }
         e.AcceptedOperation = DataPackageOperation.None;
@@ -1420,13 +1327,17 @@ public sealed partial class MainWindow : Window
 
     private async void Sidebar_Drop(object sender, DragEventArgs e)
     {
-        if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry)) return;
+        if (SidebarEntryAt(sender, e) is not { } entry || entry.IsShellPlace && !IsRecycleBin(entry))
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
         DragOperationDeferral deferral = e.GetDeferral();
         bool control = e.Modifiers.HasFlag(DragDropModifiers.Control) || Native.IsPhysicalKeyDown(0x11);
         bool shift = e.Modifiers.HasFlag(DragDropModifiers.Shift) || Native.IsPhysicalKeyDown(0x10);
         try
         {
-            string[]? own = e.DataView.Properties.TryGetValue("NaxExplorer.Paths", out object? value) ? value as string[] : null;
+            string[]? own = FilePane.InternalDragPaths(e.DataView);
             List<string> paths = own is not null ? [.. own] : [];
             if (paths.Count == 0 && e.DataView.Contains(StandardDataFormats.StorageItems))
             {
@@ -1436,17 +1347,24 @@ public sealed partial class MainWindow : Window
             {
                 // Dropping on the Recycle Bin deletes, as in Explorer; items of shell places are left alone.
                 List<string> files = paths.Where(p => !PathTools.IsShellPlace(p)).ToList();
-                if (files.Count > 0) await DeleteAsync(files, permanently: false);
+                bool deleted = files.Count > 0 && await DeleteAsync(files, permanently: false);
+                e.AcceptedOperation = deleted ? DataPackageOperation.Move : DataPackageOperation.None;
                 return;
             }
             // Decided from the same input as the pointer during the drag: the app's own paths. A drag from another
             // program has none there, so it copies unless Shift was held, exactly as the pointer said.
             bool move = DropPolicy.Moves(control, shift, own, entry.Location);
-            if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None) return;
-            await TransferAsync(paths, entry.Location, move);
+            if (paths.Count == 0 || TransferCheck.Check(paths, entry.Location, move) != TransferProblem.None)
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                return;
+            }
+            bool completed = await TransferAsync(paths, entry.Location, move);
+            e.AcceptedOperation = completed ? (move ? DataPackageOperation.Move : DataPackageOperation.Copy) : DataPackageOperation.None;
         }
         catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or InvalidCastException)
         {
+            e.AcceptedOperation = DataPackageOperation.None;
             ShowMessage(ex.Message, InfoBarSeverity.Error);
         }
         finally
@@ -1887,12 +1805,6 @@ public sealed partial class MainWindow : Window
     /// <summary>F8 moves the selection to the other pane. F7 (copy) comes through the keyboard hook instead.</summary>
     private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == VirtualKey.Escape && _mouseDragSource is { } dragging)
-        {
-            dragging.CancelMouseFileDrag();
-            e.Handled = true;
-            return;
-        }
         if (IsViewerOpen)
         {
             Viewer.HandleKey(e);
