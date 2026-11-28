@@ -19,17 +19,6 @@ internal static class ShellMenuMerge
     public const string OpenWithTag = "openwith";
     public const string ExtractTag = "extract";
 
-    /// <summary>
-    /// Commands the app's own menu already has, and commands that open Explorer windows. Windows' versions of them are
-    /// left out, so no command appears twice. The app's own "open in Nax Explorer" verb, which it adds to Explorer's
-    /// menu while it opens folders instead of Explorer, is the same as "open" here.
-    /// </summary>
-    private static readonly HashSet<string> OwnVerbs = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "open", "opennew", "explore", "opennewwindow", "opennewprocess", "opennewtab", "cut", "copy", "paste", "delete",
-        "rename", "properties", "copyaspath", "pintohome", "find", "refresh", "undo", "redo", Core.ExplorerReplacement.Verb,
-    };
-
     public static async void Show(
         MenuFlyout menu,
         FrameworkElement target,
@@ -108,16 +97,42 @@ internal static class ShellMenuMerge
             // Its other entries (view, sort, group) need Explorer's own folder view and do nothing elsewhere.
             ShellMenuEntry? newMenu = entries.FirstOrDefault(e => e.Children.Any(c => string.Equals(c.Verb, "NewFolder", StringComparison.OrdinalIgnoreCase)));
             if (newMenu is null || menu.Items.FirstOrDefault(i => i.Tag as string == NewTag) is not MenuFlyoutSubItem own) return;
-            List<MenuFlyoutItemBase> templates = Convert(newMenu.Children, session, owner);
+            (_, List<ShellMenuEntry> keptTemplates) = Core.ContextMenuFilter.FilterAndExtractOpenWith(
+                newMenu.Children,
+                e => e.Separator,
+                e => e.Verb,
+                e => e.Text,
+                e => e.Enabled,
+                e => e.Children,
+                (e, children) => e with { Children = children },
+                promoteOpenWith: false,
+                hideWindowsStartPin: false,
+                hideWindowsExtract: false);
+            List<MenuFlyoutItemBase> templates = Convert(keptTemplates, session, owner);
             if (templates.Count == 0) return;
             own.Items.Clear();
             foreach (MenuFlyoutItemBase template in templates) own.Items.Add(template);
             return;
         }
-        var shownVerbs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        List<MenuFlyoutItemBase> items = Convert(entries, session, owner, shownVerbs,
+        int openWithIndex = IndexOf(menu, OpenWithTag);
+        bool hasOpenWithSlot = openWithIndex < menu.Items.Count;
+        (ShellMenuEntry? promotedOpenWith, List<ShellMenuEntry> remaining) = Core.ContextMenuFilter.FilterAndExtractOpenWith(
+            entries,
+            e => e.Separator,
+            e => e.Verb,
+            e => e.Text,
+            e => e.Enabled,
+            e => e.Children,
+            (e, children) => e with { Children = children },
+            promoteOpenWith: hasOpenWithSlot,
             hideWindowsStartPin: menu.Items.Any(item => item.Tag as string == StartMenuPinMenu.MenuTag),
             hideWindowsExtract: menu.Items.Any(item => item.Tag as string == ExtractTag));
+        if (promotedOpenWith is not null && hasOpenWithSlot)
+        {
+            MenuFlyoutItemBase openWithItem = ConvertOne(promotedOpenWith, session, owner, fallbackGlyph: "\uE7AC");
+            menu.Items[openWithIndex] = openWithItem;
+        }
+        List<MenuFlyoutItemBase> items = Convert(remaining, session, owner);
         if (items.Count == 0) return;
         // Windows' entries go between the app's commands and Properties, with one line on each side: the line the
         // app's menu already has above Properties is used, and a new one goes below Windows' entries.
@@ -125,16 +140,10 @@ internal static class ShellMenuMerge
         if (at == 0 || menu.Items[at - 1] is not MenuFlyoutSeparator) menu.Items.Insert(at++, new MenuFlyoutSeparator());
         foreach (MenuFlyoutItemBase item in items) menu.Items.Insert(at++, item);
         if (at < menu.Items.Count) menu.Items.Insert(at, new MenuFlyoutSeparator());
-        // Windows' "Open with" (its submenu with the apps, or a single entry) ends in the verb "openas". Only when such
-        // an entry is really shown and usable does the app's own "Open with" give way, so the menu never loses it.
-        if (shownVerbs.Contains("openas") && menu.Items.FirstOrDefault(i => i.Tag as string == OpenWithTag) is { } ownOpenWith) menu.Items.Remove(ownOpenWith);
     }
 
-    /// <summary>
-    /// Turns Windows' entries into menu items, without duplicates of the app's commands and without stray separators.
-    /// The verbs of the enabled items that are shown are added to <paramref name="shownVerbs"/>.
-    /// </summary>
-    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner, ISet<string>? shownVerbs = null, bool hideWindowsStartPin = false, bool hideWindowsExtract = false)
+    /// <summary>Turns already-filtered Windows shell entries into WinUI menu items.</summary>
+    internal static List<MenuFlyoutItemBase> Convert(IEnumerable<ShellMenuEntry> entries, ShellMenuSession session, IntPtr owner)
     {
         var result = new List<MenuFlyoutItemBase>();
         foreach (ShellMenuEntry entry in entries)
@@ -144,31 +153,30 @@ internal static class ShellMenuMerge
                 if (result.Count > 0 && result[^1] is not MenuFlyoutSeparator) result.Add(new MenuFlyoutSeparator());
                 continue;
             }
-            if (entry.Verb is { } verb && OwnVerbs.Contains(verb)) continue;
-            if (hideWindowsStartPin && string.Equals(entry.Verb, "pintostartscreen", StringComparison.OrdinalIgnoreCase)) continue;
-            if (hideWindowsExtract && (string.Equals(entry.Verb, "extract", StringComparison.OrdinalIgnoreCase) || string.Equals(entry.Verb, "extractall", StringComparison.OrdinalIgnoreCase))) continue;
-            if (entry.Text.Length == 0) continue;
-            IconElement? icon = entry.Icon is { } pixels ? new ImageIcon { Source = ImageCache.ToBitmap(pixels) } : null;
-            if (entry.Children.Count > 0)
-            {
-                List<MenuFlyoutItemBase> children = Convert(entry.Children, session, owner, shownVerbs, hideWindowsStartPin, hideWindowsExtract);
-                if (children.Count == 0) continue;
-                var sub = new MenuFlyoutSubItem { Text = entry.Text, Icon = icon };
-                foreach (MenuFlyoutItemBase child in children) sub.Items.Add(child);
-                result.Add(sub);
-                continue;
-            }
-            var item = new MenuFlyoutItem { Text = entry.Text, IsEnabled = entry.Enabled, Icon = icon };
-            if (entry.Enabled && entry.Verb is { } shownVerb) shownVerbs?.Add(shownVerb);
-            uint id = entry.Id;
-            item.Click += (_, _) =>
-            {
-                Native.GetCursorPos(out Native.POINT point);
-                session.Invoke(id, owner, point);
-            };
-            result.Add(item);
+            result.Add(ConvertOne(entry, session, owner));
         }
         while (result.Count > 0 && result[^1] is MenuFlyoutSeparator) result.RemoveAt(result.Count - 1);
         return result;
+    }
+
+    private static MenuFlyoutItemBase ConvertOne(ShellMenuEntry entry, ShellMenuSession session, IntPtr owner, string? fallbackGlyph = null)
+    {
+        IconElement? icon = entry.Icon is { } pixels
+            ? new ImageIcon { Source = ImageCache.ToBitmap(pixels) }
+            : fallbackGlyph is not null ? new FontIcon { Glyph = fallbackGlyph } : null;
+        if (entry.Children.Count > 0)
+        {
+            var sub = new MenuFlyoutSubItem { Text = entry.Text, Icon = icon, IsEnabled = entry.Enabled };
+            foreach (MenuFlyoutItemBase child in Convert(entry.Children, session, owner)) sub.Items.Add(child);
+            return sub;
+        }
+        var item = new MenuFlyoutItem { Text = entry.Text, IsEnabled = entry.Enabled, Icon = icon };
+        uint id = entry.Id;
+        item.Click += (_, _) =>
+        {
+            Native.GetCursorPos(out Native.POINT point);
+            session.Invoke(id, owner, point);
+        };
+        return item;
     }
 }

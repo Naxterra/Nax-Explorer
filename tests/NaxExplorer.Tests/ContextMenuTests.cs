@@ -1,11 +1,75 @@
+using NaxExplorer.Core;
 using NaxExplorer.Services;
 
 namespace NaxExplorer.Tests;
 
 internal static class ContextMenuTests
 {
+    private sealed record FakeEntry(string Text, string? Verb = null, bool Enabled = true, bool Separator = false, IReadOnlyList<FakeEntry>? Children = null)
+    {
+        public IReadOnlyList<FakeEntry> ChildList => Children ?? [];
+    }
+
     public static IEnumerable<(string, string, Action)> All()
     {
+        yield return ("shell_menu_filter_promotes_open_with_hides_create_shortcut_and_preserves_google_drive", "Windows Open With is promoted out of the shell section to replace the top Open With slot, Create shortcut ('link') is omitted without stray separators, and Google Drive sharing entries stay intact.", () =>
+        {
+            var raw = new List<FakeEntry>
+            {
+                new("Öffnen", "open"),
+                new("WinRAR", Children: [new("Zum Archiv hinzufügen...")]),
+                new("", Separator: true),
+                new("Mit Google Drive öffnen"),
+                new("Link in die Zwischenablage kopieren"),
+                new("In Google Drive freigeben"),
+                new("Verknüpfung zu Google Drive hinzufügen"),
+                new("Offlinezugriff", Children: [new("Offline verfügbar"), new("Nur online")]),
+                new("", Separator: true),
+                new("Öffnen mit", Children:
+                [
+                    new("PotPlayer"),
+                    new("", Separator: true),
+                    new("Andere App auswählen", "openas"),
+                ]),
+                new("", Separator: true),
+                new("Senden an", Children: [new("Bluetooth")]),
+                new("", Separator: true),
+                new("Verknüpfung erstellen", "link"),
+                new("Löschen", "delete"),
+                new("Eigenschaften", "properties"),
+            };
+
+            var (promoted, remaining) = ContextMenuFilter.FilterAndExtractOpenWith(
+                raw,
+                e => e.Separator,
+                e => e.Verb,
+                e => e.Text,
+                e => e.Enabled,
+                e => e.ChildList,
+                (e, children) => e with { Children = children },
+                promoteOpenWith: true,
+                hideWindowsStartPin: false,
+                hideWindowsExtract: false);
+
+            Check.That(promoted is not null && promoted.Text == "Öffnen mit" && promoted.ChildList.Count == 3, "Open With submenu must be extracted for top placement");
+            Check.Sequence(
+                ["WinRAR", "---", "Mit Google Drive öffnen", "Link in die Zwischenablage kopieren", "In Google Drive freigeben", "Verknüpfung zu Google Drive hinzufügen", "Offlinezugriff", "---", "Senden an"],
+                remaining.Select(e => e.Separator ? "---" : e.Text),
+                "Create shortcut and duplicates must be stripped, Open With removed from bottom, and Google Drive items preserved");
+
+            // Disabled Open With must not replace the app's working fallback.
+            var disabledOpenWith = new List<FakeEntry>
+            {
+                new("Öffnen mit", Enabled: false, Children: [new("Andere App auswählen", "openas", Enabled: true)]),
+            };
+            var (notPromoted, disabledRemaining) = ContextMenuFilter.FilterAndExtractOpenWith(
+                disabledOpenWith,
+                e => e.Separator, e => e.Verb, e => e.Text, e => e.Enabled, e => e.ChildList,
+                (e, children) => e with { Children = children },
+                promoteOpenWith: true, hideWindowsStartPin: false, hideWindowsExtract: false);
+            Check.That(notPromoted is null, "disabled Open With submenu must not replace working fallback");
+            Check.Equal(0, disabledRemaining.Count, "disabled Open With submenu must not duplicate the top Open With slot");
+        });
         yield return ("ready_context_menu_opens_once_with_its_commands", "Commands ready before opening are shown in one complete menu without a loading menu or later replacement.", () =>
         {
             var events = new List<string>();

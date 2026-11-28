@@ -2408,15 +2408,15 @@ public sealed partial class FilePane : UserControl
         var open = Item("Open", "", OpenSelected, "Enter");
         open.FontWeight = FontWeights.SemiBold;
         menu.Items.Add(open);
+        // Windows' usable Open with submenu replaces this fallback in place right after Open. It opens one file, so it
+        // is offered only when one file is selected.
+        if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (picture) menu.Items.Add(Item("ViewPicture", "", () => ShowInViewer(item), "Space"));
         if (container && !several)
         {
             menu.Items.Add(Item("OpenInNewTab", "", () => OpenTab(item.Entry.FullPath, select: false)));
             menu.Items.Add(Item("OpenInOtherPane", "", () => _owner.OpenInOtherPane(this, item.Entry.FullPath)));
         }
-        // Windows' usable Open with command replaces this fallback before the menu opens. It opens one file, so it
-        // is offered only when one file is selected.
-        if (!container && !several) menu.Items.Add(Tagged(Item("OpenWith", "", () => ShellActions.OpenWith(item.Entry.FullPath, _owner.Hwnd)), ShellMenuMerge.OpenWithTag));
         if (_tab.Search is not null) menu.Items.Add(Item("OpenLocation","", () => OpenLocation(item)));
         if (!container && !several) StartMenuPinMenu.Add(menu, item.Entry.FullPath, _owner);
         menu.Items.Add(new MenuFlyoutSeparator());
