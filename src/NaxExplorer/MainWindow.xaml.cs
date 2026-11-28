@@ -1594,27 +1594,65 @@ public sealed partial class MainWindow : Window
                     await ShellActions.DeleteAsync(plan.RecyclePaths, Hwnd, permanently: false, progress, CloudRoots.Contains);
                 if (!progress.IsCancelled && plan.PermanentPaths.Count > 0)
                     await ShellActions.DeleteAsync(plan.PermanentPaths, Hwnd, permanently: true, progress, CloudRoots.Contains);
+            }, progress =>
+            {
+                List<string> eligible = ElevatedForceDelete.MapEligibleFailurePaths(
+                    paths,
+                    progress.Failures.Select(f => (f.Path, f.IsAccessDenied)),
+                    CloudRoots.Contains);
+                return eligible.Count > 0 ? onStarted => ForceDeleteAsAdminAsync(eligible, onStarted) : null;
             });
         }
         finally
         {
             if (startedOperation)
             {
-                // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
-                ForgetFolderSizes(paths, withContents: true);
-                foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
-                foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
-                {
-                    ForgetFolderSizes(new[] { archive }, withContents: false);
-                    foreach (MainWindow window in App.Instance!.Windows)
-                        foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
-                            if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
-                    if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
-                }
+                InvalidateAfterDelete(paths);
             }
             EndActiveMutation(lease);
         }
         return completed;
+    }
+
+    private async Task ForceDeleteAsAdminAsync(IReadOnlyList<string> paths, Action onStarted)
+    {
+        if (paths.Count == 0 || _closed) return;
+        if (!TryBeginActiveMutation(paths, out ActiveMutationLease? lease))
+        {
+            ShowMessage(Loc.T("OperationAlreadyRunning"), InfoBarSeverity.Informational);
+            return;
+        }
+        bool startedOperation = false;
+        try
+        {
+            if (await AskSafelyAsync(async () => (bool?)await FileOperationDialogs.ConfirmForceDeleteAsAdminAsync(Root.XamlRoot, Root.RequestedTheme, paths)) != true)
+                return;
+            onStarted();
+            string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
+            startedOperation = true;
+            IReadOnlyList<string> userCloudRoots = CloudRoots.Folders.Select(f => f.Path).ToArray();
+            await RunOperationAsync(Loc.F("DeletingForGoodTitle", what), progress => ShellActions.ForceDeleteElevatedAsync(paths, Hwnd, progress, userCloudRoots));
+        }
+        finally
+        {
+            if (startedOperation) InvalidateAfterDelete(paths);
+            EndActiveMutation(lease);
+        }
+    }
+
+    private void InvalidateAfterDelete(IReadOnlyList<string> paths)
+    {
+        // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
+        ForgetFolderSizes(paths, withContents: true);
+        foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+        foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            ForgetFolderSizes(new[] { archive }, withContents: false);
+            foreach (MainWindow window in App.Instance!.Windows)
+                foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                    if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+            if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+        }
     }
 
     private async Task<DeletePlan?> PlanDeleteWithProgressAsync(IReadOnlyList<string> paths, string what)
@@ -1703,7 +1741,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>Runs one operation with its progress card; a failure ends up on the card instead of being thrown.</summary>
-    private async Task<bool> RunOperationAsync(string title, Func<OperationProgress, Task> run)
+    private async Task<bool> RunOperationAsync(string title, Func<OperationProgress, Task> run, Func<OperationProgress, Func<Action, Task>?>? buildForceDeleteAction = null)
     {
         var progress = new OperationProgress();
         var card = new OperationCard(OperationsPanel, title, progress);
@@ -1736,7 +1774,8 @@ public sealed partial class MainWindow : Window
         {
             App.Instance?.OperationEnded();
         }
-        card.Finish(error);
+        Func<Action, Task>? forceAction = progress.IsCancelled || _closed ? null : buildForceDeleteAction?.Invoke(progress);
+        card.Finish(error, forceAction);
         return error is null && !progress.IsCancelled && progress.Failures.Count == 0;
     }
 

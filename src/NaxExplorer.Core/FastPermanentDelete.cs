@@ -29,8 +29,8 @@ public static class FastPermanentDelete
 {
     private const uint InvalidFileAttributes = 0xFFFFFFFF;
     private const uint FileAttributeNormal = 0x00000080;
-    private const uint IoReparseTagMountPoint = 0xA0000003;
-    private const uint IoReparseTagSymlink = 0xA000000C;
+    internal const uint IoReparseTagMountPoint = 0xA0000003;
+    internal const uint IoReparseTagSymlink = 0xA000000C;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
     private const int ErrorAccessDenied = 5;
@@ -426,7 +426,7 @@ public static class FastPermanentDelete
         return true;
     }
 
-    private static bool TryReadReparseTag(string extPath, out uint tag)
+    internal static bool TryReadReparseTag(string extPath, out uint tag)
     {
         tag = 0;
         string trimmed = extPath.TrimEnd('\\');

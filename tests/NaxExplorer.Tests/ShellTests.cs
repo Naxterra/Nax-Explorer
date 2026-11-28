@@ -347,6 +347,19 @@ internal static class ShellTests
                 Check.That(File.Exists(sibling), "sibling must stay untouched");
             });
         });
+
+        yield return ("force_delete_error_descriptions_and_access_denied_detection_localize", "Access-denied copy-engine HRESULTs are distinguished from sharing violations, and force-delete block reasons format into readable localized messages.", () =>
+        {
+            Check.That(OperationProgress.IsAccessDeniedResult(unchecked((int)0x80270021)), "COPYENGINE_E_ACCESS_DENIED_SRC must be flagged as access denied");
+            Check.That(OperationProgress.IsAccessDeniedResult(unchecked((int)0x80270002)), "COPYENGINE_E_REQUIRES_ELEVATION must be flagged as access denied");
+            Check.That(OperationProgress.IsAccessDeniedResult(unchecked((int)0x80070005)), "E_ACCESSDENIED must be flagged as access denied");
+            Check.That(!OperationProgress.IsAccessDeniedResult(unchecked((int)0x80270027)), "sharing violation must not be treated as access denied");
+
+            Check.Equal(Loc.T("ForceDeleteSystemProtected"), OperationProgress.DescribeForceDeleteError(new ForceDeleteItemError(@"C:\Windows", "Windows", 5, ForceDeleteBlockKind.SystemProtected)), "system-protected message");
+            Check.Equal(Loc.T("ForceDeleteCloudBlocked"), OperationProgress.DescribeForceDeleteError(new ForceDeleteItemError(@"D:\Cloud", "Cloud", 50, ForceDeleteBlockKind.CloudPath)), "cloud-blocked message");
+            Check.Equal(Loc.F("ForceDeleteAppxHasPackages", "Sample.App"), OperationProgress.DescribeForceDeleteError(new ForceDeleteItemError(@"E:\WindowsApps", "WindowsApps", 5, ForceDeleteBlockKind.AppxVolumeHasPackages, "Sample.App")), "Appx package detail message");
+            Check.Equal(Loc.T("ForceDeleteAppxNotEmpty"), OperationProgress.DescribeForceDeleteError(new ForceDeleteItemError(@"E:\WindowsApps", "WindowsApps", 5, ForceDeleteBlockKind.AppxVolumeNotEmpty)), "Appx volume not empty message");
+        });
     }
 
     private static void OnSta(Action body)

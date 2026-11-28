@@ -149,6 +149,7 @@ internal static partial class Native
     public const uint CMIC_MASK_PTINVOKE = 0x20000000;
 
     public const uint SEE_MASK_INVOKEIDLIST = 0x0000000C;
+    public const uint SEE_MASK_NOCLOSEPROCESS = 0x00000040;
     public const uint SEE_MASK_NOASYNC = 0x00000100;
     public const uint SEE_MASK_FLAG_NO_UI = 0x00000400;
     public const uint SEE_MASK_ASYNCOK = 0x00100000;
@@ -530,6 +531,9 @@ internal static partial class Native
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool ShellExecuteEx(ref SHELLEXECUTEINFO info);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SHGetFileInfo(string path, uint attributes, ref SHFILEINFO info, uint size, uint flags);

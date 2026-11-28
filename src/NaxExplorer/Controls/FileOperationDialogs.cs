@@ -86,6 +86,23 @@ internal static class FileOperationDialogs
         return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
+    /// <summary>Asks before taking Administrator ownership and permanently deleting ACL-locked items.</summary>
+    public static async Task<bool> ConfirmForceDeleteAsAdminAsync(XamlRoot root, ElementTheme theme, IReadOnlyList<string> paths)
+    {
+        string what = paths.Count == 1 ? $"\"{Path.GetFileName(paths[0].TrimEnd('\\'))}\"" : Loc.F("ItemCount", paths.Count);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = root,
+            RequestedTheme = theme,
+            Title = Loc.T("ForceDeleteAsAdminTitle"),
+            Content = new TextBlock { Text = Loc.F("ForceDeleteAsAdminText", what), TextWrapping = TextWrapping.Wrap },
+            PrimaryButtonText = Loc.T("ForceDeleteAsAdminButton"),
+            CloseButtonText = Loc.T("Cancel"),
+            DefaultButton = ContentDialogButton.Close,
+        };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
     /// <summary>True when the drive of <paramref name="path"/> has a Recycle Bin, so a delete there can be undone.</summary>
     public static bool HasRecycleBin(string path) => RecycleBins.HasRecycleBin(path);
 }

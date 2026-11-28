@@ -16,11 +16,14 @@ internal sealed class OperationCard : UserControl
     private readonly TextBlock _title = new() { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock _detail = new() { FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly ProgressBar _bar = new() { Maximum = 1, IsIndeterminate = true };
-    private readonly Button _action = new() { Padding = new Thickness(10, 3, 10, 3), HorizontalAlignment = HorizontalAlignment.Right };
+    private readonly Button _action = new() { Padding = new Thickness(10, 3, 10, 3) };
+    private readonly Button _forceDelete = new() { Padding = new Thickness(10, 3, 10, 3), Visibility = Visibility.Collapsed };
+    private readonly StackPanel _actions = new() { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right };
     private readonly StackPanel _failures = new() { Spacing = 2, Visibility = Visibility.Collapsed };
     private readonly OperationProgress _progress;
     private readonly StackPanel _host;
     private readonly string _operationTitle;
+    private Func<Action, Task>? _forceDeleteAction;
     private bool _ended;
 
     public OperationCard(StackPanel host, string title, OperationProgress progress)
@@ -47,6 +50,31 @@ internal sealed class OperationCard : UserControl
                 _detail.Text = Loc.T("OperationCancelling");
             }
         };
+        _forceDelete.Content = Loc.T("ForceDeleteAsAdminButton");
+        _forceDelete.Click += async (_, _) =>
+        {
+            if (_forceDeleteAction is not { } run) return;
+            _forceDelete.IsEnabled = false;
+            bool started = false;
+            try
+            {
+                await run(() =>
+                {
+                    started = true;
+                    Close();
+                });
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                CrashLog.Write(ex);
+            }
+            finally
+            {
+                if (!started) _forceDelete.IsEnabled = true;
+            }
+        };
+        _actions.Children.Add(_forceDelete);
+        _actions.Children.Add(_action);
         var failuresScroll = new ScrollViewer { Content = _failures, MaxHeight = 140, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Content = new Border
         {
@@ -55,7 +83,7 @@ internal sealed class OperationCard : UserControl
             BorderThickness = new Thickness(1),
             BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
             Background = (Brush)Application.Current.Resources["AcrylicBackgroundFillColorDefaultBrush"],
-            Child = new StackPanel { Spacing = 6, Children = { _title, _detail, _bar, failuresScroll, _action } },
+            Child = new StackPanel { Spacing = 6, Children = { _title, _detail, _bar, failuresScroll, _actions } },
         };
         host.Children.Add(this);
     }
@@ -76,7 +104,7 @@ internal sealed class OperationCard : UserControl
     /// Ends the card: a clean finish closes it immediately; failures stay listed until the user closes it. A
     /// failure of the whole operation comes as <paramref name="error"/>.
     /// </summary>
-    public void Finish(string? error)
+    public void Finish(string? error, Func<Action, Task>? forceDeleteAction = null)
     {
         _ended = true;
         IReadOnlyList<OperationFailure> failures = _progress.Failures;
@@ -88,6 +116,9 @@ internal sealed class OperationCard : UserControl
             Close();
             return;
         }
+        _forceDeleteAction = forceDeleteAction;
+        _forceDelete.Visibility = forceDeleteAction is not null ? Visibility.Visible : Visibility.Collapsed;
+        _forceDelete.IsEnabled = forceDeleteAction is not null;
         _bar.Visibility = Visibility.Collapsed;
         _detail.Text = failures.Count == 1
             ? Loc.T("OperationFailedItem")

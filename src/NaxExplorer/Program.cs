@@ -24,6 +24,11 @@ public static class Program
     private static int Main(string[] args)
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
+        // Headless UAC-elevated helper pass for forced ownership takeover and deletion of ACL-locked folders.
+        if (args.Length >= 2 && string.Equals(args[0], Core.ElevatedForceDelete.WorkerSwitch, StringComparison.OrdinalIgnoreCase))
+        {
+            return Core.ElevatedForceDelete.RunElevatedWorker(args[1]);
+        }
         // While the app opens folders instead of Explorer, Windows also hands it places only Explorer can show, such
         // as the Recycle Bin, Control Panel or a computer under Network; they go straight to Explorer, before any
         // window opens. Should Explorer ever hand the same place straight back, the second round stops here.

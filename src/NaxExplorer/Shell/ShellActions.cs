@@ -207,7 +207,7 @@ internal static class ShellActions
                     name => progress.Report(0, name));
                 foreach (Core.FastDeleteFailure failure in fast.Failures)
                 {
-                    progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path));
+                    progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path), failure.Path, failure.Win32Error is 5 or 1314);
                 }
                 if (!progress.IsCancelled && fast.FallbackToShell.Count > 0)
                 {
@@ -222,7 +222,7 @@ internal static class ShellActions
                         priorFailuresExist: progress.Failures.Count > 0);
                     foreach (Core.FastDeleteFailure failure in parentFailures)
                     {
-                        progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path));
+                        progress.AddFailure(failure.Name, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(failure.Win32Error), failure.Path), failure.Path, failure.Win32Error is 5 or 1314);
                     }
                     if (!progress.IsCancelled && needsElevation.Count > 0)
                     {
@@ -263,7 +263,8 @@ internal static class ShellActions
                 // If the item already vanished between passes, treat it as deleted; otherwise report the failure.
                 if (!Core.PathTools.IsShellPlace(path) && !Core.FastPermanentDelete.ExistsExact(path)) continue;
                 string name = Path.GetFileName(path.TrimEnd('\\'));
-                progress.AddFailure(name.Length > 0 ? name : path, OperationProgress.DescribeShellFailure(hr != 0 ? hr : unchecked((int)0x80004005), path));
+                int failHr = hr != 0 ? hr : unchecked((int)0x80004005);
+                progress.AddFailure(name.Length > 0 ? name : path, OperationProgress.DescribeShellFailure(failHr, path), path, OperationProgress.IsAccessDeniedResult(failHr));
             }
             if (parsed.Count == 0) return;
             IntPtr[] list = [.. parsed];
@@ -281,6 +282,185 @@ internal static class ShellActions
         finally
         {
             foreach (IntPtr pidl in parsed) Native.ILFree(pidl);
+        }
+    });
+
+    /// <summary>
+    /// Launches a headless UAC-elevated pass of Nax-Explorer over a private named pipe to take ownership of ACL-locked
+    /// folders (such as TrustedInstaller leftovers on secondary drives) and delete them permanently. Always waits for
+    /// the elevated worker to exit (propagating Cancel over the pipe) before returning.
+    /// </summary>
+    public static Task ForceDeleteElevatedAsync(
+        IReadOnlyList<string> paths,
+        IntPtr owner,
+        OperationProgress progress,
+        IReadOnlyList<string>? extraCloudRoots = null) => RunOnSta(() =>
+    {
+        if (paths.Count == 0) return;
+        string? exe = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
+        {
+            progress.AddFailure("Nax Explorer", Loc.T("ForceDeleteElevationFailed"));
+            return;
+        }
+        string pipeName = $"NaxExplorer.ForceDelete.{Guid.NewGuid():N}";
+        var pipeSecurity = new System.IO.Pipes.PipeSecurity();
+        if (System.Security.Principal.WindowsIdentity.GetCurrent().User is { } currentUser)
+        {
+            pipeSecurity.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+                currentUser,
+                System.IO.Pipes.PipeAccessRights.FullControl,
+                System.Security.AccessControl.AccessControlType.Allow));
+        }
+        pipeSecurity.AddAccessRule(new System.IO.Pipes.PipeAccessRule(
+            new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null),
+            System.IO.Pipes.PipeAccessRights.FullControl,
+            System.Security.AccessControl.AccessControlType.Allow));
+        using System.IO.Pipes.NamedPipeServerStream server = System.IO.Pipes.NamedPipeServerStreamAcl.Create(
+            pipeName,
+            System.IO.Pipes.PipeDirection.InOut,
+            maxNumberOfServerInstances: 1,
+            System.IO.Pipes.PipeTransmissionMode.Byte,
+            System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.FirstPipeInstance,
+            inBufferSize: 0,
+            outBufferSize: 0,
+            pipeSecurity);
+        using var connectCts = new CancellationTokenSource();
+        Task connectTask = server.WaitForConnectionAsync(connectCts.Token);
+
+        var info = new Native.SHELLEXECUTEINFO
+        {
+            cbSize = Marshal.SizeOf<Native.SHELLEXECUTEINFO>(),
+            fMask = Native.SEE_MASK_NOCLOSEPROCESS,
+            hwnd = owner,
+            lpVerb = "runas",
+            lpFile = exe,
+            lpParameters = $"{Core.ElevatedForceDelete.WorkerSwitch} {pipeName}",
+            nShow = 0, // SW_HIDE
+        };
+        if (!Native.ShellExecuteEx(ref info))
+        {
+            connectCts.Cancel();
+            int err = Marshal.GetLastWin32Error();
+            if (err == 1223 /* ERROR_CANCELLED */)
+            {
+                progress.Cancel();
+                return;
+            }
+            progress.AddFailure(Path.GetFileName(paths[0].TrimEnd('\\')), Loc.T("ForceDeleteElevationFailed"));
+            return;
+        }
+
+        IntPtr hProcess = info.hProcess;
+        Core.ForceDeleteResponse? response = null;
+        try
+        {
+            // Wait until the elevated helper connects to our pipe, exits unexpectedly, or times out.
+            long connectDeadline = Environment.TickCount64 + 20_000;
+            while (!connectTask.IsCompleted)
+            {
+                if (hProcess != IntPtr.Zero && Native.WaitForSingleObject(hProcess, 100) == 0)
+                {
+                    connectCts.Cancel();
+                    break;
+                }
+                if (hProcess == IntPtr.Zero)
+                {
+                    if (progress.IsCancelled || Environment.TickCount64 >= connectDeadline)
+                    {
+                        connectCts.Cancel();
+                        break;
+                    }
+                    Thread.Sleep(50);
+                }
+            }
+
+            if (connectTask.IsCompletedSuccessfully && server.IsConnected)
+            {
+                var utf8NoBom = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+                bool cancelledBeforeSend = progress.IsCancelled;
+                var request = cancelledBeforeSend
+                    ? new Core.ForceDeleteRequest([])
+                    : new Core.ForceDeleteRequest(
+                        [.. paths],
+                        extraCloudRoots is null ? null : [.. extraCloudRoots],
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+                byte[] reqBytes = utf8NoBom.GetBytes(System.Text.Json.JsonSerializer.Serialize(request) + "\n");
+                server.WriteAsync(reqBytes).AsTask().GetAwaiter().GetResult();
+                server.FlushAsync().GetAwaiter().GetResult();
+
+                var cancelGate = new Lock();
+                bool pipeClosed = false;
+                bool cancelSent = false;
+                byte[] cancelBytes = utf8NoBom.GetBytes(Core.ElevatedForceDelete.CancelCommand + "\n");
+                void SendCancel()
+                {
+                    lock (cancelGate)
+                    {
+                        if (pipeClosed || cancelSent) return;
+                        cancelSent = true;
+                        try
+                        {
+                            server.WriteAsync(cancelBytes).AsTask().Wait(TimeSpan.FromSeconds(2));
+                            server.FlushAsync().Wait(TimeSpan.FromSeconds(1));
+                        }
+                        catch (AggregateException) { }
+                        catch (IOException) { }
+                        catch (ObjectDisposedException) { }
+                        catch (InvalidOperationException) { }
+                    }
+                }
+
+                progress.CancelledChanged += SendCancel;
+                try
+                {
+                    if (progress.IsCancelled) SendCancel();
+                    using var reader = new StreamReader(server, utf8NoBom, detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: true);
+                    string? resLine = reader.ReadLineAsync().GetAwaiter().GetResult();
+                    if (!string.IsNullOrWhiteSpace(resLine))
+                    {
+                        try { response = System.Text.Json.JsonSerializer.Deserialize<Core.ForceDeleteResponse>(resLine); }
+                        catch (System.Text.Json.JsonException) { }
+                    }
+                }
+                finally
+                {
+                    progress.CancelledChanged -= SendCancel;
+                    lock (cancelGate) pipeClosed = true;
+                }
+            }
+        }
+        catch (IOException)
+        {
+        }
+        finally
+        {
+            connectCts.Cancel();
+            // Always wait for the elevated worker process to exit so deletion never continues after the card or lease closes.
+            if (hProcess != IntPtr.Zero)
+            {
+                Native.WaitForSingleObject(hProcess, unchecked((uint)-1));
+                Native.CloseHandle(hProcess);
+            }
+        }
+
+        if (response is null)
+        {
+            if (progress.IsCancelled) return;
+            foreach (string path in paths)
+            {
+                if (Core.FastPermanentDelete.ExistsExact(path))
+                    progress.AddFailure(Path.GetFileName(path.TrimEnd('\\')), Loc.T("OperationAccessDenied"), path, isAccessDenied: false);
+            }
+            return;
+        }
+        if (response.Cancelled)
+        {
+            progress.Cancel();
+        }
+        foreach (Core.ForceDeleteItemError error in response.Errors)
+        {
+            progress.AddFailure(error.Name, OperationProgress.DescribeForceDeleteError(error), error.Path, isAccessDenied: false);
         }
     });
 

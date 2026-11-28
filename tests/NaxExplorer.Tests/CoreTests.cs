@@ -1257,6 +1257,144 @@ internal static class CoreTests
             catch (OperationCanceledException) { cancelled = true; }
             Check.That(cancelled, "user cancellation must abort delete planning");
         });
+
+        yield return ("elevated_force_delete_blocks_system_paths_clouds_and_maps_nested_failures", "Force delete refuses drive roots, core OS folders, system-drive WindowsApps, System Volume Information, Recycle Bin folders, cloud roots, network paths, and trailing-dot paths while allowing secondary-drive leftover folders and mapping nested failures back to requested roots.", () =>
+        {
+            Check.Equal(32, ElevatedForceDelete.TrusteeStructSize, "x64 TRUSTEE_W struct size");
+            Check.Equal(48, ElevatedForceDelete.ExplicitAccessStructSize, "x64 EXPLICIT_ACCESS_W struct size");
+
+            var env = new ElevatedForceDelete.ProtectedEnvironment(
+                SystemDriveRoot: @"C:\",
+                WindowsDir: @"C:\Windows",
+                ProgramFilesDir: @"C:\Program Files",
+                ProgramFilesX86Dir: @"C:\Program Files (x86)",
+                ProgramDataDir: @"C:\ProgramData",
+                UsersDir: @"C:\Users",
+                UserProfileDirs: [@"C:\Users\SampleUser", @"C:\Users\OtherUser"]);
+
+            string[] blockedSystem =
+            [
+                @"C:\", @"E:\",
+                @"C:\Windows", @"C:\Windows\System32", @"C:\Windows\System32\drivers",
+                @"C:\Program Files", @"C:\Program Files (x86)", @"C:\ProgramData",
+                @"C:\Users", @"C:\Users\SampleUser", @"C:\Users\OtherUser",
+                @"C:\Program Files\WindowsApps", @"C:\Program Files\WindowsApps\SomeApp",
+                @"C:\Program Files\ModifiableWindowsApps", @"C:\Program Files\ModifiableWindowsApps\Game",
+                @"C:\Recovery", @"C:\Recovery\WindowsRE",
+                @"C:\EFI", @"C:\EFI\Microsoft\Boot",
+                @"C:\Boot", @"C:\Boot\BCD",
+                @"E:\System Volume Information", @"E:\System Volume Information\tracking.log",
+                @"E:\$Recycle.Bin", @"E:\$Recycle.Bin\S-1-5-21-0",
+            ];
+            foreach (string guarded in blockedSystem)
+            {
+                Check.That(!ElevatedForceDelete.IsEligible(guarded, null, env, out ForceDeleteBlockKind why) && why == ForceDeleteBlockKind.SystemProtected, $"system path '{guarded}' must be hard-blocked");
+            }
+
+            // Extended/device prefixes and forward-slash UNC/extended paths must be rejected at the API boundary.
+            Check.That(!ElevatedForceDelete.IsEligible(@"\\?\C:\Windows", null, env, out _), "extended prefix path must be rejected");
+            Check.That(!ElevatedForceDelete.IsEligible(@"\\.\C:\Windows", null, env, out _), "device prefix path must be rejected");
+            Check.That(!ElevatedForceDelete.IsEligible("//?/C:/Windows/Locked", null, env, out _), "forward-slash extended prefix path must be rejected");
+            Check.That(!ElevatedForceDelete.IsEligible("//server/share/folder", null, env, out _), "forward-slash UNC path must be rejected");
+
+            // Ancestor junction pointing to C:\Windows must be caught by canonical path resolution (both existing and non-existent/unopenable children).
+            string juncHost = Fixtures.TempFolder("force-delete-canon");
+            string toWindows = Path.Combine(juncHost, "win-link");
+            using (Process mkWin = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{toWindows}\" \"{Environment.GetFolderPath(Environment.SpecialFolder.Windows)}\"") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!)
+            {
+                mkWin.WaitForExit();
+            }
+            if (Directory.Exists(toWindows))
+            {
+                try
+                {
+                    Check.That(!ElevatedForceDelete.IsEligible(Path.Combine(toWindows, "System32"), null, out ForceDeleteBlockKind juncWhy) && juncWhy == ForceDeleteBlockKind.SystemProtected, "path traversing junction into Windows must be blocked");
+                    Check.That(!ElevatedForceDelete.IsEligible(Path.Combine(toWindows, "UnopenableChild"), null, out ForceDeleteBlockKind ancWhy) && ancWhy == ForceDeleteBlockKind.SystemProtected, "non-existent or unopenable child directly under Windows junction must be blocked via ancestor resolution");
+                }
+                finally
+                {
+                    Directory.Delete(toWindows);
+                }
+            }
+
+            // Reparse classification must distinguish cloud tags from non-cloud special reparse points.
+            Check.Equal(ForceDeleteBlockKind.CloudPath, ElevatedForceDelete.ClassifyForbiddenItem(FileAttributes.ReparsePoint, 0x9000001Au, out _), "cloud reparse tag must classify as CloudPath");
+            Check.Equal(ForceDeleteBlockKind.UnsupportedPath, ElevatedForceDelete.ClassifyForbiddenItem(FileAttributes.ReparsePoint, 0x8000001Bu, out _), "AppExecLink reparse tag must classify as UnsupportedPath");
+            Check.Equal(ForceDeleteBlockKind.None, ElevatedForceDelete.ClassifyForbiddenItem(FileAttributes.ReparsePoint | FileAttributes.Directory, FastPermanentDelete.IoReparseTagMountPoint, out bool isMountLink), "mount-point junction must be allowed as link");
+            Check.That(isMountLink, "mount-point junction must report isLink=true");
+
+            Check.That(!ElevatedForceDelete.IsEligible(@"D:\Cloud\Folder", p => PathTools.IsSameOrInside(p, @"D:\Cloud"), env, out ForceDeleteBlockKind cloudWhy) && cloudWhy == ForceDeleteBlockKind.CloudPath, "active cloud root must be blocked");
+            Check.That(!ElevatedForceDelete.IsEligible(@"\\server\share\dir", null, env, out _), "UNC path must be blocked");
+            Check.That(!ElevatedForceDelete.IsEligible("shell:RecycleBinFolder", null, env, out _), "shell place must be blocked");
+            Check.That(!ElevatedForceDelete.IsEligible(@"D:\Work\notes.", null, env, out _), "trailing-dot path must be blocked");
+
+            string[] allowed =
+            [
+                @"E:\Program Files",
+                @"E:\Program Files\ModifiableWindowsApps",
+                @"E:\WindowsApps",
+                @"D:\Work\OldLockedFolder",
+                @"C:\Program Files\OldLeftoverApp",
+                @"C:\Users\SampleUser\OldTempFolder",
+            ];
+            foreach (string ok in allowed)
+            {
+                Check.That(ElevatedForceDelete.IsEligible(ok, null, env, out ForceDeleteBlockKind why) && why == ForceDeleteBlockKind.None, $"secondary or leftover path '{ok}' should be eligible");
+            }
+
+            List<string> mapped = ElevatedForceDelete.MapEligibleFailurePaths(
+                [@"E:\Program Files", @"C:\Windows"],
+                [
+                    (@"E:\Program Files\ModifiableWindowsApps", true),
+                    (@"E:\Program Files\ModifiableWindowsApps\sub", true),
+                    (@"E:\Other\locked.txt", false),
+                    (@"C:\Windows\System32", true),
+                ],
+                null);
+            Check.Sequence([@"E:\Program Files"], mapped, "nested Access Denied failure must map once to eligible requested parent and drop system paths and non-AccessDenied errors");
+        });
+
+        yield return ("elevated_force_delete_respects_junctions_cloud_roots_and_appx_guard", "Force delete blocks when an Appx volume still has packages, removes a junction without touching its target, preserves nested cloud roots, and deletes read-only nested trees cleanly.", () =>
+        {
+            string root = Fixtures.TempFolder("force-delete");
+            string appxFolder = Path.Combine(root, "FakeWindowsApps");
+            string appxFile = Fixtures.Write(appxFolder, "marker.txt", "keep");
+            ForceDeleteResponse appxBlocked = ElevatedForceDelete.TakeOwnershipAndDelete(
+                [appxFolder],
+                isCloudPath: null,
+                appxVolumeGuard: p => new ForceDeleteItemError(p, "FakeWindowsApps", 5, ForceDeleteBlockKind.AppxVolumeHasPackages, "SampleGame.App"));
+            Check.Equal(1, appxBlocked.Errors.Count, "blocked Appx volume must report error");
+            Check.Equal(ForceDeleteBlockKind.AppxVolumeHasPackages, appxBlocked.Errors[0].BlockKind, "expected AppxVolumeHasPackages block kind");
+            Check.Equal("SampleGame.App", appxBlocked.Errors[0].Detail, "blocking package name must be preserved");
+            Check.That(File.Exists(appxFile), "blocked Appx folder must remain untouched");
+
+            string outsideTarget = Path.Combine(root, "outside");
+            string precious = Fixtures.Write(outsideTarget, "precious.txt", "safe");
+            string tree = Path.Combine(root, "locked-tree");
+            string roFile = Fixtures.Write(tree, @"sub\readonly.txt", "remove me");
+            File.SetAttributes(roFile, FileAttributes.ReadOnly);
+            string junction = Path.Combine(tree, "to-outside");
+            using (Process mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{outsideTarget}\"") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!)
+            {
+                mklink.WaitForExit();
+            }
+            Check.That(Directory.Exists(junction), "junction fixture was not created");
+
+            ForceDeleteResponse removed = ElevatedForceDelete.TakeOwnershipAndDelete([tree], isCloudPath: null, appxVolumeGuard: _ => null);
+            Check.Equal(0, removed.Errors.Count, "eligible tree with junction and read-only file should delete cleanly");
+            Check.That(!Directory.Exists(tree), "target tree must be deleted");
+            Check.That(File.Exists(precious), "junction target outside tree must remain completely untouched");
+
+            string cloudHost = Path.Combine(root, "cloud-host");
+            string nestedCloud = Path.Combine(cloudHost, "CloudSync");
+            string cloudDoc = Fixtures.Write(nestedCloud, "online.txt", "stay");
+            ForceDeleteResponse cloudBlocked = ElevatedForceDelete.TakeOwnershipAndDelete(
+                [cloudHost],
+                isCloudPath: p => PathTools.IsSameOrInside(p, nestedCloud),
+                appxVolumeGuard: _ => null);
+            Check.That(cloudBlocked.Errors.Any(e => e.BlockKind == ForceDeleteBlockKind.CloudPath), "nested cloud root must be refused with CloudPath block kind");
+            Check.That(File.Exists(cloudDoc), "nested cloud file must never be deleted");
+        });
     }
 
     private static FileEntry Entry(string name, EntryKind kind, long size) => new()

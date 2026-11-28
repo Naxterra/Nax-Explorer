@@ -25,7 +25,7 @@ internal interface IFileOperationProgressSink
 }
 
 /// <summary>One failed item of an operation and the reason Windows gave.</summary>
-internal sealed record OperationFailure(string Name, string Message);
+internal sealed record OperationFailure(string Name, string Message, string? Path = null, bool IsAccessDenied = false);
 
 /// <summary>
 /// Follows one operation for the app's own progress window: the share done, the item being worked on and the items that
@@ -100,10 +100,31 @@ internal sealed class OperationProgress : IFileOperationProgressSink
         Changed?.Invoke(_share, _current);
     }
 
-    internal void AddFailure(string name, string message)
+    internal void AddFailure(string name, string message, string? path = null, bool isAccessDenied = false)
     {
-        lock (_failures) _failures.Add(new OperationFailure(name, message));
+        lock (_failures) _failures.Add(new OperationFailure(name, message, path, isAccessDenied));
     }
+
+    internal static bool IsAccessDeniedResult(int result) => unchecked((uint)result) is
+        0x80270002u or // COPYENGINE_E_REQUIRES_ELEVATION
+        0x80270021u or // COPYENGINE_E_ACCESS_DENIED_SRC
+        0x80270022u or // COPYENGINE_E_ACCESS_DENIED_DEST
+        0x8027003Fu or // COPYENGINE_E_ACCESSDENIED_READONLY
+        0x80070005u or // E_ACCESSDENIED
+        0x80070522u;   // ERROR_PRIVILEGE_NOT_HELD
+
+    internal static string DescribeForceDeleteError(Core.ForceDeleteItemError error) => error.BlockKind switch
+    {
+        Core.ForceDeleteBlockKind.SystemProtected => Loc.T("ForceDeleteSystemProtected"),
+        Core.ForceDeleteBlockKind.CloudPath => Loc.T("ForceDeleteCloudBlocked"),
+        Core.ForceDeleteBlockKind.AppxVolumeHasPackages => !string.IsNullOrWhiteSpace(error.Detail)
+            ? Loc.F("ForceDeleteAppxHasPackages", error.Detail)
+            : Loc.T("ForceDeleteAppxNotEmpty"),
+        Core.ForceDeleteBlockKind.AppxVolumeNotEmpty => Loc.T("ForceDeleteAppxNotEmpty"),
+        Core.ForceDeleteBlockKind.NotElevated => Loc.T("OperationRequiresAdministrator"),
+        Core.ForceDeleteBlockKind.UnsupportedPath => Loc.T("OperationNotSupported"),
+        _ => DescribeShellFailure(HResultFromWin32(error.Win32Error), error.Path),
+    };
 
     internal static int HResultFromWin32(int win32Error) => unchecked((int)(0x80070000u | ((uint)win32Error & 0xFFFFu)));
 
@@ -132,7 +153,7 @@ internal sealed class OperationProgress : IFileOperationProgressSink
         if (result < 0 && result != Cancelled && result != unchecked((int)0x80270000))
         {
             string? path = lockingPath ?? NameOf(item, 0x80058000 /* SIGDN_FILESYSPATH */);
-            lock (_failures) _failures.Add(new OperationFailure(NameOf(item) ?? "?", DescribeShellFailure(result, path)));
+            lock (_failures) _failures.Add(new OperationFailure(NameOf(item) ?? "?", DescribeShellFailure(result, path), path, IsAccessDeniedResult(result)));
         }
         return _cancel ? Cancelled : 0;
     }
@@ -269,7 +290,7 @@ internal sealed class OperationProgress : IFileOperationProgressSink
         {
             lock (_failures)
             {
-                _pendingDeleteElevation.TryAdd(path, new OperationFailure(NameOf(item) ?? path, DescribeShellFailure(result)));
+                _pendingDeleteElevation.TryAdd(path, new OperationFailure(NameOf(item) ?? path, DescribeShellFailure(result), path, IsAccessDenied: true));
                 _hasPendingDeleteElevation = true;
             }
             return _cancel ? Cancelled : 0;

@@ -51,6 +51,39 @@ public static class CloudFolders
     public static bool Contains(IEnumerable<CloudFolder> folders, string path) => folders.Any(f => PathTools.IsSameOrInside(path, f.Path));
 
     /// <summary>
+    /// Reads Cloud Files sync roots registered for every Windows user account on this PC (for example when an
+    /// elevated helper runs under a separate Administrator account than the requesting standard user).
+    /// </summary>
+    internal static List<CloudFolder> FindAllUsersSyncRoots()
+    {
+        var found = new List<CloudFolder>();
+        try
+        {
+            using RegistryKey? roots = Registry.LocalMachine.OpenSubKey(SyncRootManager);
+            if (roots is null) return found;
+            foreach (string id in roots.GetSubKeyNames())
+            {
+                using RegistryKey? root = roots.OpenSubKey(id);
+                using RegistryKey? users = root?.OpenSubKey("UserSyncRoots");
+                if (users is null) continue;
+                string provider = id.Split('!')[0];
+                string displayName = NameOf(provider, root!.GetValue("DisplayNameResource") as string);
+                foreach (string sid in users.GetValueNames())
+                {
+                    if (users.GetValue(sid) is not string path || path.Trim().Length == 0) continue;
+                    string trimmed = NormalizePath(path);
+                    if (trimmed.Length == 0) continue;
+                    found.Add(new CloudFolder(provider, displayName, trimmed));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+        }
+        return DeduplicateAndLabel(found);
+    }
+
+    /// <summary>
     /// Reads the sync roots of one user. Each root is a key named "Provider!SID!Account!N" with the folder's path stored
     /// under UserSyncRoots, one value per user. Two folders of the same app get their folder name added.
     /// </summary>
