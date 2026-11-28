@@ -502,34 +502,26 @@ public sealed partial class MainWindow : Window
         RightPane.UpdateCutMarks();
     }
 
-    private static readonly Lock ActiveMutationsGate = new();
-    private static readonly List<string[]> ActiveMutations = [];
+    private static readonly ActiveMutationTracker ActiveMutations = new();
 
-    internal static bool OverlapsActiveMutation(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path) || PathTools.IsShellPlace(path)) return false;
-        lock (ActiveMutationsGate)
-        {
-            foreach (string[] batch in ActiveMutations)
-            {
-                foreach (string target in batch)
-                {
-                    if (PathTools.IsSameOrInside(path, target) || PathTools.IsSameOrInside(target, path)) return true;
-                }
-            }
-        }
-        return false;
-    }
+    internal static bool OverlapsActiveMutation(string? path) => ActiveMutations.Overlaps(path);
 
-    private static string[] BeginActiveMutation(IReadOnlyList<string> paths)
+    internal static bool TryBeginActiveMutation(
+        IReadOnlyList<string> writePaths,
+        out ActiveMutationLease? lease,
+        IReadOnlyList<string>? readPaths = null,
+        string? targetContainer = null)
     {
-        string[] tracked = paths.Where(p => !string.IsNullOrWhiteSpace(p) && !PathTools.IsShellPlace(p)).ToArray();
-        if (tracked.Length == 0) return tracked;
-        lock (ActiveMutationsGate) ActiveMutations.Add(tracked);
+        if (!ActiveMutations.TryBegin(writePaths, out lease, readPaths, targetContainer)) return false;
+        if (lease is null || lease.WritePaths.Length == 0) return true;
+        string[] fsWrites = FilesystemWritePaths(lease);
         foreach (MainWindow window in App.Instance!.Windows)
         {
-            window.LeftPane.CancelFolderSizesFor(tracked);
-            window.RightPane.CancelFolderSizesFor(tracked);
+            if (fsWrites.Length > 0)
+            {
+                window.LeftPane.CancelFolderSizesFor(fsWrites);
+                window.RightPane.CancelFolderSizesFor(fsWrites);
+            }
             if (OverlapsActiveMutation(window._active.PreviewLocation)
                 || window._active.SelectedItems.Any(i => OverlapsActiveMutation(i.Entry.FullPath)))
             {
@@ -537,19 +529,36 @@ public sealed partial class MainWindow : Window
                 window.Preview.StopBackgroundWork();
             }
         }
-        return tracked;
+        return true;
     }
 
-    private static void EndActiveMutation(string[] tracked)
+    internal static void EndActiveMutation(ActiveMutationLease? lease)
     {
-        if (tracked.Length == 0) return;
-        lock (ActiveMutationsGate) ActiveMutations.Remove(tracked);
+        if (lease is null || lease.IsEmpty) return;
+        ActiveMutations.End(lease);
+        if (lease.WritePaths.Length == 0) return;
+        bool hasFsWrites = FilesystemWritePaths(lease).Length > 0;
         foreach (MainWindow window in App.Instance!.Windows)
         {
-            window.LeftPane.ResumeFolderSizesAfterMutation();
-            window.RightPane.ResumeFolderSizesAfterMutation();
+            if (hasFsWrites)
+            {
+                window.LeftPane.ResumeFolderSizesAfterMutation();
+                window.RightPane.ResumeFolderSizesAfterMutation();
+            }
             window._previewTimer.Restart();
         }
+    }
+
+    private static string[] FilesystemWritePaths(ActiveMutationLease? lease)
+    {
+        if (lease is null || lease.WritePaths.Length == 0) return [];
+        var result = new List<string>(lease.WritePaths.Length);
+        foreach (string path in lease.WritePaths)
+        {
+            if (CompressedFolders.TrySplit(path, out string archive, out _)) result.Add(archive);
+            else if (!PathTools.IsShellPlace(path)) result.Add(path);
+        }
+        return [.. result];
     }
 
     private void UpdatePreview()
@@ -1467,100 +1476,217 @@ public sealed partial class MainWindow : Window
     /// </summary>
     internal async Task<bool> TransferAsync(IReadOnlyList<string> paths, string target, bool move)
     {
-        TransferConflicts conflicts;
-        try { conflicts = await Task.Run(() => TransferPlan.FindConflicts(paths, target)); }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+        if (paths.Count == 0) return false;
+        string[] destinationItems = DestinationItemPaths(paths, target);
+        IReadOnlyList<string> writePaths = move ? [.. paths, .. destinationItems] : destinationItems;
+        IReadOnlyList<string>? readPaths = move ? null : paths;
+        if (!TryBeginActiveMutation(writePaths, out ActiveMutationLease? lease, readPaths, targetContainer: target))
         {
-            ShowMessage(ex.Message, InfoBarSeverity.Error);
+            ShowMessage(Loc.T("OperationAlreadyRunning"), InfoBarSeverity.Informational);
             return false;
         }
-        // Without a question there is no answer: a conflict that appears only later is left to Windows to ask about.
-        ConflictChoice? choice = null;
-        if (conflicts.Any)
-        {
-            if (await AskSafelyAsync(() => FileOperationDialogs.AskConflictAsync(Root.XamlRoot, Root.RequestedTheme, conflicts, FilePane.PlaceName(target), move)) is not { } picked) return false;
-            choice = picked;
-        }
-        IReadOnlyList<TransferBatch> batches;
-        try { batches = await Task.Run(() => TransferPlan.Plan(paths, target, move, choice, conflicts.Items)); }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
-        {
-            ShowMessage(ex.Message, InfoBarSeverity.Error);
-            return false;
-        }
-        if (batches.Count == 0) return true;
-        string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
-        string[] mutation = move ? BeginActiveMutation(paths) : [];
+        bool startedOperation = false;
         bool completed;
         try
         {
+            TransferConflicts conflicts;
+            try { conflicts = await Task.Run(() => TransferPlan.FindConflicts(paths, target)); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+            {
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+                return false;
+            }
+            // Without a question there is no answer: a conflict that appears only later is left to Windows to ask about.
+            ConflictChoice? choice = null;
+            if (conflicts.Any)
+            {
+                if (await AskSafelyAsync(() => FileOperationDialogs.AskConflictAsync(Root.XamlRoot, Root.RequestedTheme, conflicts, FilePane.PlaceName(target), move)) is not { } picked) return false;
+                choice = picked;
+            }
+            IReadOnlyList<TransferBatch> batches;
+            try { batches = await Task.Run(() => TransferPlan.Plan(paths, target, move, choice, conflicts.Items)); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
+            {
+                ShowMessage(ex.Message, InfoBarSeverity.Error);
+                return false;
+            }
+            if (batches.Count == 0) return true;
+            string title = Loc.F(move ? "MovingTitle" : "CopyingTitle", paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count), FilePane.PlaceName(target));
+            startedOperation = true;
             completed = await RunOperationAsync(title, progress => ShellActions.TransferAsync(batches, move, Hwnd, progress));
         }
         finally
         {
-            // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
-            ForgetFolderSizes(new[] { target }, withContents: false);
-            ForgetFolderSizes(paths.Select(p => Path.GetFileName(p.TrimEnd('\\'))).Where(n => n.Length > 0).Select(n => Path.Combine(target, n)), withContents: true);
-            if (move) ForgetFolderSizes(paths, withContents: true);
-            RefreshPanesShowing(target);
-            if (move)
+            if (startedOperation)
             {
+                // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
+                ForgetFolderSizes(new[] { target }, withContents: false);
+                ForgetFolderSizes(destinationItems, withContents: true);
+                if (move) ForgetFolderSizes(paths, withContents: true);
+                RefreshPanesShowing(target);
+                if (move)
+                {
+                    foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
+                    foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        ForgetFolderSizes(new[] { archive }, withContents: false);
+                        // ZIP namespace views have no filesystem watcher. A move changes their listings and archive metadata.
+                        foreach (MainWindow window in App.Instance!.Windows)
+                            foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
+                                if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
+                        if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
+                    }
+                }
+            }
+            EndActiveMutation(lease);
+        }
+        return completed;
+    }
+
+    private static string[] DestinationItemPaths(IReadOnlyList<string> sources, string target)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return [];
+        string trimmedTarget = target.TrimEnd('\\', '/');
+        var result = new List<string>(sources.Count);
+        foreach (string source in sources)
+        {
+            string name = Path.GetFileName(source.TrimEnd('\\', '/'));
+            if (string.IsNullOrEmpty(name)) continue;
+            result.Add(PathTools.IsShellPlace(target) ? $"{trimmedTarget}\\{name}" : Path.Combine(target, name));
+        }
+        return [.. result];
+    }
+
+    /// <summary>
+    /// Deletes to the Recycle Bin, or for good with <paramref name="permanently"/> after the app asked. Items on a drive
+    /// without a Recycle Bin or larger than the drive's Recycle Bin capacity are confirmed in Nax Explorer and deleted
+    /// through the fast permanent-delete pass instead of slow single-threaded COM deletion.
+    /// Returns true when the operation completed without a reported failure or cancellation.
+    /// </summary>
+    internal async Task<bool> DeleteAsync(IReadOnlyList<string> paths, bool permanently)
+    {
+        if (paths.Count == 0) return false;
+        if (!TryBeginActiveMutation(paths, out ActiveMutationLease? lease))
+        {
+            ShowMessage(Loc.T("OperationAlreadyRunning"), InfoBarSeverity.Informational);
+            return false;
+        }
+        bool startedOperation = false;
+        bool completed;
+        try
+        {
+            string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
+            DeletePlan? plan = permanently || paths.Any(PathTools.IsShellPlace)
+                ? new DeletePlan([], paths, PermanentDeleteReason.UserRequested)
+                : await PlanDeleteWithProgressAsync(paths, what);
+            if (plan is null || _closed) return false;
+            if (plan.ConfirmationReason is { } reason)
+            {
+                bool mixed = plan.RecyclePaths.Count > 0;
+                if (await AskSafelyAsync(async () => (bool?)await FileOperationDialogs.ConfirmPermanentDeleteAsync(Root.XamlRoot, Root.RequestedTheme, plan.PermanentPaths, reason, mixed)) != true)
+                    return false;
+            }
+            string title = Loc.F(plan.RecyclePaths.Count == 0 ? "DeletingForGoodTitle" : "DeletingTitle", what);
+            startedOperation = true;
+            completed = await RunOperationAsync(title, async progress =>
+            {
+                if (plan.RecyclePaths.Count > 0)
+                    await ShellActions.DeleteAsync(plan.RecyclePaths, Hwnd, permanently: false, progress, CloudRoots.Contains);
+                if (!progress.IsCancelled && plan.PermanentPaths.Count > 0)
+                    await ShellActions.DeleteAsync(plan.PermanentPaths, Hwnd, permanently: true, progress, CloudRoots.Contains);
+            });
+        }
+        finally
+        {
+            if (startedOperation)
+            {
+                // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
+                ForgetFolderSizes(paths, withContents: true);
                 foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
                 foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     ForgetFolderSizes(new[] { archive }, withContents: false);
-                    // ZIP namespace views have no filesystem watcher. A move changes their listings and archive metadata.
                     foreach (MainWindow window in App.Instance!.Windows)
                         foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
                             if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
                     if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
                 }
             }
-            EndActiveMutation(mutation);
+            EndActiveMutation(lease);
         }
         return completed;
     }
 
-    /// <summary>
-    /// Deletes to the Recycle Bin, or for good with <paramref name="permanently"/> after the app asked. Items on a drive
-    /// without a Recycle Bin, such as a network share, are never deleted for good without that question either.
-    /// Returns true when the operation completed without a reported failure or cancellation.
-    /// </summary>
-    internal async Task<bool> DeleteAsync(IReadOnlyList<string> paths, bool permanently)
+    private async Task<DeletePlan?> PlanDeleteWithProgressAsync(IReadOnlyList<string> paths, string what)
     {
-        if (paths.Count == 0) return false;
-        // Items of the Recycle Bin itself, or of another shell place, can only be deleted for good.
-        if (paths.Any(PathTools.IsShellPlace)) permanently = true;
-        bool noBin = !permanently && !await Task.Run(() => paths.All(FileOperationDialogs.HasRecycleBin));
-        if (permanently || noBin)
+        using var cts = new CancellationTokenSource();
+        void CancelOnClose(object _, WindowEventArgs __)
         {
-            if (await AskSafelyAsync(async () => (bool?)await FileOperationDialogs.ConfirmPermanentDeleteAsync(Root.XamlRoot, Root.RequestedTheme, paths, noBin)) != true) return false;
-            permanently = true;
+            try { cts.Cancel(); }
+            catch (ObjectDisposedException) { }
         }
-        string what = paths.Count == 1 ? Path.GetFileName(paths[0].TrimEnd('\\')) : Loc.F("ItemCount", paths.Count);
-        string[] mutation = BeginActiveMutation(paths);
-        bool completed;
+        Closed += CancelOnClose;
         try
         {
-            completed = await RunOperationAsync(Loc.F(permanently ? "DeletingForGoodTitle" : "DeletingTitle", what),
-                progress => ShellActions.DeleteAsync(paths, Hwnd, permanently, progress, CloudRoots.Contains));
+            Task<DeletePlan> planTask = Task.Run(() => RecycleBins.PlanDelete(paths, permanentlyRequested: false, CloudRoots.Contains, cts.Token));
+            Task completedFirst = await Task.WhenAny(planTask, Task.Delay(250));
+            if (_closed)
+            {
+                try { cts.Cancel(); }
+                catch (ObjectDisposedException) { }
+                return null;
+            }
+            if (completedFirst == planTask)
+            {
+                try
+                {
+                    return await planTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    return null;
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    CrashLog.Write(ex);
+                    ShowMessage(ex.Message, InfoBarSeverity.Error);
+                    return null;
+                }
+            }
+            var prepProgress = new OperationProgress();
+            prepProgress.CancelledChanged += () =>
+            {
+                try { cts.Cancel(); }
+                catch (ObjectDisposedException) { }
+            };
+            var prepCard = new OperationCard(OperationsPanel, Loc.F("DeletingTitle", what), prepProgress);
+            App.Instance?.OperationStarted();
+            try
+            {
+                DeletePlan result = await planTask;
+                // Respect a Cancel click or window close that arrived right as planTask finished or hit its time budget.
+                return prepProgress.IsCancelled || cts.IsCancellationRequested || _closed ? null : result;
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                CrashLog.Write(ex);
+                if (!_closed) ShowMessage(ex.Message, InfoBarSeverity.Error);
+                return null;
+            }
+            finally
+            {
+                App.Instance?.OperationEnded();
+                prepCard.Finish(null);
+            }
         }
         finally
         {
-            // Invalidate cached folder sizes and schedule pane refreshes BEFORE resuming background folder-size scans.
-            ForgetFolderSizes(paths, withContents: true);
-            foreach (string folder in paths.Select(p => Path.GetDirectoryName(p.TrimEnd('\\'))).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase)) RefreshPanesShowing(folder);
-            foreach (string archive in paths.Select(p => CompressedFolders.TrySplit(p, out string file, out _) ? file : null).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                ForgetFolderSizes(new[] { archive }, withContents: false);
-                foreach (MainWindow window in App.Instance!.Windows)
-                    foreach (FilePane pane in new[] { window.LeftPane, window.RightPane })
-                        if (CompressedFolders.TrySplit(pane.Location, out string shown, out _) && PathTools.SameLocation(shown, archive)) pane.ScheduleRefresh();
-                if (Path.GetDirectoryName(archive) is { } parent) RefreshPanesShowing(parent);
-            }
-            EndActiveMutation(mutation);
+            Closed -= CancelOnClose;
         }
-        return completed;
     }
 
     /// <summary>

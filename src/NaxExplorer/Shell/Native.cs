@@ -113,6 +113,13 @@ internal interface IPersistFile
     [PreserveSig] int Load([MarshalAs(UnmanagedType.LPWStr)] string file, uint mode);
 }
 
+[ComImport, Guid("01E18D10-4D8B-11d2-855D-006008059367"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IFileSystemBindData
+{
+    [PreserveSig] int SetFindData([In] ref Native.WIN32_FIND_DATA pfd);
+    [PreserveSig] int GetFindData(out Native.WIN32_FIND_DATA pfd);
+}
+
 internal static partial class Native
 {
     [DllImport("user32.dll")]
@@ -325,12 +332,118 @@ internal static partial class Native
 
     public delegate IntPtr SubclassProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
 
+    public const uint SFGAO_CANDELETE = 0x00000020;
+    public const uint SFGAO_FILESYSTEM = 0x40000000;
+
     // Both take a path or one of the app's shell places ("shell:..."), which they hand Windows by its parsing name.
     public static int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid riid, out IShellItem item) =>
         SHCreateItemFromParsingNameRaw(Core.PathTools.ParsingName(path), bindContext, ref riid, out item);
 
     public static int SHParseDisplayName(string name, IntPtr bindContext, out IntPtr pidl, uint attributesIn, out uint attributesOut) =>
         SHParseDisplayNameRaw(Core.PathTools.ParsingName(name), bindContext, out pidl, attributesIn, out attributesOut);
+
+    /// <summary>
+    /// Parses a path or shell place into an absolute PIDL. If Windows redirects a real existing filesystem path to an
+    /// orphaned virtual CLSID (for example an uninstalled OneDrive Known Folder that resolves to ::{018D5C66-...} and
+    /// fails IFileOperation with E_NOTIMPL), re-parses it with STR_FILE_SYS_BIND_DATA so Recycle Bin and shell
+    /// operations target the actual filesystem item instead.
+    /// </summary>
+    public static int ParseShellItemPidl(string path, out IntPtr pidl)
+    {
+        pidl = IntPtr.Zero;
+        if (!Core.PathTools.IsShellPlace(path) && Core.FastPermanentDelete.HasTrailingDotOrSpaceSegment(path))
+            return unchecked((int)0x80070032); // ERROR_NOT_SUPPORTED
+        int hr = SHParseDisplayName(path, IntPtr.Zero, out pidl, SFGAO_FILESYSTEM, out uint sfgao);
+        if (Core.PathTools.IsShellPlace(path))
+        {
+            if (hr != 0 && pidl != IntPtr.Zero) { ILFree(pidl); pidl = IntPtr.Zero; }
+            return hr;
+        }
+        bool brokenRedirect = hr != 0 || pidl == IntPtr.Zero || (sfgao & SFGAO_FILESYSTEM) == 0 || IsOrphanedClsidDisplayName(pidl);
+        if (brokenRedirect && TryParsePureFileSystemPidl(path, out IntPtr fsPidl))
+        {
+            if (pidl != IntPtr.Zero) ILFree(pidl);
+            pidl = fsPidl;
+            return 0;
+        }
+        if (hr != 0 && pidl != IntPtr.Zero) { ILFree(pidl); pidl = IntPtr.Zero; }
+        return hr;
+    }
+
+    internal static bool TryParsePureFileSystemPidl(string path, out IntPtr pidl, Func<string, bool>? isCloudPath = null)
+    {
+        pidl = IntPtr.Zero;
+        if (string.IsNullOrWhiteSpace(path)
+            || Core.PathTools.IsShellPlace(path)
+            || Core.FastPermanentDelete.HasTrailingDotOrSpaceSegment(path)
+            || (isCloudPath ?? Services.CloudRoots.Contains)(path))
+            return false;
+        FileAttributes attrs;
+        try
+        {
+            attrs = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+        if (Core.CloudFiles.IsOnlineOnly(attrs) || Core.CloudFiles.IsUnfetchedFolder(attrs))
+            return false;
+        if (CreateBindCtx(0, out System.Runtime.InteropServices.ComTypes.IBindCtx? bc) != 0 || bc is null)
+            return false;
+        try
+        {
+            bc.RegisterObjectParam("File System Bind Data", new FileSystemBindData((uint)attrs));
+            int hr = SHParseDisplayNameWithBindCtx(path, bc, out pidl, SFGAO_FILESYSTEM | SFGAO_CANDELETE, out uint outAttrs);
+            if (hr == 0 && pidl != IntPtr.Zero && (outAttrs & SFGAO_FILESYSTEM) != 0 && !IsOrphanedClsidDisplayName(pidl))
+                return true;
+            if (pidl != IntPtr.Zero) { ILFree(pidl); pidl = IntPtr.Zero; }
+            return false;
+        }
+        catch (COMException)
+        {
+            if (pidl != IntPtr.Zero) { ILFree(pidl); pidl = IntPtr.Zero; }
+            return false;
+        }
+        finally
+        {
+            Release(bc);
+        }
+    }
+
+    private static bool IsOrphanedClsidDisplayName(IntPtr pidl)
+    {
+        if (SHGetNameFromIDList(pidl, 0 /* SIGDN_NORMALDISPLAY */, out IntPtr namePtr) != 0 || namePtr == IntPtr.Zero)
+            return false;
+        string? display = TakeString(namePtr);
+        return display is not null && display.StartsWith("::{", StringComparison.Ordinal);
+    }
+
+    private sealed class FileSystemBindData(uint attributes) : IFileSystemBindData
+    {
+        private WIN32_FIND_DATA _data = new() { dwFileAttributes = attributes };
+
+        public int SetFindData(ref WIN32_FIND_DATA pfd)
+        {
+            _data = pfd;
+            return 0;
+        }
+
+        public int GetFindData(out WIN32_FIND_DATA pfd)
+        {
+            pfd = _data;
+            return 0;
+        }
+    }
+
+    [DllImport("ole32.dll")]
+    private static extern int CreateBindCtx(uint reserved, out System.Runtime.InteropServices.ComTypes.IBindCtx? bindContext);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHParseDisplayName")]
+    private static extern int SHParseDisplayNameWithBindCtx(string name, System.Runtime.InteropServices.ComTypes.IBindCtx bindContext, out IntPtr pidl, uint attributesIn, out uint attributesOut);
+
+    [DllImport("shell32.dll")]
+    public static extern int SHCreateItemFromIDList(IntPtr pidl, ref Guid riid, out IShellItem item);
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHCreateItemFromParsingName")]
     private static extern int SHCreateItemFromParsingNameRaw(string path, IntPtr bindContext, ref Guid riid, out IShellItem item);

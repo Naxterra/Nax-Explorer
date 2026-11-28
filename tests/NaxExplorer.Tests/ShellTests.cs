@@ -306,6 +306,47 @@ internal static class ShellTests
                 }
             });
         });
+
+        yield return ("shell_filesystem_bind_parse_resolves_deletable_filesystem_item_and_notimpl_localizes", "Pure filesystem bind-data parsing builds a deletable SFGAO_FILESYSTEM shell item for existing folders while rejecting missing or trailing-dot paths, and E_NOTIMPL maps to a localized message.", () =>
+        {
+            string root = Fixtures.TempFolder("fs-bind");
+            string folder = Directory.CreateDirectory(Path.Combine(root, "OrphanedFolder")).FullName;
+            string sibling = Fixtures.Write(root, "doc", "keep");
+            string trailingDot = Path.Combine(root, "doc.");
+            Check.Equal(Loc.T("OperationNotSupported"), OperationProgress.DescribeShellFailure(unchecked((int)0x80004001)), "E_NOTIMPL must localize");
+            Check.Equal(Loc.T("OperationNotSupported"), OperationProgress.DescribeShellFailure(unchecked((int)0x80070032)), "ERROR_NOT_SUPPORTED must localize");
+
+            OnSta(() =>
+            {
+                Check.That(Native.TryParsePureFileSystemPidl(folder, out IntPtr pidl) && pidl != IntPtr.Zero, "pure filesystem PIDL was not created for existing folder");
+                try
+                {
+                    Guid riid = Native.IID_IShellItem;
+                    Check.Equal(0, Native.SHCreateItemFromIDList(pidl, ref riid, out IShellItem item), "SHCreateItemFromIDList failed");
+                    try
+                    {
+                        Check.Equal(0, item.GetAttributes(Native.SFGAO_FILESYSTEM | Native.SFGAO_CANDELETE, out uint attrs), "GetAttributes failed");
+                        Check.That((attrs & Native.SFGAO_FILESYSTEM) != 0, "expected SFGAO_FILESYSTEM");
+                        Check.That((attrs & Native.SFGAO_CANDELETE) != 0, "expected SFGAO_CANDELETE");
+                    }
+                    finally
+                    {
+                        Native.Release(item);
+                    }
+                }
+                finally
+                {
+                    Native.ILFree(pidl);
+                }
+
+                Check.That(!Native.TryParsePureFileSystemPidl(Path.Combine(root, "missing"), out IntPtr missingPidl) && missingPidl == IntPtr.Zero, "missing path must not produce a filesystem PIDL");
+                Check.That(!Native.TryParsePureFileSystemPidl(trailingDot, out IntPtr dotPidl) && dotPidl == IntPtr.Zero, "trailing-dot path must be refused");
+                Check.Equal(unchecked((int)0x80070032), Native.ParseShellItemPidl(trailingDot, out IntPtr parsedDotPidl), "ParseShellItemPidl must refuse trailing-dot path before calling SHParseDisplayName");
+                Check.Equal(IntPtr.Zero, parsedDotPidl, "ParseShellItemPidl must leave pidl zero on trailing-dot refusal");
+                Check.That(!Native.TryParsePureFileSystemPidl(folder, out IntPtr cloudPidl, _ => true) && cloudPidl == IntPtr.Zero, "active cloud root path must not bypass shell namespace via pure-filesystem bind data");
+                Check.That(File.Exists(sibling), "sibling must stay untouched");
+            });
+        });
     }
 
     private static void OnSta(Action body)

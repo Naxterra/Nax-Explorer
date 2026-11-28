@@ -2114,12 +2114,20 @@ public sealed partial class FilePane : UserControl
         // Changing only the case of the item's own name is allowed.
         bool caseOnly = string.Equals(name, item.Entry.Name, StringComparison.OrdinalIgnoreCase);
         string originalPath = item.Entry.FullPath;
+        string targetPath = Path.Combine(folder, name);
+        string[] renamePaths = caseOnly ? [originalPath] : [originalPath, targetPath];
+        if (!MainWindow.TryBeginActiveMutation(renamePaths, out ActiveMutationLease? renameLease))
+        {
+            EndRenameEdit();
+            _owner.ShowMessage(Loc.T("OperationAlreadyRunning"), InfoBarSeverity.Informational);
+            return;
+        }
         PaneTab tab = _tab;
         _renaming = true;
         _refreshVersion++;
         try
         {
-            if (!caseOnly && await Task.Run(() => Path.Exists(Path.Combine(folder, name))))
+            if (!caseOnly && await Task.Run(() => Path.Exists(targetPath)))
             {
                 _owner.ShowMessage(Loc.F("NameTaken", name), InfoBarSeverity.Warning);
                 if (_renameBox is { } editor) FocusRenameBox(editor, item);
@@ -2138,6 +2146,7 @@ public sealed partial class FilePane : UserControl
         }
         finally
         {
+            MainWindow.EndActiveMutation(renameLease);
             _renaming = false;
         }
         _refreshAfterRename = false;

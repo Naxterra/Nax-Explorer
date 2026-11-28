@@ -52,6 +52,9 @@ internal sealed class OperationProgress : IFileOperationProgressSink
     /// <summary>Raised on the operation's thread with the share done, from 0 to 1, and the current item's name.</summary>
     public event Action<double, string?>? Changed;
 
+    /// <summary>Raised once when the operation is cancelled.</summary>
+    public event Action? CancelledChanged;
+
     public IReadOnlyList<OperationFailure> Failures
     {
         get
@@ -62,7 +65,20 @@ internal sealed class OperationProgress : IFileOperationProgressSink
 
     public bool IsCancelled => _cancel;
 
-    public void Cancel() => _cancel = true;
+    public void Cancel()
+    {
+        if (Interlocked.Exchange(ref _cancelNotified, 1) == 0)
+        {
+            _cancel = true;
+            CancelledChanged?.Invoke();
+        }
+        else
+        {
+            _cancel = true;
+        }
+    }
+
+    private int _cancelNotified;
 
     private string? _current;
     private double _share;
@@ -170,6 +186,9 @@ internal sealed class OperationProgress : IFileOperationProgressSink
                 return Loc.T("OperationTooLargeForRecycleBin");
             case 0x8027003Du: // COPYENGINE_E_DIR_NOT_EMPTY
                 return Loc.T("OperationDirNotEmpty");
+            case 0x80004001u: // E_NOTIMPL
+            case 0x80070032u: // ERROR_NOT_SUPPORTED
+                return Loc.T("OperationNotSupported");
             default:
                 return Marshal.GetExceptionForHR(result)?.Message ?? $"0x{result:X8}";
         }

@@ -154,15 +154,18 @@ internal static class ShellActions
     {
         using var items = ShellItems.Create(sources, requireAll: true);
         if (items.Array is null) return -1;
-        Guid riid = Native.IID_IShellItem;
-        if (Native.SHCreateItemFromParsingName(folder, IntPtr.Zero, ref riid, out IShellItem destination) != 0) return -1;
+        if (Native.ParseShellItemPidl(folder, out IntPtr folderPidl) != 0 || folderPidl == IntPtr.Zero) return -1;
+        IShellItem? destination = null;
         try
         {
+            Guid riid = Native.IID_IShellItem;
+            if (Native.SHCreateItemFromIDList(folderPidl, ref riid, out destination) != 0 || destination is null) return -1;
             return move ? operation.MoveItems(items.Array, destination) : operation.CopyItems(items.Array, destination);
         }
         finally
         {
             Native.Release(destination);
+            Native.ILFree(folderPidl);
         }
     }
 
@@ -251,7 +254,7 @@ internal static class ShellActions
                     progress.AddFailure(unsafeName.Length > 0 ? unsafeName : path, OperationProgress.DescribeShellFailure(OperationProgress.HResultFromWin32(50), path));
                     continue;
                 }
-                int hr = Native.SHParseDisplayName(Core.PathTools.ParsingName(path), IntPtr.Zero, out IntPtr pidl, 0, out _);
+                int hr = Native.ParseShellItemPidl(path, out IntPtr pidl);
                 if (hr == 0 && pidl != IntPtr.Zero)
                 {
                     parsed.Add(pidl);
@@ -286,15 +289,18 @@ internal static class ShellActions
     {
         Perform(owner, Core.OperationFlags.ForRename(), null, operation =>
         {
-            Guid riid = Native.IID_IShellItem;
-            if (Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref riid, out IShellItem item) != 0) return -1;
+            if (Native.ParseShellItemPidl(path, out IntPtr pidl) != 0 || pidl == IntPtr.Zero) return -1;
+            IShellItem? item = null;
             try
             {
+                Guid riid = Native.IID_IShellItem;
+                if (Native.SHCreateItemFromIDList(pidl, ref riid, out item) != 0 || item is null) return -1;
                 return operation.RenameItem(item, newName, IntPtr.Zero);
             }
             finally
             {
                 Native.Release(item);
+                Native.ILFree(pidl);
             }
         });
     });
@@ -387,7 +393,7 @@ internal sealed class ShellItems : IDisposable
         {
             foreach (string path in paths)
             {
-                int parsed = Native.SHParseDisplayName(path, IntPtr.Zero, out IntPtr pidl, 0, out _);
+                int parsed = Native.ParseShellItemPidl(path, out IntPtr pidl);
                 if (parsed == 0 && pidl != IntPtr.Zero) pidls.Add(pidl);
                 else if (pidl != IntPtr.Zero) Native.ILFree(pidl);
                 if (requireAll && (parsed != 0 || pidl == IntPtr.Zero))

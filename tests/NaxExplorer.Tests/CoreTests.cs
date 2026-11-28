@@ -1104,6 +1104,159 @@ internal static class CoreTests
             Check.Equal(0, elevWithPrior.Count, "non-empty parent with prior failure must not escalate");
             Check.Equal(0, failWithPrior.Count, "duplicate ERROR_DIR_NOT_EMPTY should be suppressed when prior failure exists");
         });
+
+        yield return ("active_mutation_tracker_blocks_overlapping_paths_and_allows_siblings", "An active delete, move, copy, or rename blocks colliding operations across filesystem and ZIP paths while allowing upward moves, unrelated transfers into ancestor folders, and concurrent reads.", () =>
+        {
+            var tracker = new ActiveMutationTracker();
+            Check.That(tracker.TryBegin([@"D:\Work\Alpha"], out ActiveMutationLease? first), "initial mutation claim failed");
+            Check.That(tracker.Overlaps(@"D:\Work\Alpha"), "exact path must overlap");
+            Check.That(tracker.Overlaps(@"D:\Work\Alpha\Sub\file.txt"), "child inside active folder must overlap");
+            Check.That(tracker.Overlaps(@"D:\Work"), "ancestor of active folder must overlap");
+            Check.That(!tracker.Overlaps(@"D:\Work\Beta"), "unrelated sibling must not overlap");
+
+            Check.That(!tracker.TryBegin([@"D:\Work\Alpha"], out ActiveMutationLease? dup) && dup is null, "duplicate claim on same path must be blocked");
+            Check.That(!tracker.TryBegin([@"D:\Work\Alpha\Sub"], out _), "overlapping child claim must be blocked");
+            Check.That(!tracker.TryBegin([@"D:\Work"], out _), "overlapping parent claim must be blocked");
+
+            // Copying or moving an unrelated file into an ancestor folder (D:\Work or D:\) of an active delete must succeed.
+            Check.That(tracker.TryBegin([@"D:\Work\photo.jpg"], out ActiveMutationLease? ancestorCopy, readPaths: [@"C:\Inbox\photo.jpg"], targetContainer: @"D:\Work"), "copy into ancestor folder of active delete must be allowed");
+            Check.That(tracker.TryBegin([@"D:\photo2.jpg"], out ActiveMutationLease? rootCopy, readPaths: [@"C:\Inbox\photo.jpg"], targetContainer: @"D:\"), "second concurrent read of same source to distinct target must be allowed");
+            Check.That(!tracker.TryBegin([@"C:\Inbox\photo.jpg"], out _), "deleting a file actively being copied must be blocked");
+            Check.That(!tracker.TryBegin([@"D:\Work\photo.jpg"], out _), "deleting an active copy destination must be blocked");
+            Check.That(!tracker.TryBegin([@"D:\Work\Alpha\Sub\incoming.txt"], out _, readPaths: [@"C:\Inbox\incoming.txt"], targetContainer: @"D:\Work\Alpha\Sub"), "copying inside a folder being deleted must be blocked");
+
+            // Upward move (moving a file from a subfolder into its parent folder) must never self-block.
+            Check.That(tracker.TryBegin([@"D:\Work\Beta\Sub\doc.txt", @"D:\Work\Beta\doc.txt"], out ActiveMutationLease? upwardMove, targetContainer: @"D:\Work\Beta"), "upward move into parent folder must succeed");
+
+            // Shell places match by exact shell identity, while ZIP entries overlap their archive and nested entries.
+            Check.That(tracker.TryBegin(["shell:RecycleBinFolder\\item1"], out ActiveMutationLease? shellBatch), "shell place claim failed");
+            Check.That(!tracker.TryBegin(["shell:RecycleBinFolder\\item1"], out _), "duplicate shell place claim must be blocked");
+            Check.That(tracker.TryBegin(["shell:RecycleBinFolder\\item2"], out ActiveMutationLease? shellOther), "distinct shell place claim must succeed");
+
+            Check.That(tracker.TryBegin([@"shell:D:\Archives\pack.zip\docs"], out ActiveMutationLease? zipLease), "ZIP entry claim failed");
+            Check.That(!tracker.TryBegin([@"shell:D:\Archives\pack.zip\docs\readme.txt"], out _), "nested ZIP entry claim must be blocked");
+            Check.That(!tracker.TryBegin([@"shell:D:\Archives\pack.zip\images"], out _), "concurrent write to sibling entry in the same ZIP archive must be blocked");
+            Check.That(!tracker.TryBegin([@"D:\Archives\pack.zip"], out _), "deleting parent ZIP file while deleting its entry must be blocked");
+            Check.That(tracker.TryBegin([@"shell:D:\Archives\other.zip\images"], out ActiveMutationLease? zipOtherArchive), "writing to a different ZIP archive must succeed");
+
+            tracker.End(zipLease);
+            tracker.End(zipOtherArchive);
+            Check.That(tracker.TryBegin([@"D:\Out\a"], out ActiveMutationLease? zipReadA, readPaths: [@"shell:D:\Archives\pack.zip\docs"]), "first read out of ZIP must succeed");
+            Check.That(tracker.TryBegin([@"D:\Out\b"], out ActiveMutationLease? zipReadB, readPaths: [@"shell:D:\Archives\pack.zip\images"]), "concurrent read of sibling entry in same ZIP must succeed");
+            Check.That(!tracker.TryBegin([@"shell:D:\Archives\pack.zip\other"], out _), "writing to ZIP while another copy is reading from it must be blocked");
+
+            tracker.End(first);
+            tracker.End(ancestorCopy);
+            tracker.End(rootCopy);
+            tracker.End(upwardMove);
+            tracker.End(shellBatch);
+            tracker.End(shellOther);
+            tracker.End(zipReadA);
+            tracker.End(zipReadB);
+            Check.That(!tracker.Overlaps(@"D:\Work\Alpha"), "released path must no longer overlap");
+            Check.That(tracker.TryBegin([@"D:\Work\Alpha"], out ActiveMutationLease? retry), "re-claiming after release must succeed");
+            tracker.End(retry);
+        });
+
+        yield return ("recycle_bin_policy_parses_volume_guid_nuke_flag_and_capacity", "BitBucket volume policy reads NukeOnDelete, NoRecycleFiles, and MiB MaxCapacity accurately, and parses volume GUIDs from Win32 volume names.", () =>
+        {
+            Check.Equal("{00000000-1111-2222-3333-444444444444}", RecycleBins.ParseVolumeGuid(@"\\?\Volume{00000000-1111-2222-3333-444444444444}\"), "volume GUID extraction");
+            Check.Equal(null, RecycleBins.ParseVolumeGuid(@"C:\"), "drive root without GUID must return null");
+
+            RecycleBinVolumeInfo normal = RecycleBins.ReadBitBucketPolicy(nukeOnDeleteValue: 0, maxCapacityMbValue: 93619, noRecyclePolicy: false);
+            Check.That(normal.HasRecycleBin, "normal volume must have Recycle Bin");
+            Check.Equal(93619L * 1024L * 1024L, normal.MaxCapacityBytes, "MaxCapacity must convert MiB to bytes");
+
+            RecycleBinVolumeInfo nuked = RecycleBins.ReadBitBucketPolicy(nukeOnDeleteValue: 1, maxCapacityMbValue: 93619, noRecyclePolicy: false);
+            Check.That(!nuked.HasRecycleBin && nuked.MaxCapacityBytes is null, "NukeOnDelete=1 must disable Recycle Bin");
+
+            RecycleBinVolumeInfo policyOff = RecycleBins.ReadBitBucketPolicy(nukeOnDeleteValue: 0, maxCapacityMbValue: 50000, noRecyclePolicy: true);
+            Check.That(!policyOff.HasRecycleBin, "NoRecycleFiles policy must disable Recycle Bin");
+
+            RecycleBinVolumeInfo unset = RecycleBins.ReadBitBucketPolicy(nukeOnDeleteValue: null, maxCapacityMbValue: 0, noRecyclePolicy: false);
+            Check.That(unset.HasRecycleBin && unset.MaxCapacityBytes is null, "unset or zero MaxCapacity must leave capacity unknown");
+
+            int highBitMb = unchecked((int)0x80000001u);
+            RecycleBinVolumeInfo huge = RecycleBins.ReadBitBucketPolicy(nukeOnDeleteValue: 0, maxCapacityMbValue: highBitMb, noRecyclePolicy: false);
+            Check.Equal((long)0x80000001u * 1024L * 1024L, huge.MaxCapacityBytes, "high-bit DWORD MaxCapacity must decode unsigned");
+
+            string system = Path.GetPathRoot(Environment.SystemDirectory)!;
+            RecycleBinVolumeInfo sysInfo = RecycleBins.GetVolumeInfo(Path.Combine(system, "some-file.txt"));
+            Check.That(sysInfo.HasRecycleBin, "system drive should report Recycle Bin available");
+            Check.That(!RecycleBins.GetVolumeInfo(@"\\server\share\file.txt").HasRecycleBin, "UNC path must report no Recycle Bin");
+        });
+
+        yield return ("recycle_bin_plan_routes_oversized_items_to_permanent_and_respects_links_and_cloud_roots", "Delete planning routes items larger than the volume's Recycle Bin quota to permanent delete with confirmation while keeping small items in the Recycle Bin, without following junctions, entering cloud roots, or measuring trailing-dot siblings.", () =>
+        {
+            string root = Fixtures.TempFolder("recycle-plan");
+            string smallFile = Fixtures.Write(root, "small.txt", new string('a', 100));
+            string bigFile = Fixtures.Write(root, "big.bin", new string('b', 4096));
+            string bigFolder = Path.Combine(root, "big-folder");
+            Fixtures.Write(bigFolder, @"sub\one.dat", new string('c', 1500));
+            Fixtures.Write(bigFolder, @"sub\two.dat", new string('d', 1500));
+            string smallFolder = Path.Combine(root, "small-folder");
+            Fixtures.Write(smallFolder, "tiny.txt", new string('e', 50));
+
+            Func<string, RecycleBinVolumeInfo> limit2000 = _ => new RecycleBinVolumeInfo(true, 2000);
+            Func<string, RecycleBinVolumeInfo> noBin = _ => new RecycleBinVolumeInfo(false, null);
+
+            DeletePlan fits = RecycleBins.PlanDelete([smallFile, smallFolder], false, null, CancellationToken.None, limit2000);
+            Check.Sequence([smallFile, smallFolder], fits.RecyclePaths, "fitting items must stay in RecyclePaths");
+            Check.Equal(0, fits.PermanentPaths.Count, "fitting items must not go permanent");
+            Check.Equal(null, fits.ConfirmationReason, "fitting items must not need permanent confirmation");
+
+            DeletePlan oversizedOnly = RecycleBins.PlanDelete([bigFolder], false, null, CancellationToken.None, limit2000);
+            Check.Equal(0, oversizedOnly.RecyclePaths.Count, "oversized folder must not go to RecyclePaths");
+            Check.Sequence([bigFolder], oversizedOnly.PermanentPaths, "oversized folder must go to PermanentPaths");
+            Check.Equal(PermanentDeleteReason.TooLargeForRecycleBin, oversizedOnly.ConfirmationReason, "oversized reason expected");
+
+            DeletePlan mixed = RecycleBins.PlanDelete([smallFile, bigFile, bigFolder], false, null, CancellationToken.None, limit2000);
+            Check.Sequence([smallFile], mixed.RecyclePaths, "small sibling in mixed batch must still recycle");
+            Check.Sequence([bigFile, bigFolder], mixed.PermanentPaths, "oversized items in mixed batch must go permanent");
+            Check.Equal(PermanentDeleteReason.TooLargeForRecycleBin, mixed.ConfirmationReason, "mixed batch must request TooLargeForRecycleBin confirmation");
+
+            DeletePlan unavailable = RecycleBins.PlanDelete([smallFile], false, null, CancellationToken.None, noBin);
+            Check.Sequence([smallFile], unavailable.PermanentPaths, "no-bin volume must go permanent");
+            Check.Equal(PermanentDeleteReason.NoRecycleBin, unavailable.ConfirmationReason, "no-bin reason expected");
+
+            DeletePlan explicitPerm = RecycleBins.PlanDelete([smallFile], true, null, CancellationToken.None, limit2000);
+            Check.Sequence([smallFile], explicitPerm.PermanentPaths, "Shift+Delete must go permanent");
+            Check.Equal(PermanentDeleteReason.UserRequested, explicitPerm.ConfirmationReason, "Shift+Delete reason expected");
+
+            DeletePlan cloudPlan = RecycleBins.PlanDelete([bigFolder], false, p => PathTools.IsSameOrInside(p, bigFolder), CancellationToken.None, limit2000);
+            Check.Sequence([bigFolder], cloudPlan.RecyclePaths, "cloud root must stay with shell Recycle Bin");
+            Check.Equal(0, cloudPlan.PermanentPaths.Count, "cloud root must not route to direct permanent delete");
+
+            string sibling = Fixtures.Write(root, "doc", new string('z', 4096));
+            string trailingDot = Path.Combine(root, "doc.");
+            Check.That(!RecycleBins.ExceedsCapacity(trailingDot, 2000, null, CancellationToken.None), "trailing-dot path must never measure sibling");
+            Check.That(File.Exists(sibling), "sibling must remain untouched");
+
+            string linkHost = Path.Combine(root, "link-host");
+            Directory.CreateDirectory(linkHost);
+            string junction = Path.Combine(linkHost, "to-big");
+            using (Process mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{bigFolder}\"") { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true })!)
+            {
+                mklink.WaitForExit();
+            }
+            Check.That(Directory.Exists(junction), "junction fixture was not created");
+            try
+            {
+                Check.That(!RecycleBins.ExceedsCapacity(junction, 2000, null, CancellationToken.None), "top-level junction must not follow target");
+                Check.That(!RecycleBins.ExceedsCapacity(linkHost, 2000, null, CancellationToken.None), "nested junction must not be entered during capacity check");
+            }
+            finally
+            {
+                if (Directory.Exists(junction)) Directory.Delete(junction);
+            }
+
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            bool cancelled = false;
+            try { RecycleBins.PlanDelete([bigFolder], false, null, cts.Token, limit2000); }
+            catch (OperationCanceledException) { cancelled = true; }
+            Check.That(cancelled, "user cancellation must abort delete planning");
+        });
     }
 
     private static FileEntry Entry(string name, EntryKind kind, long size) => new()

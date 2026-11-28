@@ -59,15 +59,26 @@ internal static class FileOperationDialogs
     }
 
     /// <summary>Asks before items are deleted for good. Returns true only when the user agreed.</summary>
-    public static async Task<bool> ConfirmPermanentDeleteAsync(XamlRoot root, ElementTheme theme, IReadOnlyList<string> paths, bool becauseNoRecycleBin)
+    public static async Task<bool> ConfirmPermanentDeleteAsync(
+        XamlRoot root,
+        ElementTheme theme,
+        IReadOnlyList<string> paths,
+        PermanentDeleteReason reason,
+        bool mixedWithRecycleBin = false)
     {
         string what = paths.Count == 1 ? $"\"{Path.GetFileName(paths[0].TrimEnd('\\'))}\"" : Loc.F("ItemCount", paths.Count);
+        string messageKey = reason switch
+        {
+            PermanentDeleteReason.NoRecycleBin => "DeleteNoRecycleBin",
+            PermanentDeleteReason.TooLargeForRecycleBin => mixedWithRecycleBin ? "DeleteTooLargeMixedForRecycleBin" : "DeleteTooLargeForRecycleBin",
+            _ => "DeleteForGoodText",
+        };
         var dialog = new ContentDialog
         {
             XamlRoot = root,
             RequestedTheme = theme,
             Title = Loc.T("DeleteForGoodTitle"),
-            Content = new TextBlock { Text = Loc.F(becauseNoRecycleBin ? "DeleteNoRecycleBin" : "DeleteForGoodText", what), TextWrapping = TextWrapping.Wrap },
+            Content = new TextBlock { Text = Loc.F(messageKey, what), TextWrapping = TextWrapping.Wrap },
             PrimaryButtonText = Loc.T("DeleteForGoodButton"),
             CloseButtonText = Loc.T("Cancel"),
             DefaultButton = ContentDialogButton.Close,
